@@ -104,7 +104,7 @@ class Observation:
 
         # Calculate the star flux density
         star_flux_density = self.system.star.spec_flux_density(
-            self.obs_wavelength, self.obs_time.decimalyear
+            self.obs_wavelength, self.obs_time
         ).to(
             u.photon / (u.m**2 * u.s * u.nm),
             equivalencies=u.spectral_density(self.obs_wavelength),
@@ -146,7 +146,7 @@ class Observation:
         planet_flux_density = np.zeros(len(self.system.planets)) * u.Jy
         for i, planet in enumerate(self.system.planets):
             planet_flux_density[i] += planet.spec_flux_density(
-                self.obs_wavelength, self.obs_time.decimalyear
+                self.obs_wavelength, self.obs_time
             )[0]
         planet_photon_flux = (
             planet_flux_density.to(
@@ -353,12 +353,9 @@ class Observation:
             # Save data cube of spatially dependent PSFs.
             np.save(path, psfs, allow_pickle=True)
 
-        try:
-            disk_image = self.system.disk.spec_flux_density(
-                self.obs_wavelength, self.obs_time.decimalyear
-            )
-        except:
-            breakpoint()
+        disk_image = self.system.disk.spec_flux_density(
+            self.obs_wavelength, self.obs_time
+        )
         disk_image_jy = disk_image.to(u.Jy).value
 
         # Rotate disk so that North is in the direction of the position angle.
