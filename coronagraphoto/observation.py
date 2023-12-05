@@ -5,8 +5,10 @@ import astropy.units as u
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
+import sparse
 from lod_unit.lod_unit import lod, lod_eq
 from matplotlib.colors import LogNorm
+from scipy.io import mmwrite
 from scipy.ndimage import rotate, shift, zoom
 from tqdm import tqdm
 
@@ -45,6 +47,8 @@ class Observation:
 
         # Create save directory
         self.save_dir = Path("results", system.file.stem, coronagraph.dir.parts[-1])
+
+        self.tolerance = 1e-50
 
         # Create the images
         self.create_count_rate_factor()
@@ -253,6 +257,7 @@ class Observation:
         )
         if path.exists():
             psfs = np.load(path, allow_pickle=True)
+
             print("Loaded data cube of spatially dependent PSFs")
 
         # Compute data cube of spatially dependent PSFs.
@@ -270,6 +275,10 @@ class Observation:
                 * self.coronagraph.pixel_scale
             )
 
+            import pyinstrument
+
+            profiler = pyinstrument.Profiler()
+            profiler.start()
             # lambda/D
             # xx, yy = np.meshgrid(ramp, ramp)
             x_lod, y_lod = np.meshgrid(pixel_lod, pixel_lod)
@@ -287,14 +296,17 @@ class Observation:
             # psfs = np.zeros(
             #     (rr.shape[0], rr.shape[1], self.img_pixels, self.img_pixels)
             # )
-            psfs = np.zeros(
-                (
-                    pixel_dist_lod.shape[0],
-                    pixel_dist_lod.shape[1],
-                    self.coronagraph.npixels,
-                    self.coronagraph.npixels,
-                )
+            psfs_shape = (
+                pixel_dist_lod.shape[0],
+                pixel_dist_lod.shape[1],
+                self.coronagraph.npixels,
+                self.coronagraph.npixels,
             )
+            psfs = np.zeros(psfs_shape)
+            # psfs = sparse.COO.from_numpy(psfs)
+            # psfs = sparse.COO([], [], shape=psfs_shape)
+            # sparse_coords = []
+            # sparse_vals = []
             # Npsfs = np.prod(rr.shape)
             npsfs = np.prod(pixel_dist_lod.shape)
 
@@ -302,6 +314,7 @@ class Observation:
 
             radially_symmetric_psf = "1d" in self.coronagraph.type
             # Get the PSF (npixel, npixel) of a source at every pixel
+
             for i in range(pixel_dist_lod.shape[0]):
                 for j in range(pixel_dist_lod.shape[1]):
                     # Basic structure here is to get the distance in lambda/D,
@@ -348,17 +361,26 @@ class Observation:
                             )
                         )
                     psfs[i, j] = temp
+                    # mask = temp > self.tolerance
+                    # psfs[i, j] = temp * mask
+                    # temp = temp * (temp > self.tolerance)
+                    # non_zero_indices = np.nonzero(temp)
+                    # non_zero_vals = temp[non_zero_indices]
+                    # for idx, val in zip(zip(*non_zero_indices), non_zero_vals):
+                    #     sparse_coords.append((i, j) + idx)
+                    #     sparse_vals.append(val)
+                    # coords = [(i, j) + idx for idx in zip(*non_zero_indices)]
                     pbar.update(1)
+            # sparse_psfs = sparse.COO(sparse_coords, sparse_vals, shape=psfs_shape)
+            profiler.stop()
+            profiler.open_in_browser()
 
             # Save data cube of spatially dependent PSFs.
             np.save(path, psfs, allow_pickle=True)
 
-        try:
-            disk_image = self.system.disk.spec_flux_density(
-                self.obs_wavelength, self.obs_time.decimalyear
-            )
-        except:
-            breakpoint()
+        disk_image = self.system.disk.spec_flux_density(
+            self.obs_wavelength, self.obs_time
+        )
         disk_image_jy = disk_image.to(u.Jy).value
 
         # Rotate disk so that North is in the direction of the position angle.
