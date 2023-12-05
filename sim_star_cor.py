@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import astropy.units as u
+import matplotlib.colors as colors
 import matplotlib.pyplot as plt
 import numpy as np
 from astropy.time import Time
@@ -64,14 +65,15 @@ obs_scen = {
     "diameter": 8 * u.m,
     "wavelength": wavelength,
     "time": time,
-    "exposure_time": 10 * 24 * u.hr,
+    "exposure_time": 2 * u.hr,
     "frame_time": 1 * u.hr,
-    "include_star": True,
+    "include_star": False,
     "include_planets": True,
-    "include_disk": True,
+    "include_disk": False,
     "return_spectrum": True,
     "bandpass": bandpass,
     "spectral_resolution": 100,
+    "do_snr_check": True,
     # "include_photon_noise": True,
 }
 observing_scenario = observing_scenario.ObservingScenario(obs_scen)
@@ -91,6 +93,9 @@ cdirs = [coronagraph_dir2, coronagraph_dir1]
 for cdir in cdirs:
     coro = coronagraph.Coronagraph(cdir)
     obs = observation.Observation(coro, system, observing_scenario)
+    obs.snr_check(np.arange(1, 100, 1) * u.hr)
+
+    plt.imshow(obs.image, norm=colors.LogNorm())
     breakpoint()
     # re.render(system, coro, observing_scenario, obs)
     plt.close("all")

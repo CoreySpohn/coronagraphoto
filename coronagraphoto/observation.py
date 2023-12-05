@@ -6,8 +6,11 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 import sparse
+from astropy.stats import SigmaClip
 from lod_unit.lod_unit import lod, lod_eq
-from matplotlib.colors import LogNorm
+from matplotlib.colors import LogNorm, Normalize
+from photutils.aperture import (ApertureStats, CircularAnnulus,
+                                CircularAperture, aperture_photometry)
 from scipy.io import mmwrite
 from scipy.ndimage import rotate, shift, zoom
 from tqdm import tqdm
@@ -44,6 +47,7 @@ class Observation:
         self.spectral_resolution = self.observing_scenario.scenario.get(
             "spectral_resolution"
         )
+        self.do_snr_check = self.observing_scenario.scenario.get("do_snr_check")
 
         # Create save directory
         self.save_dir = Path("results", system.file.stem, coronagraph.dir.parts[-1])
@@ -56,6 +60,8 @@ class Observation:
         # self.plot_count_rates()
         # if self.include_photon_noise:
         self.count_photons()
+        # if self.do_snr_check:
+        #     self.snr_check()
 
     def create_count_rate_factor(self):
         self.throughput = self.coronagraph.inst_thruput
@@ -108,7 +114,7 @@ class Observation:
 
         # Calculate the star flux density
         star_flux_density = self.system.star.spec_flux_density(
-            self.obs_wavelength, self.obs_time.decimalyear
+            self.obs_wavelength, self.obs_time
         ).to(
             u.photon / (u.m**2 * u.s * u.nm),
             equivalencies=u.spectral_density(self.obs_wavelength),
@@ -150,7 +156,7 @@ class Observation:
         planet_flux_density = np.zeros(len(self.system.planets)) * u.Jy
         for i, planet in enumerate(self.system.planets):
             planet_flux_density[i] += planet.spec_flux_density(
-                self.obs_wavelength, self.obs_time.decimalyear
+                self.obs_wavelength, self.obs_time
             )[0]
         planet_photon_flux = (
             planet_flux_density.to(
@@ -549,3 +555,101 @@ class Observation:
                     )
                 )
                 plt.close(fig)
+
+    def snr_check(self, times, noise_factor=0.5):
+        """
+        Check the SNR of the images
+        """
+        # Set up count rates for the Poisson noise as a fraction of the max
+        noise_count_rate = np.max(self.count_rates) * noise_factor
+        noise_field = np.ones_like(self.count_rates.value) * noise_count_rate
+
+        # Get the brightest pixel
+        bright_planet_loc = np.unravel_index(
+            np.argmax(self.count_rates), self.count_rates.shape
+        )[::-1]
+
+        # Set up a circular aperture at the bright planet location
+        aperture = CircularAperture(bright_planet_loc, r=4)
+
+        # Create an aperture mask
+        mask = aperture.to_mask(method="exact")
+
+        # aperture count rate
+        aperture_count_rate = np.sum(mask.multiply(self.count_rates))
+        background_count_rate = np.sum(mask.multiply(noise_field))
+        cp = aperture_count_rate
+        cb = background_count_rate
+
+        def analytic_snr(t):
+            return (cp * t / np.sqrt(cp * t + cb * t)).decompose().value
+
+        snrs = np.zeros_like(times.value)
+        analytic_snrs = np.zeros_like(times.value)
+        for i, t in enumerate(times):
+            self.exposure_time = t
+            self.count_photons()
+            expected_photons_per_frame = (
+                (noise_field * self.exposure_time).decompose().value
+            )
+            noise_frame = np.random.poisson(expected_photons_per_frame)
+            combined_image = self.image + noise_frame
+
+            # Get the aperture stats
+            aperture_stats = ApertureStats(combined_image, aperture, sigma_clip=None)
+
+            # Create an annulus aperture to compute the mean background level
+            annulus = CircularAnnulus(bright_planet_loc, r_in=8, r_out=15)
+
+            # Background statistics
+            sigma_clip = SigmaClip(sigma=3.0, maxiters=5)
+            bkg_stats = ApertureStats(combined_image, annulus, sigma_clip=sigma_clip)
+
+            # Get the background count in the circular aperture
+            bkg_total = bkg_stats.median * aperture.area
+
+            # Subtract the background count from the aperture count
+            bkg_subtracted_count = aperture_stats.sum - bkg_total
+
+            snrs[i] = bkg_subtracted_count / np.sqrt(aperture_stats.sum)
+            analytic_snrs[i] = analytic_snr(t)
+
+        fig, ax = plt.subplots()
+        cmap = mpl.cm.get_cmap("viridis")
+        ax.plot(times, analytic_snrs, label="Analytic SNR", color=cmap(0.2))
+        ax.scatter(times, snrs, label="Simulated SNR", color=cmap(0.7), zorder=10, s=10)
+        ax.set_xlabel("Exposure time (hr)")
+        ax.set_ylabel("SNR")
+        ax.legend(loc="best")
+        ax.set_title("Comparison of simulated and analytic SNR")
+        fig.savefig("results/snr_check.png", bbox_inches="tight", dpi=300)
+        plt.show()
+
+        # fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(8, 4))
+        # max_count = np.max(self.image)
+        # axes[0].imshow(
+        #     self.image, origin="lower", norm=Normalize(vmin=0, vmax=max_count)
+        # )
+        # p = axes[1].imshow(
+        #     combined_image, origin="lower", norm=Normalize(vmin=0, vmax=max_count)
+        # )
+        # axes[0].set_title("No noise")
+        # axes[1].set_title("With noise and aperture")
+        # aperture.plot(color="white", ax=axes[1])
+        # annulus.plot(color="red", ax=axes[1])
+        # fig.subplots_adjust(right=0.8)
+        # cax = fig.add_axes([0.85, 0.15, 0.02, 0.7])
+        # fig.colorbar(p, cax=cax, label="Photon count")
+        # fig.savefig("results/snr_check.png", bbox_inches="tight", dpi=300)
+        # fig.colorbar(p, ax=axes[1], label="Photon count")
+
+        # bkg_count = bkg_stats.median * aperture.area
+
+        # mean_background = aperstats.mean
+        # phot_table = aperture_photometry(combined_image, aperture)
+
+        # aper_stats_bkgsub = ApertureStats(
+        #     combined_image, aperture, local_bkg=bkg_stats.median
+        # )
+
+        # stats = ApertureStats(combined_image, aperture)
