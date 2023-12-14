@@ -42,9 +42,17 @@ class Observation:
         self.include_planets = self.observing_scenario.scenario.get("include_planets")
         self.include_disk = self.observing_scenario.scenario.get("include_disk")
         self.bandpass = self.observing_scenario.scenario.get("bandpass")
+        self.return_spectrum = True if self.bandpass is not None else False
         self.spectral_resolution = self.observing_scenario.scenario.get(
             "spectral_resolution"
         )
+        if self.return_spectrum:
+            wavelength_range = u.Quantity(
+                [self.bandpass.waveset[0], self.bandpass.waveset[-1]]
+            )
+            self.transmission = self.bandpass(
+                np.linspace(*wavelength_range, self.spectral_resolution)
+            )
         self.do_snr_check = self.observing_scenario.scenario.get("do_snr_check")
 
         # Create save directory
@@ -95,6 +103,21 @@ class Observation:
             self.add_planets_count_rate()
         if self.include_disk:
             self.add_disk_count_rate()
+
+        if self.return_spectrum:
+            self.spectral_count_rates = (
+                np.zeros(
+                    (
+                        self.spectral_resolution,
+                        self.coronagraph.npixels,
+                        self.coronagraph.npixels,
+                    )
+                )
+                * u.ph
+                / u.s
+            )
+            for i, transmission in enumerate(self.transmission):
+                self.spectral_count_rates[i] = self.count_rates * transmission
 
     def add_star_count_rate(self):
         """
@@ -445,13 +468,11 @@ class Observation:
         if partial_frame != 0:
             raise ("Warning! Partial frames are not implemented yet!")
         nframes = int(full_frames)
-        frame_counts = np.zeros(
-            (
-                nframes,
-                self.coronagraph.npixels,
-                self.coronagraph.npixels,
-            )
-        )
+        shape = [nframes]
+        if self.return_spectrum:
+            shape.append(self.spectral_resolution)
+        shape.extend([self.coronagraph.npixels, self.coronagraph.npixels])
+        frame_counts = np.zeros(tuple(shape))
         expected_photons_per_frame = (
             (self.count_rates * self.frame_time).decompose().value
         )
@@ -460,8 +481,11 @@ class Observation:
             desc="Adding photon noise",
         )
         for i in range(nframes):
-            frame = np.random.poisson(expected_photons_per_frame)
-            frame_counts[i] = frame
+            if self.return_spectrum:
+                frame = np.random.poisson(expected_photons_per_frame * self.bandpass)
+            else:
+                frame = np.random.poisson(expected_photons_per_frame)
+                frame_counts[i] = frame
             pbar.update(1)
         self.image = np.sum(frame_counts, axis=0)
         # return image
@@ -588,6 +612,7 @@ class Observation:
 
             snrs[i] = bkg_subtracted_count / np.sqrt(aperture_stats.sum)
             analytic_snrs[i] = analytic_snr(t)
+            breakpoint()
 
         fig, ax = plt.subplots()
         cmap = mpl.cm.get_cmap("viridis")

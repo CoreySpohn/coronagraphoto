@@ -70,7 +70,6 @@ obs_scen = {
     "include_star": False,
     "include_planets": True,
     "include_disk": False,
-    "return_spectrum": True,
     "bandpass": bandpass,
     "spectral_resolution": 100,
     "do_snr_check": True,
@@ -95,7 +94,7 @@ for cdir in cdirs:
     obs = observation.Observation(coro, system, observing_scenario)
     obs.snr_check(np.arange(1, 100, 1) * u.hr)
 
-    plt.imshow(obs.image, norm=colors.LogNorm())
     breakpoint()
+    plt.imshow(obs.image, norm=colors.LogNorm())
     # re.render(system, coro, observing_scenario, obs)
     plt.close("all")
