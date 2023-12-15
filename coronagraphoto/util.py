@@ -16,6 +16,45 @@ import numpy as np
 # =============================================================================
 
 
+def gen_wavelength_grid(bandpass, resolution):
+    """
+    Generates wavelengths that sample a Synphot bandpass at a given resolution.
+
+    This function calculates wavelengths within the specified bandpass range
+    such that each wavelength interval corresponds to a constant spectral resolution.
+    The spectral resolution is defined as R = λ/Δλ, where λ is the wavelength and Δλ
+    is the wavelength interval. The function iteratively adds these intervals starting
+    from the lower limit of the bandpass until it reaches or surpasses the upper limit.
+
+    Args:
+        bandpass (synphot.SpectralElement):
+            A synphot bandpass object with the "waveset" attribute that
+            indicates the wavelengths necessary to sample the bandpass.
+        resolution (float):
+            The desired constant spectral resolution (R).
+    Returns:
+        wavelengths (astropy.units.quantity.Quantity):
+            An array of wavelengths sampled across the bandpass at the
+            specified resolution.
+        delta_lambdas (astropy.units.quantity.Quantity):
+            An array of wavelength intervals that correspond to the
+            specified resolution.
+    """
+    first_wavelength = bandpass.waveset[0]
+    last_wavelength = bandpass.waveset[-1]
+    wavelengths = []
+    delta_lambdas = []
+    current_wavelength = first_wavelength
+    while current_wavelength < last_wavelength:
+        wavelengths.append(current_wavelength.value)
+        delta_lambda = current_wavelength / resolution
+        current_wavelength += delta_lambda
+        delta_lambdas.append(delta_lambda.value)
+    wavelengths = np.array(wavelengths) * first_wavelength.unit
+    delta_lambdas = np.array(delta_lambdas) * first_wavelength.unit
+    return wavelengths, delta_lambdas
+
+
 def tdot(im, kernel):
     t0 = time.time()
     im_conv = np.tensordot(im, kernel)
