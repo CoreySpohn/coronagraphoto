@@ -8,9 +8,11 @@ from lod_unit.lod_unit import lod
 from scipy.interpolate import RegularGridInterpolator, interp1d
 from scipy.ndimage import zoom
 
+from coronagraphoto.logger import logger
+
 
 class Coronagraph:
-    def __init__(self, dir, verbose=True):
+    def __init__(self, dir):
         """
         Args:
             dir (str):
@@ -40,9 +42,7 @@ class Coronagraph:
         ###################
         # Read input data #
         ###################
-        self.verbose = verbose
-        if self.verbose:
-            print("Initializing coronagraph...")
+        logger.info("Creating coronagraph")
 
         dir = Path(dir)
         self.name = dir.stem
@@ -100,13 +100,13 @@ class Coronagraph:
             )
 
             # self.offax_psf_base_angle = 90.0 * u.deg
-            print(f"Radially symmetric response --> rotating PSFs ({self.type})")
+            logger.info("Coronagraph is radially symmetric")
         elif (len(self.offax_psf_offset_y) == 1) and (
             self.offax_psf_offset_y[0] == 0 * lod
         ):
             self.type = "1d"
             # self.offax_psf_base_angle = 0.0 * u.deg
-            print(f"Radially symmetric response --> rotating PSFs ({self.type})")
+            logger.info("Coronagraph is radially symmetric")
         elif len(self.offax_psf_offset_x) == 1:
             # 1 dimensional with offset (e.g. no offset=0)
             self.type = "1dno0"
@@ -115,19 +115,22 @@ class Coronagraph:
                 self.offax_psf_offset_x,
             )
             # self.offax_psf_base_angle = 90.0 * u.deg
-            print(f"Radially symmetric response --> rotating PSFs ({self.type})")
+            logger.info("Coronagraph is radially symmetric")
         elif len(self.offax_psf_offset_y) == 1:
             self.type = "1dno0"
             # self.offax_psf_base_angle = 0.0 * u.deg
-            print(f"Radially symmetric response --> rotating PSFs ({self.type})")
+            logger.info("Coronagraph is radially symmetric")
         elif np.min(self.offax_psf_offset_list) >= 0 * lod:
             self.type = "2dq"
             # self.offax_psf_base_angle = 0.0 * u.deg
-            print(f"Quarterly symmetric response --> reflecting PSFs ({self.type})")
+            # logger.info(
+            #     f"Quarterly symmetric response --> reflecting PSFs ({self.type})"
+            # )
+            logger.info("Coronagraph is quarterly symmetric")
         else:
             self.type = "2df"
             # self.offax_psf_base_angle = 0.0 * u.deg
-            print(f"Full 2D response ({self.type})")
+            logger.info("Coronagraph response is full 2D")
 
         ############
         # Clean up #
@@ -239,20 +242,20 @@ class Coronagraph:
 
         # fractional obscuration
         self.frac_obscured = head["OBSCURED"]
-        print(f"Fractional obscuration = {self.frac_obscured:.3f}")
+        # print(f"Fractional obscuration = {self.frac_obscured:.3f}")
 
         # fractional bandpass
         self.frac_bandwidth = (head["MAXLAM"] - head["MINLAM"]) / head["LAMBDA"]
-        print(f"Fractional bandpass = {self.frac_bandwidth:.3f}")
+        # print(f"Fractional bandpass = {self.frac_bandwidth:.3f}")
 
         # instrument throughput
         # TODO: Why is this here if its hardcoded?
-        self.inst_thruput = 1.0
-        print(f"Instrument throughput = {self.inst_thruput:.3f}")
+        # self.inst_thruput = 1.0
+        # print(f"Instrument throughput = {self.inst_thruput:.3f}")
 
         # Calculate coronagraph throughput
-        self.coro_thruput = self.get_coro_thruput(plot=False)
-        print(f"Coronagraph throughput = {self.coro_thruput:.3f}")
+        # self.coro_thruput = self.get_coro_thruput(plot=False)
+        # print(f"Coronagraph throughput = {self.coro_thruput:.3f}")
 
     def get_coro_thruput(self, aperture_radius_lod=0.8, oversample=100, plot=True):
         """
