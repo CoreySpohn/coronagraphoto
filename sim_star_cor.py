@@ -28,15 +28,15 @@ obs_scen = {
     "diameter": 8 * u.m,
     "wavelength": wavelength,
     "time": time,
-    "exposure_time": 2 * u.hr,
+    "exposure_time": 48 * u.hr,
     "frame_time": 1 * u.hr,
     "include_star": True,
     "include_planets": True,
-    "include_disk": False,
+    "include_disk": True,
     "bandpass": bandpass,
     "spectral_resolution": 100,
-    "do_snr_check": True,
-    "return_spectrum": True,
+    "return_spectrum": False,
+    "separate_sources": False,
     "wavelength_resolved_flux": True,
     "wavelength_resolved_transmission": True
     # "include_photon_noise": True,
@@ -58,9 +58,9 @@ cdirs = [coronagraph_dir2, coronagraph_dir1]
 for cdir in cdirs:
     coro = coronagraph.Coronagraph(cdir)
     obs = observation.Observation(coro, system, observing_scenario)
+    breakpoint()
     obs.snr_check(np.arange(1, 100, 1) * u.hr)
 
-    breakpoint()
     plt.imshow(obs.image, norm=colors.LogNorm())
     # re.render(system, coro, observing_scenario, obs)
     plt.close("all")
