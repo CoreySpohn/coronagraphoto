@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import astropy.units as u
+import matplotlib as mpl
 import matplotlib.colors as colors
 import matplotlib.pyplot as plt
 import numpy as np
@@ -30,15 +31,15 @@ obs_scen = {
     "time": time,
     "exposure_time": 48 * u.hr,
     "frame_time": 1 * u.hr,
-    "include_star": True,
+    "include_star": False,
     "include_planets": True,
-    "include_disk": True,
+    "include_disk": False,
     "bandpass": bandpass,
     "spectral_resolution": 100,
     "return_spectrum": False,
     "separate_sources": False,
-    "wavelength_resolved_flux": True,
-    "wavelength_resolved_transmission": True
+    "wavelength_resolved_flux": False,
+    "wavelength_resolved_transmission": False
     # "include_photon_noise": True,
 }
 observing_scenario = observing_scenario.ObservingScenario(obs_scen)

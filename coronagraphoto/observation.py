@@ -368,12 +368,19 @@ class Observation:
             disk_dir.mkdir(parents=True, exist_ok=True)
         path = Path(
             disk_dir,
-            self.coronagraph.dir.name + ".npy",
+            self.coronagraph.dir.name + ".nc",
         )
+
+        coords = {
+            "x psf offset (pix)": np.arange(self.coronagraph.npixels),
+            "y psf offset (pix)": np.arange(self.coronagraph.npixels),
+            "x (pix)": np.arange(self.coronagraph.npixels),
+            "y (pix)": np.arange(self.coronagraph.npixels),
+        }
+        dims = ["x psf offset (pix)", "y psf offset (pix)", "x (pix)", "y (pix)"]
         if path.exists():
             logger.info("Loading data cube of spatially dependent PSFs, please hold...")
-            psfs = np.load(path, allow_pickle=True)
-
+            psfs_xr = xr.open_dataarray(path)
         else:
             logger.info(
                 "Calculating data cube of spatially dependent PSFs, please hold..."
@@ -461,8 +468,13 @@ class Observation:
                     pbar.update(1)
 
             # Save data cube of spatially dependent PSFs.
-            np.save(path, psfs, allow_pickle=True)
-        return psfs
+            psfs_xr = xr.DataArray(
+                psfs,
+                coords=coords,
+                dims=dims,
+            )
+            psfs_xr.to_netcdf(path)
+        return np.ascontiguousarray(psfs_xr)
 
     def gen_disk_count_rate(self, wavelength, time, bandwidth, psfs):
 
@@ -531,6 +543,7 @@ class Observation:
             scaled_disk = np.pad(scaled_disk, ((nn, nn), (nn, nn)), mode="edge")
 
         # count_rate = np.einsum("ij,ijkl->kl", scaled_disk, psfs) * u.ph / u.s
+        scaled_disk = np.ascontiguousarray(scaled_disk)
         count_rate = (
             nb_gen_disk_count_rate(scaled_disk, psfs, self.coronagraph.npixels)
             * u.ph
