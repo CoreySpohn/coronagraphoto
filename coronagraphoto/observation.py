@@ -46,6 +46,7 @@ class Observation:
         self.include_planets = self.observing_scenario.scenario.get("include_planets")
         self.include_disk = self.observing_scenario.scenario.get("include_disk")
         self.bandpass = self.observing_scenario.scenario.get("bandpass")
+        self.return_frames = self.observing_scenario.scenario.get("return_frames")
         self.return_spectrum = self.observing_scenario.scenario.get("return_spectrum")
         self.separate_sources = self.observing_scenario.scenario.get("separate_sources")
 
@@ -101,7 +102,7 @@ class Observation:
         self.create_count_rates()
 
         logger.info("Creating images")
-        self.image_xr = self.count_photons()
+        self.data = self.count_photons()
 
     def create_count_rates(self):
         """
@@ -183,6 +184,7 @@ class Observation:
                         zip(self.spectral_wavelength_grid, self.bandwidth),
                         desc="Generating count rate for each wavelength",
                         total=len(self.spectral_wavelength_grid),
+                        delay=0.5,
                     )
                 ):
                     object_count_rate[i] = count_rate_function(
@@ -414,7 +416,9 @@ class Observation:
             psfs = np.zeros(psfs_shape, dtype=np.float32)
             npsfs = np.prod(pixel_dist_lod.shape)
 
-            pbar = tqdm(total=npsfs, desc="Computing datacube of PSFs at every pixel")
+            pbar = tqdm(
+                total=npsfs, desc="Computing datacube of PSFs at every pixel", delay=0.5
+            )
 
             radially_symmetric_psf = "1d" in self.coronagraph.type
             # Get the PSF (npixel, npixel) of a source at every pixel
@@ -477,7 +481,6 @@ class Observation:
         return np.ascontiguousarray(psfs_xr)
 
     def gen_disk_count_rate(self, wavelength, time, bandwidth, psfs):
-
         disk_image = self.system.disk.spec_flux_density(wavelength, time)
 
         # Rotate disk so that North is in the direction of the position angle.
@@ -557,11 +560,18 @@ class Observation:
         collection of photons as a Poisson process
         """
 
-        partial_frame, full_frames = np.modf(
-            (self.exposure_time / self.frame_time).decompose().value
-        )
-        if partial_frame != 0:
-            raise ("Warning! Partial frames are not implemented yet!")
+        if self.return_frames:
+            partial_frame, full_frames = np.modf(
+                (self.exposure_time / self.frame_time).decompose().value
+            )
+            if partial_frame != 0:
+                raise ("Warning! Partial frames are not implemented yet!")
+            frame_time = self.frame_time
+        else:
+            # If we're not returning frames, we can simulate this as one frame
+            # one call due to its Poisson nature
+            full_frames = 1
+            frame_time = self.exposure_time
 
         # Setting up the proper shape of the array that counts the photons
         nframes = int(full_frames)
@@ -573,26 +583,26 @@ class Observation:
 
         # Calculate the expected number of photons per frame
         expected_photons_per_frame = (
-            (self.total_count_rate * self.frame_time).decompose().value
+            (self.total_count_rate * frame_time).decompose().value
         )
         if self.separate_sources:
             if self.include_star:
                 star_frame_counts = np.zeros(tuple(shape))
                 expected_star_photons_per_frame = (
-                    (self.star_count_rate * self.frame_time).decompose().value
+                    (self.star_count_rate * frame_time).decompose().value
                 )
             if self.include_planets:
                 planet_frame_counts = np.zeros(tuple(shape))
                 expected_planet_photons_per_frame = (
-                    (self.planet_count_rate * self.frame_time).decompose().value
+                    (self.planet_count_rate * frame_time).decompose().value
                 )
             if self.include_disk:
                 disk_frame_counts = np.zeros(tuple(shape))
                 expected_disk_photons_per_frame = (
-                    (self.disk_count_rate * self.frame_time).decompose().value
+                    (self.disk_count_rate * frame_time).decompose().value
                 )
 
-        for i in tqdm(range(nframes), desc="Simulating frames"):
+        for i in tqdm(range(nframes), desc="Simulating frames", delay=0.5):
             if self.any_wavelength_dependence:
                 for j, _ in enumerate(self.spectral_wavelength_grid):
                     if self.separate_sources:
@@ -653,6 +663,9 @@ class Observation:
             # Sum over the wavelength axis if we're not returning the spectrum
             # but we did calculate it
             obs_ds = obs_ds.sum(dim="wavelength (nm)")
+        if not self.return_frames:
+            # Sum over the frame axis if we're not returning the frames
+            obs_ds = obs_ds.sum(dim="frame")
 
         return obs_ds
 
