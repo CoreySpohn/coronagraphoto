@@ -8,6 +8,7 @@ import sys
 import time
 
 import astropy.io.fits as pyfits
+import astropy.units as u
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -50,8 +51,8 @@ def gen_wavelength_grid(bandpass, resolution):
         delta_lambda = current_wavelength / resolution
         current_wavelength += delta_lambda
         delta_lambdas.append(delta_lambda.value)
-    wavelengths = np.array(wavelengths) * first_wavelength.unit
-    delta_lambdas = np.array(delta_lambdas) * first_wavelength.unit
+    wavelengths = (np.array(wavelengths) * first_wavelength.unit).to(u.nm)
+    delta_lambdas = (np.array(delta_lambdas) * first_wavelength.unit).to(u.nm)
     return wavelengths, delta_lambdas
 
 
