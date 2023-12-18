@@ -32,24 +32,34 @@ class Observation:
         """
         self.coronagraph = coronagraph
         self.system = system
-        self.observing_scenario = observing_scenario
 
+        self.load_observing_scenario(observing_scenario)
+
+        # Create save directory
+        self.save_dir = Path("results", system.file.stem, coronagraph.dir.parts[-1])
+
+        # Flag to indicate whether the disk PSF datacube has been loaded
+        self.has_psf_datacube = False
+
+    def load_observing_scenario(self, observing_scenario):
+        self.observing_scenario = observing_scenario
         # Load observing scenario parameters
         self.diameter = self.observing_scenario.scenario["diameter"]
         self.obs_wavelength = self.observing_scenario.scenario["wavelength"]
         self.obs_time = self.observing_scenario.scenario["time"]
         self.exposure_time = self.observing_scenario.scenario["exposure_time"]
         self.frame_time = self.observing_scenario.scenario["frame_time"]
-        # self.frame_resolution = self.observing_scenario["frame_resolution"]
 
+        # Load observing scenario flags
         self.include_star = self.observing_scenario.scenario.get("include_star")
         self.include_planets = self.observing_scenario.scenario.get("include_planets")
         self.include_disk = self.observing_scenario.scenario.get("include_disk")
-        self.bandpass = self.observing_scenario.scenario.get("bandpass")
         self.return_frames = self.observing_scenario.scenario.get("return_frames")
         self.return_spectrum = self.observing_scenario.scenario.get("return_spectrum")
-        self.separate_sources = self.observing_scenario.scenario.get("separate_sources")
+        self.return_sources = self.observing_scenario.scenario.get("return_sources")
 
+        # Load observing scenario data
+        self.bandpass = self.observing_scenario.scenario.get("bandpass")
         self.spectral_resolution = self.observing_scenario.scenario.get(
             "spectral_resolution"
         )
@@ -62,7 +72,7 @@ class Observation:
         self.any_wavelength_dependence = (
             self.wavelength_resolved_flux or self.wavelength_resolved_transmission
         )
-
+        # Check inputs
         if self.return_spectrum:
             assert (
                 self.spectral_resolution is not None
@@ -72,7 +82,6 @@ class Observation:
                 "wavelength_resolved_transmission must be True "
                 "if return_spectrum is True"
             )
-
         # Create the wavelength grid and bandwidth
         if self.any_wavelength_dependence:
             logger.info("Creating wavelength grid")
@@ -89,25 +98,16 @@ class Observation:
         else:
             self.transmission = self.bandpass(self.obs_wavelength)
 
-        # Create save directory
-        self.save_dir = Path("results", system.file.stem, coronagraph.dir.parts[-1])
-
-        self.tolerance = 1e-50
-
+        # Solve for illuminated area
         self.illuminated_area = (
             np.pi * self.diameter**2 / 4.0 * (1.0 - self.coronagraph.frac_obscured)
         )
-
-        logger.info("Creating count rates")
-        self.create_count_rates()
-
-        logger.info("Creating images")
-        self.data = self.count_photons()
 
     def create_count_rates(self):
         """
         Create the images at the wavelengths and times
         """
+        logger.info("Creating count rates")
 
         shape = []
         if self.any_wavelength_dependence:
@@ -136,10 +136,11 @@ class Observation:
             logger.info("Not including planets")
 
         if self.include_disk:
-            psfs = self.get_disk_psfs()
+            if not self.has_psf_datacube:
+                self.psf_datacube = self.get_disk_psfs()
             logger.info("Creating disk count rate")
             self.disk_count_rate = self.generic_count_rate_logic(
-                self.gen_disk_count_rate, base_count_rate_arr, psfs
+                self.gen_disk_count_rate, base_count_rate_arr, self.psf_datacube
             )
             self.total_count_rate += self.disk_count_rate
         else:
@@ -194,8 +195,9 @@ class Observation:
                 # In this case, where we're only using the wavelength resolved
                 # transmission, we calculate and then copy the central
                 # count rates
+                central_bandwidth = self.bandwidth[len(self.bandwidth) // 2]
                 central_count_rate = count_rate_function(
-                    self.obs_wavelength, self.obs_time, self.bandwidth, *args
+                    self.obs_wavelength, self.obs_time, central_bandwidth, *args
                 )
                 for i, _ in enumerate(self.spectral_wavelength_grid):
                     object_count_rate[i] = central_count_rate
@@ -286,7 +288,7 @@ class Observation:
                 rotated_psfs[i] = np.exp(
                     rotate(
                         np.log(planet_psfs[i]),
-                        _angle,
+                        -_angle.to(u.deg).value,
                         reshape=False,
                         mode="nearest",
                         order=5,
@@ -398,7 +400,7 @@ class Observation:
                 * self.coronagraph.pixel_scale
             )
 
-            x_lod, y_lod = np.meshgrid(pixel_lod, pixel_lod)
+            x_lod, y_lod = np.meshgrid(pixel_lod, pixel_lod, indexing="xy")
 
             # lambda/D
             pixel_dist_lod = np.sqrt(x_lod**2 + y_lod**2)
@@ -423,6 +425,8 @@ class Observation:
             radially_symmetric_psf = "1d" in self.coronagraph.type
             # Get the PSF (npixel, npixel) of a source at every pixel
 
+            # Note: intention is that i value maps to x offset and j value maps
+            # to y offset
             for i in range(pixel_dist_lod.shape[0]):
                 for j in range(pixel_dist_lod.shape[1]):
                     # Basic structure here is to get the distance in lambda/D,
@@ -458,17 +462,56 @@ class Observation:
                         psf = self.coronagraph.offax_psf_interp(temp)[0]
 
                     if radially_symmetric_psf:
+                        # if rotate_angle < 0.0:
+                        #     rotate_angle += 2 * np.pi * u.rad
                         psf = self.coronagraph.ln_offax_psf_interp(psf_eval_dists)
                         temp = np.exp(
                             rotate(
                                 psf,
-                                rotate_angle,
+                                -rotate_angle.to(u.deg).value,
                                 reshape=False,
                                 mode="nearest",
                                 order=5,
                             )
                         )
                     psfs[i, j] = temp
+                    # if i == 10 and j == 100:
+                    #     # r1 = rotate(
+                    #     #     psf,
+                    #     #     -135,
+                    #     #     reshape=False,
+                    #     #     mode="nearest",
+                    #     #     order=5,
+                    #     # )
+                    #     # r2 = rotate(
+                    #     #     psf,
+                    #     #     -180,
+                    #     #     reshape=False,
+                    #     #     mode="nearest",
+                    #     #     order=5,
+                    #     # )
+                    #     # r3 = rotate(
+                    #     #     psf,
+                    #     #     -225,
+                    #     #     reshape=False,
+                    #     #     mode="nearest",
+                    #     #     order=5,
+                    #     # )
+
+                    #     fig, ax = plt.subplots(ncols=2)
+                    #     # ax[0].imshow(psf, origin="lower")
+                    #     # ax[1].imshow(r1, origin="lower")
+                    #     # ax[2].imshow(r2, origin="lower")
+                    #     # ax[3].imshow(r3, origin="lower")
+
+                    #     ax[0].imshow(psf, origin="lower")
+                    #     ax[1].imshow(temp, origin="lower")
+                    #     ax[1].scatter(j, i, color="red", marker="s")
+                    #     ax[1].set_title(
+                    #         f"Rotated by {-rotate_angle.to(u.deg).value:.2f}"
+                    #     )
+                    #     plt.show()
+                    #     breakpoint()
                     pbar.update(1)
 
             # Save data cube of spatially dependent PSFs.
@@ -478,28 +521,11 @@ class Observation:
                 dims=dims,
             )
             psfs_xr.to_netcdf(path)
+        self.has_psf_datacube = True
         return np.ascontiguousarray(psfs_xr)
 
     def gen_disk_count_rate(self, wavelength, time, bandwidth, psfs):
         disk_image = self.system.disk.spec_flux_density(wavelength, time)
-
-        # Rotate disk so that North is in the direction of the position angle.
-        # if self.coronagraph.position_angle != 0.0 * u.deg:
-        #     # interpolate in log-space to avoid negative values
-        #     disk_image = (
-        #         np.exp(
-        #             rotate(
-        #                 np.log(disk_image_jy),
-        #                 self.position_angle,
-        #                 axes=(3, 2),
-        #                 reshape=False,
-        #                 mode="nearest",
-        #                 order=5,
-        #             )
-        #         )
-        #         * u.Jy
-        #     )
-        #     disk_image_jy = disk_image.to(u.Jy).value
 
         # This is the factor to scale the disk image, from exovista, to the
         # coronagraph model size since they do not necessarily have the same
@@ -548,9 +574,7 @@ class Observation:
         # count_rate = np.einsum("ij,ijkl->kl", scaled_disk, psfs) * u.ph / u.s
         scaled_disk = np.ascontiguousarray(scaled_disk)
         count_rate = (
-            nb_gen_disk_count_rate(scaled_disk, psfs, self.coronagraph.npixels)
-            * u.ph
-            / u.s
+            nb_gen_disk_count_rate(scaled_disk, psfs, scaled_disk.shape[0]) * u.ph / u.s
         )
         return count_rate
 
@@ -559,6 +583,7 @@ class Observation:
         Split the exposure time into individual frames, then simulate the
         collection of photons as a Poisson process
         """
+        logger.info("Creating images")
 
         if self.return_frames:
             partial_frame, full_frames = np.modf(
@@ -585,7 +610,7 @@ class Observation:
         expected_photons_per_frame = (
             (self.total_count_rate * frame_time).decompose().value
         )
-        if self.separate_sources:
+        if self.return_sources:
             if self.include_star:
                 star_frame_counts = np.zeros(tuple(shape))
                 expected_star_photons_per_frame = (
@@ -605,7 +630,7 @@ class Observation:
         for i in tqdm(range(nframes), desc="Simulating frames", delay=0.5):
             if self.any_wavelength_dependence:
                 for j, _ in enumerate(self.spectral_wavelength_grid):
-                    if self.separate_sources:
+                    if self.return_sources:
                         if self.include_star:
                             star_frame_counts[i, j] = np.random.poisson(
                                 expected_star_photons_per_frame[j]
@@ -645,19 +670,19 @@ class Observation:
         dims.extend(["x (pix)", "y (pix)"])
         total_da = xr.DataArray(frame_counts, coords=da_coords, dims=dims)
 
-        all_das = {"total signal": total_da}
-        if self.separate_sources:
+        all_das = {"total": total_da}
+        if self.return_sources:
             if self.include_star:
                 star_da = xr.DataArray(star_frame_counts, coords=da_coords, dims=dims)
-                all_das["star signal"] = star_da
+                all_das["star"] = star_da
             if self.include_planets:
                 planet_da = xr.DataArray(
                     planet_frame_counts, coords=da_coords, dims=dims
                 )
-                all_das["planet signal"] = planet_da
+                all_das["planet"] = planet_da
             if self.include_disk:
                 disk_da = xr.DataArray(disk_frame_counts, coords=da_coords, dims=dims)
-                all_das["disk signal"] = disk_da
+                all_das["disk"] = disk_da
         obs_ds = xr.Dataset(all_das, coords=ds_coords)
         if self.any_wavelength_dependence and not self.return_spectrum:
             # Sum over the wavelength axis if we're not returning the spectrum
@@ -667,7 +692,8 @@ class Observation:
             # Sum over the frame axis if we're not returning the frames
             obs_ds = obs_ds.sum(dim="frame")
 
-        return obs_ds
+        self.data = obs_ds
+        # return obs_ds
 
     def plot_count_rates(self):
         """
@@ -791,7 +817,6 @@ class Observation:
 
             snrs[i] = bkg_subtracted_count / np.sqrt(aperture_stats.sum)
             analytic_snrs[i] = analytic_snr(t)
-            breakpoint()
 
         fig, ax = plt.subplots()
         cmap = mpl.cm.get_cmap("viridis")
@@ -842,12 +867,13 @@ def nb_gen_disk_count_rate(disk, psfs, npix):
     assert psfs.shape[1] == npix
     assert psfs.shape[2] == npix
     assert psfs.shape[3] == npix
-    res = np.empty((npix, npix), dtype=np.float32)
+    res = np.zeros((npix, npix), dtype=np.float32)
+    # tol = 1e-8
+    # disk_inds_to_skip = np.where(disk < tol)
     for i in nb.prange(npix):
         for j in range(npix):
-            pix_val = 0.0
-            for ii in range(npix):
-                for jj in range(npix):
-                    pix_val += disk[ii, jj] * psfs[i, j, ii, jj]
-            res[i, j] = pix_val
+            # i, j represent the offset of the PSF to be multiplied by the disk
+            # flux
+            res += np.multiply(disk, psfs[i, j])
+
     return res

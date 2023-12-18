@@ -1,3 +1,4 @@
+import datetime
 from pathlib import Path
 
 import astropy.units as u
@@ -25,7 +26,24 @@ bandpass = SpectralElement(
     stddev=frac_bandwidth * wavelength / np.sqrt(2 * np.pi),
 )
 
-obs_scen = {
+high_fid = {
+    "diameter": 8 * u.m,
+    "wavelength": wavelength,
+    "time": time,
+    "exposure_time": 48 * u.hr,
+    "frame_time": 1 * u.hr,
+    "include_star": True,
+    "include_planets": True,
+    "include_disk": True,
+    "bandpass": bandpass,
+    "spectral_resolution": 100,
+    "return_spectrum": True,
+    "return_frames": True,
+    "return_sources": True,
+    "wavelength_resolved_flux": True,
+    "wavelength_resolved_transmission": True,
+}
+med_fid = {
     "diameter": 8 * u.m,
     "wavelength": wavelength,
     "time": time,
@@ -38,13 +56,28 @@ obs_scen = {
     "spectral_resolution": 100,
     "return_spectrum": False,
     "return_frames": False,
-    "separate_sources": True,
-    "wavelength_resolved_flux": False,
-    "wavelength_resolved_transmission": False
-    # "include_photon_noise": True,
+    "return_sources": False,
+    "wavelength_resolved_flux": True,
+    "wavelength_resolved_transmission": True,
 }
-observing_scenario = observing_scenario.ObservingScenario(obs_scen)
-re = render_engine.RenderEngine()
+low_fid = {
+    "diameter": 8 * u.m,
+    "wavelength": wavelength,
+    "time": time,
+    "exposure_time": 48 * u.hr,
+    "include_star": True,
+    "include_planets": True,
+    "include_disk": True,
+    "bandpass": bandpass,
+    "return_spectrum": False,
+    "return_frames": False,
+    "return_sources": False,
+    "wavelength_resolved_flux": False,
+    "wavelength_resolved_transmission": False,
+}
+high_fid_scen = observing_scenario.ObservingScenario(high_fid)
+med_fid_scen = observing_scenario.ObservingScenario(med_fid)
+low_fid_scen = observing_scenario.ObservingScenario(low_fid)
 
 # Initialize coronagraph object.
 # Load ExoVista scene
@@ -59,10 +92,35 @@ cdirs = [coronagraph_dir2, coronagraph_dir1]
 # Loop over coronagraphs and simulate observations
 for cdir in cdirs:
     coro = coronagraph.Coronagraph(cdir)
-    obs = observation.Observation(coro, system, observing_scenario)
-    breakpoint()
+    obs = observation.Observation(coro, system, high_fid_scen)
+    # obs = observation.Observation(coro, system, med_fid_scen)
+    obs.create_count_rates()
+
+    start = datetime.datetime.now()
+    obs.create_count_rates()
+    obs.count_photons()
+    print(f"High fidelity: {datetime.datetime.now() - start}")
+
+    obs.load_observing_scenario(med_fid_scen)
+    start = datetime.datetime.now()
+    obs.create_count_rates()
+    obs.count_photons()
+    print(f"Medium fidelity: {datetime.datetime.now() - start}")
+
+    obs.load_observing_scenario(low_fid_scen)
+    start = datetime.datetime.now()
+    obs.create_count_rates()
+    obs.count_photons()
+    print(f"Low fidelity: {datetime.datetime.now() - start}")
+
+    plt.imshow(obs.data["total"], norm=colors.LogNorm(), origin="lower")
+    x_loc = obs.system.planets[4]._x_pix[0] - obs.system.star._x_pix[0]
+    y_loc = obs.system.planets[4]._y_pix[0] - obs.system.star._y_pix[0]
+    plt.scatter(y_loc.value, x_loc.value, marker="x", color="r")
+    plt.scatter(120, 120, marker="x", color="g")
+    plt.show()
+
     obs.snr_check(np.arange(1, 100, 1) * u.hr)
 
-    plt.imshow(obs.image, norm=colors.LogNorm())
     # re.render(system, coro, observing_scenario, obs)
     plt.close("all")
