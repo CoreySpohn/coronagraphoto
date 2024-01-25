@@ -875,5 +875,13 @@ def nb_gen_disk_count_rate(disk, psfs, npix):
             # i, j represent the offset of the PSF to be multiplied by the disk
             # flux
             res += np.multiply(disk, psfs[i, j])
+            # for ii in range(npix):
+            #     for jj in range(npix):
+            #         res[ii, jj] += disk[ii, jj] * current_psf[ii, jj]
+            # psf_val = current_psf[ii, jj]
+            # if psf_val:
+            #     disk_val = disk[ii, jj]
+            #     if disk_val:
+            #         res[ii, jj] += disk[ii, jj] * psf_val
 
     return res
