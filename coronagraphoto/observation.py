@@ -15,11 +15,11 @@ from scipy.ndimage import rotate, shift, zoom
 from tqdm import tqdm
 
 from coronagraphoto import util
-from coronagraphoto.logger import logger
+from coronagraphoto.logger import setup_logger
 
 
 class Observation:
-    def __init__(self, coronagraph, system, observing_scenario):
+    def __init__(self, coronagraph, system, observing_scenario, logging_level="INFO"):
         """Class to store the parameters of an observation.
         Args:
             coronagraph (Coronagraph object):
@@ -40,6 +40,7 @@ class Observation:
 
         # Flag to indicate whether the disk PSF datacube has been loaded
         self.has_psf_datacube = False
+        self.logger = setup_logger(logging_level)
 
     def load_observing_scenario(self, observing_scenario):
         self.observing_scenario = observing_scenario
@@ -84,7 +85,7 @@ class Observation:
             )
         # Create the wavelength grid and bandwidth
         if self.any_wavelength_dependence:
-            logger.info("Creating wavelength grid")
+            self.logger.info("Creating wavelength grid")
             (
                 self.spectral_wavelength_grid,
                 self.bandwidth,
@@ -107,7 +108,7 @@ class Observation:
         """
         Create the images at the wavelengths and times
         """
-        logger.info("Creating count rates")
+        self.logger.info("Creating count rates")
 
         shape = []
         if self.any_wavelength_dependence:
@@ -118,33 +119,33 @@ class Observation:
 
         base_count_rate_arr = np.zeros_like(self.total_count_rate.value) * u.ph / u.s
         if self.include_star:
-            logger.info("Creating star count rate")
+            self.logger.info("Creating star count rate")
             self.star_count_rate = self.generic_count_rate_logic(
                 self.gen_star_count_rate, base_count_rate_arr
             )
             self.total_count_rate += self.star_count_rate
         else:
-            logger.info("Not including star")
+            self.logger.info("Not including star")
 
         if self.include_planets:
-            logger.info("Creating planets count rate")
+            self.logger.info("Creating planets count rate")
             self.planet_count_rate = self.generic_count_rate_logic(
                 self.gen_planet_count_rate, base_count_rate_arr
             )
             self.total_count_rate += self.planet_count_rate
         else:
-            logger.info("Not including planets")
+            self.logger.info("Not including planets")
 
         if self.include_disk:
             if not self.has_psf_datacube:
                 self.psf_datacube = self.get_disk_psfs()
-            logger.info("Creating disk count rate")
+            self.logger.info("Creating disk count rate")
             self.disk_count_rate = self.generic_count_rate_logic(
                 self.gen_disk_count_rate, base_count_rate_arr, self.psf_datacube
             )
             self.total_count_rate += self.disk_count_rate
         else:
-            logger.info("Not including disk")
+            self.logger.info("Not including disk")
 
     def generic_count_rate_logic(self, count_rate_function, object_count_rate, *args):
         """
@@ -383,10 +384,12 @@ class Observation:
         }
         dims = ["x psf offset (pix)", "y psf offset (pix)", "x (pix)", "y (pix)"]
         if path.exists():
-            logger.info("Loading data cube of spatially dependent PSFs, please hold...")
+            self.logger.info(
+                "Loading data cube of spatially dependent PSFs, please hold..."
+            )
             psfs_xr = xr.open_dataarray(path)
         else:
-            logger.info(
+            self.logger.info(
                 "Calculating data cube of spatially dependent PSFs, please hold..."
             )
             # Compute pixel grid.
@@ -583,7 +586,7 @@ class Observation:
         Split the exposure time into individual frames, then simulate the
         collection of photons as a Poisson process
         """
-        logger.info("Creating images")
+        self.logger.info("Creating images")
 
         if self.return_frames:
             partial_frame, full_frames = np.modf(
