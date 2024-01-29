@@ -17,6 +17,8 @@ class ObservingScenario:
             "include_photon_noise": True,
             "return_spectrum": False,
             "bandpass": None,
+            "detector_shape": None,
+            "detector_pixel_scale": None,
         }
         self.scenario = default_scenario
         if scenario is not None:

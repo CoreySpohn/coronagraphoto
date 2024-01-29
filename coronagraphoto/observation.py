@@ -1,3 +1,4 @@
+import copy
 from pathlib import Path
 
 import astropy.units as u
@@ -7,7 +8,9 @@ import numba as nb
 import numpy as np
 import xarray as xr
 from astropy.stats import SigmaClip
-from lod_unit.lod_unit import lod, lod_eq
+from astropy.time import Time
+from exoverses.util import misc
+from lod_unit.lod_unit import lod, lod_eq, lod_eq_old
 from matplotlib.colors import LogNorm, Normalize
 from photutils.aperture import (ApertureStats, CircularAnnulus,
                                 CircularAperture, aperture_photometry)
@@ -32,6 +35,7 @@ class Observation:
         """
         self.coronagraph = coronagraph
         self.system = system
+        self.logger = setup_logger(logging_level)
 
         self.load_observing_scenario(observing_scenario)
 
@@ -40,7 +44,6 @@ class Observation:
 
         # Flag to indicate whether the disk PSF datacube has been loaded
         self.has_psf_datacube = False
-        self.logger = setup_logger(logging_level)
 
     def load_observing_scenario(self, observing_scenario):
         self.observing_scenario = observing_scenario
@@ -73,6 +76,11 @@ class Observation:
         self.any_wavelength_dependence = (
             self.wavelength_resolved_flux or self.wavelength_resolved_transmission
         )
+        self.detector_shape = self.observing_scenario.scenario.get("detector_shape")
+        self.detector_pixel_scale = self.observing_scenario.scenario.get(
+            "detector_pixel_scale"
+        )
+
         # Check inputs
         if self.return_spectrum:
             assert (
@@ -242,19 +250,46 @@ class Observation:
         Add planets to the system.
         """
         # Compute planet separations and position angles.
-        xyplanet = np.zeros((len(self.system.planets), 2)) * u.pixel
-        for i, planet in enumerate(self.system.planets):
-            planet_x = planet._x_pix_interp(time) * u.pixel
-            planet_y = planet._y_pix_interp(time) * u.pixel
-            xyplanet[i, 0] = planet_x
-            xyplanet[i, 1] = planet_y
+        # _xyplanet = np.zeros((len(self.system.planets), 2)) * u.pixel
+        # for i, planet in enumerate(self.system.planets):
+        #     planet_x = planet._x_pix_interp(time) * u.pixel
+        #     planet_y = planet._y_pix_interp(time) * u.pixel
+        #     _xyplanet[i, 0] = planet_x
+        #     _xyplanet[i, 1] = planet_y
 
-        star_x = self.system.star._x_pix_interp(time)
-        star_y = self.system.star._y_pix_interp(time)
-        xystar = np.array([star_x, star_y]) * u.pixel
+        # star_x = self.system.star._x_pix_interp(time)
+        # star_y = self.system.star._y_pix_interp(time)
+        # _xystar = np.array([star_x, star_y]) * u.pixel
+        # _planet_xy_separations = (_xyplanet - _xystar) * self.system.star.pixel_scale
+        prop_kwargs = {
+            "prop": "nbody",
+            "frame": "helio-sky",
+        }
+        orbit_dataset = self.system.propagate(time.reshape(1), **prop_kwargs)
+        xystar = np.array([self.coronagraph.npixels / 2] * 2) * u.pix
+        # pixscale = self.coronagraph.pixel_scale.to( u.arcsec / u.pixel, lod_eq(wavelength, self.diameter))
+        pixscale = (self.coronagraph.pixel_scale * u.pix).to(
+            u.arcsec, lod_eq(wavelength, self.diameter)
+        ) / u.pix
+        orbit_dataset = misc.add_units(
+            orbit_dataset,
+            u.pixel,
+            distance=self.system.star.dist,
+            pixel_scale=pixscale,
+            star_pixel=xystar,
+        )
+        pixel_data = orbit_dataset.sel(
+            time=time.datetime64, object="planet", **prop_kwargs
+        )[["x(pix)", "y(pix)"]]
+        xyplanet = (
+            np.stack(
+                [pixel_data["x(pix)"].values, pixel_data["y(pix)"].values], axis=-1
+            )
+            * u.pix
+        )
+        planet_xy_separations = (xyplanet - xystar) * pixscale
 
         # plan_offs
-        planet_xy_separations = (xyplanet - xystar) * self.system.star.pixel_scale
         planet_alphas = np.sqrt(np.sum(planet_xy_separations**2, axis=1))
         planet_angles = np.arctan2(
             planet_xy_separations[:, 1], planet_xy_separations[:, 0]
@@ -655,9 +690,16 @@ class Observation:
             else:
                 frame = np.random.poisson(expected_photons_per_frame)
                 frame_counts[i] = frame
+
+        if self.detector_shape is not None:
+            det_counts = self.convert_coro_to_detector(frame_counts)
+
         pixel_arr = np.arange(self.coronagraph.npixels)
+        det_dims = None
+        det_coords = None
 
         # Create the xarray to store images with the axes labeled
+
         frame_coords = np.arange(nframes)
         da_coords = [frame_coords]
         ds_coords = {"frame": frame_coords}
@@ -668,25 +710,67 @@ class Observation:
             dims.append("wavelength (nm)")
             ds_coords["wavelength (nm)"] = wavelength_coords
         da_coords.extend([pixel_arr, pixel_arr])
-        ds_coords["x (pix)"] = pixel_arr
-        ds_coords["y (pix)"] = pixel_arr
-        dims.extend(["x (pix)", "y (pix)"])
+        ds_coords["xpix (coro)"] = pixel_arr
+        ds_coords["ypix (coro)"] = pixel_arr
+        dims.extend(["xpix (coro)", "ypix (coro)"])
         total_da = xr.DataArray(frame_counts, coords=da_coords, dims=dims)
+        total_da.name = "total(coro)"
+        if self.detector_shape is not None:
+            detector_xpix_arr = np.arange(self.detector_shape[0])
+            detector_ypix_arr = np.arange(self.detector_shape[1])
+            det_dims = dims[:-2]
+            det_dims.extend(["xpix (det)", "ypix (det)"])
+            det_coords = da_coords[:-2]
+            det_coords.extend([detector_xpix_arr, detector_ypix_arr])
 
-        all_das = {"total": total_da}
+            # Convert det_counts to xarray.DataArray, ensuring it aligns with
+            # the existing coordinates
+            det_counts_da = xr.DataArray(det_counts, coords=det_coords, dims=det_dims)
+
+            # Add detector pixel coordinates to ds_coords
+            ds_coords["xpix (det)"] = detector_xpix_arr
+            ds_coords["ypix (det)"] = detector_ypix_arr
+
+            # Merge the coronagraph and detector dataarrays
+            det_counts_da.name = "total(det)"
+            total_da = xr.merge([total_da, det_counts_da])
+
         if self.return_sources:
             if self.include_star:
-                star_da = xr.DataArray(star_frame_counts, coords=da_coords, dims=dims)
-                all_das["star"] = star_da
-            if self.include_planets:
-                planet_da = xr.DataArray(
-                    planet_frame_counts, coords=da_coords, dims=dims
+                total_da = self.add_source_to_dataset(
+                    total_da,
+                    star_frame_counts,
+                    "star",
+                    da_coords,
+                    dims,
+                    det_coords,
+                    det_dims,
                 )
-                all_das["planet"] = planet_da
+            if self.include_planets:
+                total_da = self.add_source_to_dataset(
+                    total_da,
+                    planet_frame_counts,
+                    "planet",
+                    da_coords,
+                    dims,
+                    det_coords,
+                    det_dims,
+                )
             if self.include_disk:
-                disk_da = xr.DataArray(disk_frame_counts, coords=da_coords, dims=dims)
-                all_das["disk"] = disk_da
-        obs_ds = xr.Dataset(all_das, coords=ds_coords)
+                total_da = self.add_source_to_dataset(
+                    total_da,
+                    disk_frame_counts,
+                    "disk",
+                    da_coords,
+                    dims,
+                    det_coords,
+                    det_dims,
+                )
+        if type(total_da) == xr.core.dataarray.DataArray:
+            obs_ds = total_da.to_dataset()
+        else:
+            # Merge turns the da into a Dataset even though the name is confusing
+            obs_ds = total_da
         if self.any_wavelength_dependence and not self.return_spectrum:
             # Sum over the wavelength axis if we're not returning the spectrum
             # but we did calculate it
@@ -697,6 +781,63 @@ class Observation:
 
         self.data = obs_ds
         # return obs_ds
+
+    def add_source_to_dataset(
+        self,
+        total_da,
+        coro_counts,
+        source_name,
+        coro_coords,
+        coro_dims,
+        det_coords,
+        det_dims,
+    ):
+        """
+        Create and add source DataArrays for both coronagraph and detector to
+        the total dataset.
+
+        Args:
+            total_da (xarray.Dataset):
+                The dataset to which the source data will be added.
+            frame_counts (numpy.ndarray):
+                Frame counts for the source.
+            source_name (str):
+                Name of the source ('star', 'planet', 'disk').
+
+
+        Returns:
+            xarray.Dataset:
+                The updated dataset with the new source data.
+        """
+        # Coronagraph data
+        coro_da = xr.DataArray(coro_counts, coords=coro_coords, dims=coro_dims)
+        coro_da.name = f"{source_name}(coro)"
+        total_da = xr.merge([total_da, coro_da])
+
+        # Detector data
+        if self.detector_shape is not None:
+            counts_det = self.convert_coro_to_detector(coro_counts)
+            det_da = xr.DataArray(counts_det, coords=det_coords, dims=det_dims)
+            det_da.name = f"{source_name}(det)"
+            total_da = xr.merge([total_da, det_da])
+
+        return total_da
+
+    def convert_coro_to_detector(self, coro_counts):
+        # Scale the lambda/D pixels to the detector pixels
+        if self.any_wavelength_dependence:
+            lam = self.spectral_wavelength_grid
+        else:
+            lam = self.obs_wavelength
+        det_counts = util.get_detector_images(
+            coro_counts,
+            self.coronagraph.pixel_scale,
+            lam,
+            self.diameter,
+            self.detector_shape,
+            self.detector_pixel_scale,
+        )
+        return det_counts
 
     def plot_count_rates(self):
         """
