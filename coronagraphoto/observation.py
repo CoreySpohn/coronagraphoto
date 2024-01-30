@@ -80,6 +80,10 @@ class Observation:
         self.detector_pixel_scale = self.observing_scenario.scenario.get(
             "detector_pixel_scale"
         )
+        assert (self.detector_shape is not None) == (
+            self.detector_pixel_scale is not None
+        ), "Must provide both detector_shape and detector_pixel_scale or neither"
+        self.has_detector = self.detector_shape is not None
 
         # Check inputs
         if self.return_spectrum:
@@ -623,44 +627,30 @@ class Observation:
         """
         self.logger.info("Creating images")
 
-        if self.return_frames:
-            partial_frame, full_frames = np.modf(
-                (self.exposure_time / self.frame_time).decompose().value
-            )
-            if partial_frame != 0:
-                raise ("Warning! Partial frames are not implemented yet!")
-            frame_time = self.frame_time
-        else:
-            # If we're not returning frames, we can simulate this as one frame
-            # one call due to its Poisson nature
-            full_frames = 1
-            frame_time = self.exposure_time
+        nframes, frame_time = self.calc_frame_info()
+        coro_image_shape = self.get_coro_image_shape()
 
-        # Setting up the proper shape of the array that counts the photons
-        nframes = int(full_frames)
-        shape = [nframes]
-        if self.any_wavelength_dependence:
-            shape.append(len(self.spectral_wavelength_grid))
-        shape.extend([self.coronagraph.npixels, self.coronagraph.npixels])
-        frame_counts = np.zeros(tuple(shape))
+        frame_counts = np.zeros(coro_image_shape)
 
         # Calculate the expected number of photons per frame
         expected_photons_per_frame = (
             (self.total_count_rate * frame_time).decompose().value
         )
+        # Create the arrays to store the frame counts for each source
+        # if we're returning them
         if self.return_sources:
             if self.include_star:
-                star_frame_counts = np.zeros(tuple(shape))
+                star_frame_counts = np.zeros(coro_image_shape)
                 expected_star_photons_per_frame = (
                     (self.star_count_rate * frame_time).decompose().value
                 )
             if self.include_planets:
-                planet_frame_counts = np.zeros(tuple(shape))
+                planet_frame_counts = np.zeros(coro_image_shape)
                 expected_planet_photons_per_frame = (
                     (self.planet_count_rate * frame_time).decompose().value
                 )
             if self.include_disk:
-                disk_frame_counts = np.zeros(tuple(shape))
+                disk_frame_counts = np.zeros(coro_image_shape)
                 expected_disk_photons_per_frame = (
                     (self.disk_count_rate * frame_time).decompose().value
                 )
@@ -691,118 +681,59 @@ class Observation:
                 frame = np.random.poisson(expected_photons_per_frame)
                 frame_counts[i] = frame
 
-        if self.detector_shape is not None:
-            det_counts = self.convert_coro_to_detector(frame_counts)
+        coro_coords, coro_dims, det_coords, det_dims = self.coro_det_coords_and_dims()
+        args = (coro_coords, coro_dims, det_coords, det_dims)
 
-        pixel_arr = np.arange(self.coronagraph.npixels)
-        det_dims = None
-        det_coords = None
-
-        # Create the xarray to store images with the axes labeled
-
-        frame_coords = np.arange(nframes)
-        da_coords = [frame_coords]
-        ds_coords = {"frame": frame_coords}
-        dims = ["frame"]
-        if self.any_wavelength_dependence:
-            wavelength_coords = self.spectral_wavelength_grid.to(u.nm).value
-            da_coords.append(wavelength_coords)
-            dims.append("wavelength (nm)")
-            ds_coords["wavelength (nm)"] = wavelength_coords
-        da_coords.extend([pixel_arr, pixel_arr])
-        ds_coords["xpix (coro)"] = pixel_arr
-        ds_coords["ypix (coro)"] = pixel_arr
-        dims.extend(["xpix (coro)", "ypix (coro)"])
-        total_da = xr.DataArray(frame_counts, coords=da_coords, dims=dims)
-        total_da.name = "total(coro)"
-        if self.detector_shape is not None:
-            detector_xpix_arr = np.arange(self.detector_shape[0])
-            detector_ypix_arr = np.arange(self.detector_shape[1])
-            det_dims = dims[:-2]
-            det_dims.extend(["xpix (det)", "ypix (det)"])
-            det_coords = da_coords[:-2]
-            det_coords.extend([detector_xpix_arr, detector_ypix_arr])
-
-            # Convert det_counts to xarray.DataArray, ensuring it aligns with
-            # the existing coordinates
-            det_counts_da = xr.DataArray(det_counts, coords=det_coords, dims=det_dims)
-
-            # Add detector pixel coordinates to ds_coords
-            ds_coords["xpix (det)"] = detector_xpix_arr
-            ds_coords["ypix (det)"] = detector_ypix_arr
-
-            # Merge the coronagraph and detector dataarrays
-            det_counts_da.name = "total(det)"
-            total_da = xr.merge([total_da, det_counts_da])
+        coords_dict = {dim: coro_coords[i] for i, dim in enumerate(coro_dims)}
+        obs_ds = xr.Dataset(coords=coords_dict)
+        obs_ds = self.add_source_to_dataset(frame_counts, "img", obs_ds, *args)
 
         if self.return_sources:
             if self.include_star:
-                total_da = self.add_source_to_dataset(
-                    total_da,
-                    star_frame_counts,
-                    "star",
-                    da_coords,
-                    dims,
-                    det_coords,
-                    det_dims,
+                obs_ds = self.add_source_to_dataset(
+                    star_frame_counts, "star", obs_ds, *args
                 )
             if self.include_planets:
-                total_da = self.add_source_to_dataset(
-                    total_da,
-                    planet_frame_counts,
-                    "planet",
-                    da_coords,
-                    dims,
-                    det_coords,
-                    det_dims,
+                obs_ds = self.add_source_to_dataset(
+                    planet_frame_counts, "planet", obs_ds, *args
                 )
             if self.include_disk:
-                total_da = self.add_source_to_dataset(
-                    total_da,
-                    disk_frame_counts,
-                    "disk",
-                    da_coords,
-                    dims,
-                    det_coords,
-                    det_dims,
+                obs_ds = self.add_source_to_dataset(
+                    disk_frame_counts, "disk", obs_ds, *args
                 )
-        if type(total_da) == xr.core.dataarray.DataArray:
-            obs_ds = total_da.to_dataset()
-        else:
-            # Merge turns the da into a Dataset even though the name is confusing
-            obs_ds = total_da
         if self.any_wavelength_dependence and not self.return_spectrum:
             # Sum over the wavelength axis if we're not returning the spectrum
             # but we did calculate it
-            obs_ds = obs_ds.sum(dim="wavelength (nm)")
+            obs_ds = obs_ds.sum(dim="spectral_wavelength(nm)")
         if not self.return_frames:
             # Sum over the frame axis if we're not returning the frames
             obs_ds = obs_ds.sum(dim="frame")
 
-        self.data = obs_ds
-        # return obs_ds
+        # Add the time coordinate
+        obs_ds = obs_ds.expand_dims(
+            {
+                "time": self.obs_time.datetime64.reshape(1),
+                "central_wavelength(nm)": self.obs_wavelength.to(u.nm).value.reshape(1),
+            }
+        )
+        breakpoint()
+
+        return obs_ds
 
     def add_source_to_dataset(
-        self,
-        total_da,
-        coro_counts,
-        source_name,
-        coro_coords,
-        coro_dims,
-        det_coords,
-        det_dims,
+        self, coro_counts, source_name, ds, coro_coords, coro_dims, det_coords, det_dims
     ):
         """
         Create and add source DataArrays for both coronagraph and detector to
-        the total dataset.
+        the dataset.
 
         Args:
-            total_da (xarray.Dataset):
+            ds (xarray.Dataset):
                 The dataset to which the source data will be added.
             frame_counts (numpy.ndarray):
                 Frame counts for the source.
             source_name (str):
-                Name of the source ('star', 'planet', 'disk').
+                Name of the source ('img', 'star', 'planet', 'disk').
 
 
         Returns:
@@ -812,18 +743,217 @@ class Observation:
         # Coronagraph data
         coro_da = xr.DataArray(coro_counts, coords=coro_coords, dims=coro_dims)
         coro_da.name = f"{source_name}(coro)"
-        total_da = xr.merge([total_da, coro_da])
+        ds = xr.merge([ds, coro_da])
 
         # Detector data
         if self.detector_shape is not None:
             counts_det = self.convert_coro_to_detector(coro_counts)
             det_da = xr.DataArray(counts_det, coords=det_coords, dims=det_dims)
             det_da.name = f"{source_name}(det)"
-            total_da = xr.merge([total_da, det_da])
+            ds = xr.merge([ds, det_da])
 
-        return total_da
+        return ds
+
+    def get_coro_image_shape(self):
+        """
+        Get the shape of the coronagraph count/image pixel array. Depends
+        on whether we're calculating the wavelength dependence or not.
+
+        Returns:
+            coro_image_shape (tuple of ints):
+                The shape of the coronagraph count/image pixel array
+        """
+        nframes, _ = self.calc_frame_info()
+        coro_image_shape = [nframes]
+        if self.any_wavelength_dependence:
+            coro_image_shape.append(len(self.spectral_wavelength_grid))
+        coro_image_shape.extend([self.coronagraph.npixels, self.coronagraph.npixels])
+        return tuple(coro_image_shape)
+
+    def calc_frame_info(self):
+        """
+        Calculate the number of frames and the length of each individual frame
+        in the exposure
+
+        Returns:
+            nframes (int):
+                Number of frames
+            frame_time (astropy.units.Quantity):
+                Length of time per frame
+        """
+        if self.return_frames:
+            partial_frame, full_frames = np.modf(
+                (self.exposure_time / self.frame_time).decompose().value
+            )
+            if partial_frame != 0:
+                raise ("Warning! Partial frames are not implemented yet!")
+            frame_time = self.frame_time
+        else:
+            # If we're not returning frames, we can simulate this as one frame
+            # one call due to its Poisson nature
+            full_frames = 1
+            frame_time = self.exposure_time
+
+        # Setting up the proper shape of the array that counts the photons
+        nframes = int(full_frames)
+        return nframes, frame_time
+
+    def create_coords_and_dims(self):
+        """
+        Create the coordinates and dimensions for the image dataset.
+
+        Returns:
+            coro_coords (list of np.arrays):
+                Coronagraph data coordinates (the arrays of valid values)
+            coro_dims (list of strs):
+                Coronagraph data dimensions (the names of the coordinates)
+            det_coords (list of np.arrays):
+                Detector data coordinates (the arrays of valid values)
+            det_dims (list of strs):
+                Coronagraph data dimensions (the names of the coordinates)
+            final_coords (list of np.arrays):
+                The data coordinates in the final photon Dataset of count_photons()
+            final_dims (list of strs):
+                The data dimensions in the final photon Dataset of count_photons()
+        """
+        # Get the number of frames
+        nframes, _ = self.calc_frame_info()
+        coro_pixel_arr = np.arange(self.coronagraph.npixels)
+
+        # Set up the coordinates and dimensions for the returned Dataset
+        final_coords = [
+            self.obs_time.datetime64.reshape(1),
+            self.obs_wavelength.to(u.nm).value.reshape(1),
+            coro_pixel_arr,
+            coro_pixel_arr,
+        ]
+        final_dims = ["time", "central_wavelength(nm)", "xpix(coro)", "ypix(coro)"]
+        wavelength_ind = 2
+        if self.return_frames:
+            final_coords.insert(2, np.arange(nframes))
+            final_dims.insert(2, "frame")
+            wavelength_ind += 1
+        if self.return_spectrum:
+            final_coords.insert(
+                wavelength_ind, self.spectral_wavelength_grid.to(u.nm).value
+            )
+            final_dims.insert(wavelength_ind, "spectral_wavelength(nm)")
+
+        # Coronagraph coordinates and dimensions
+        coro_coords = [np.arange(nframes), coro_pixel_arr, coro_pixel_arr]
+        coro_dims = ["frame", "xpix(coro)", "ypix(coro)"]
+        if self.any_wavelength_dependence:
+            # Add the wavelength coordinates and dimensions if necessary
+            wavelength_coords = self.spectral_wavelength_grid.to(u.nm).value
+            coro_coords.insert(1, wavelength_coords)
+            coro_dims.insert(1, "spectral_wavelength(nm)")
+
+        # All coordinates and dimensions
+        if self.has_detector:
+            # Detector coordinates and dimensions
+            detector_xpix_arr = np.arange(self.detector_shape[0])
+            detector_ypix_arr = np.arange(self.detector_shape[1])
+            det_coords = coro_coords[:-2] + [detector_xpix_arr, detector_ypix_arr]
+            det_dims = coro_dims[:-2] + ["xpix(det)", "ypix(det)"]
+
+            final_coords += [detector_xpix_arr, detector_ypix_arr]
+            final_dims += ["xpix(det)", "ypix(det)"]
+        else:
+            det_coords, det_dims = None, None
+
+        return coro_coords, coro_dims, det_coords, det_dims, final_coords, final_dims
+
+    def coro_det_coords_and_dims(self):
+        """
+        Create the coordinates and dimensions for the coronagraph and detector
+        data.
+
+        Returns:
+            coro_coords (list of np.arrays):
+                Coronagraph data coordinates.
+            coro_dims (list of strs):
+                Coronagraph data dimensions.
+            det_coords (list of np.arrays):
+                Detector data coordinates.
+            det_dims (list of strs):
+                Detector data dimensions.
+        """
+        nframes, _ = self.calc_frame_info()
+        coro_pixel_arr = np.arange(self.coronagraph.npixels)
+
+        # Coronagraph coordinates and dimensions
+        coro_coords = [np.arange(nframes), coro_pixel_arr, coro_pixel_arr]
+        coro_dims = ["frame", "xpix(coro)", "ypix(coro)"]
+        if self.any_wavelength_dependence:
+            wavelength_coords = self.spectral_wavelength_grid.to(u.nm).value
+            coro_coords.insert(1, wavelength_coords)
+            coro_dims.insert(1, "spectral_wavelength(nm)")
+
+        # Detector coordinates and dimensions
+        if self.has_detector:
+            detector_xpix_arr = np.arange(self.detector_shape[0])
+            detector_ypix_arr = np.arange(self.detector_shape[1])
+            det_coords = [detector_xpix_arr, detector_ypix_arr]
+            det_dims = ["xpix(det)", "ypix(det)"]
+        else:
+            det_coords, det_dims = None, None
+
+        return coro_coords, coro_dims, det_coords, det_dims
+
+    def final_coords_and_dims(self):
+        """
+        Create the coordinates and dimensions for the final photon dataset.
+
+        Returns:
+            final_coords (list of np.arrays):
+                Coordinates for the final dataset.
+            final_dims (list of strs):
+                Dimensions for the final dataset.
+        """
+        nframes, _ = self.calc_frame_info()
+        coro_pixel_arr = np.arange(self.coronagraph.npixels)
+
+        # Set up the coordinates and dimensions for the final dataset
+        final_coords = [
+            self.obs_time.datetime64.reshape(1),
+            self.obs_wavelength.to(u.nm).value.reshape(1),
+            coro_pixel_arr,
+            coro_pixel_arr,
+        ]
+        final_dims = ["time", "central_wavelength(nm)", "xpix(coro)", "ypix(coro)"]
+        wavelength_ind = 2
+
+        if self.return_frames:
+            final_coords.insert(2, np.arange(nframes))
+            final_dims.insert(2, "frame")
+            wavelength_ind += 1
+
+        if self.return_spectrum:
+            final_coords.insert(
+                wavelength_ind, self.spectral_wavelength_grid.to(u.nm).value
+            )
+            final_dims.insert(wavelength_ind, "spectral_wavelength(nm)")
+
+        if self.has_detector:
+            detector_xpix_arr = np.arange(self.detector_shape[0])
+            detector_ypix_arr = np.arange(self.detector_shape[1])
+            final_coords += [detector_xpix_arr, detector_ypix_arr]
+            final_dims += ["xpix(det)", "ypix(det)"]
+
+        return final_coords, final_dims
 
     def convert_coro_to_detector(self, coro_counts):
+        """
+        Convert coronagraph pixel data to the detector pixels
+
+        Args:
+            coro_counts (numpy.ndarray):
+                The count/image data in coronagraph pixels (lam/D)
+
+        Returns:
+            det_counts (numpy.ndarray):
+                The count/image data scaled to the detector pixels (arcsec)
+        """
         # Scale the lambda/D pixels to the detector pixels
         if self.any_wavelength_dependence:
             lam = self.spectral_wavelength_grid

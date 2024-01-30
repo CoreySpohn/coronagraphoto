@@ -144,7 +144,7 @@ def resample_single_image(image, lod_scale, wavelength, diam, det_shape, det_sca
     zoom_factor = (lod_scale_in_arcsec / det_scale).decompose().value
 
     # Resample (zoom) the image based on the calculated zoom factor
-    scaled_image = zoom(image, zoom_factor, order=3)
+    scaled_image = zoom(image, zoom_factor, mode="nearest", order=5)
 
     # Calculate how much the resampled image needs to be cropped or padded
     # to match the desired detector shape
