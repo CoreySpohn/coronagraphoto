@@ -1,5 +1,9 @@
+from itertools import combinations
+from pathlib import PurePath
+
 import astropy.units as u
 import numpy as np
+from astropy.time import Time
 from lod_unit import lod, lod_eq
 from scipy.ndimage import zoom
 
@@ -284,3 +288,95 @@ def get_detector_images(lod_arr, lod_scale, lam, D, det_shape, det_scale):
             )
 
     return final_images
+
+
+def find_distinguishing_attributes(*observations):
+    """
+    Finds and returns the attributes that distinguish each given Observation
+    instance from the others.
+
+    This function compares each Observation instance against all others and
+    identifies the unique attributes that set each instance apart. An attribute
+    is considered unique for an instance if it differs from the same attribute
+    in all other instances.
+
+    Args:
+        *observations:
+            An arbitrary number of Observation instances.
+
+    Returns:
+        distinguishing_attrs (dict):
+            A dictionary where each key is an Observation instance and the
+            value is a dictionary of attributes that uniquely identify this
+            instance among the provided instances.
+    """
+    # Whitelist of attributes to ignore
+    whitelist = [
+        "system",
+        "coronagraph",
+        "observing_scenario",
+        "bandpass",
+        "star_count_rate",
+        "planet_count_rate",
+        "disk_count_rate",
+        "illuminated_area",
+        "transmission",
+        "bandwidth",
+        "bandpass_model",
+    ]
+    whitelisted_types = []
+
+    # Dictionary to hold distinguishing attributes for each observation
+    distinguishing_attrs = {obs: {} for obs in observations}
+    attr_names = set()
+    attr_values = {}
+
+    # Identify attributes that differ between any two observations
+    differing_attrs = set()
+    for obs1, obs2 in combinations(observations, 2):
+        for attr in obs1.__dict__:
+            if attr in whitelist or type(getattr(obs1, attr)) in whitelisted_types:
+                continue
+            elif isinstance(getattr(obs1, attr), PurePath):
+                continue
+            if getattr(obs1, attr) != getattr(obs2, attr):
+                differing_attrs.add(attr)
+
+    # Evaluate combinations of differing attributes for uniqueness
+    for r in range(1, len(differing_attrs) + 1):
+        for attr_combination in combinations(differing_attrs, r):
+            for obs in observations:
+                if is_unique_combination(obs, attr_combination, observations):
+                    for attr in attr_combination:
+                        distinguishing_attrs[obs][attr] = getattr(obs, attr)
+                        attr_names.add(attr)
+                        if attr not in attr_values:
+                            attr_values[attr] = set()
+                        attr_values[attr].add(getattr(obs, attr))
+
+    for attr, values in attr_values.items():
+        sorted_values = sorted(values)
+        if type(sorted_values[0]) == u.Quantity:
+            replacement = u.Quantity(sorted_values)
+        elif type(sorted_values[0]) == Time:
+            replacement = Time(sorted_values).datetime64
+        elif type(sorted_values[0]) == str:
+            replacement = sorted_values
+        else:
+            raise NotImplementedError("Add support for this type")
+        attr_values[attr] = replacement
+
+    return distinguishing_attrs, list(attr_names), attr_values
+
+
+def is_unique_combination(obs, attr_combination, all_observations):
+    """
+    Check if a combination of attributes is unique for an observation.
+    """
+    for other_obs in all_observations:
+        if other_obs != obs and all(
+            getattr(other_obs, attr, None) == getattr(obs, attr, None)
+            for attr in attr_combination
+        ):
+            return False
+    return True

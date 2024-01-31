@@ -15,6 +15,7 @@ from matplotlib.colors import LogNorm, Normalize
 from photutils.aperture import (ApertureStats, CircularAnnulus,
                                 CircularAperture, aperture_photometry)
 from scipy.ndimage import rotate, shift, zoom
+from synphot import SpectralElement
 from tqdm import tqdm
 
 from coronagraphoto import util
@@ -34,7 +35,9 @@ class Observation:
 
         """
         self.coronagraph = coronagraph
+        self.coronagraph_name = coronagraph.name
         self.system = system
+        self.system_name = system.star.name
         self.logger = setup_logger(logging_level)
 
         self.load_observing_scenario(observing_scenario)
@@ -49,8 +52,8 @@ class Observation:
         self.observing_scenario = observing_scenario
         # Load observing scenario parameters
         self.diameter = self.observing_scenario.scenario["diameter"]
-        self.obs_wavelength = self.observing_scenario.scenario["wavelength"]
-        self.obs_time = self.observing_scenario.scenario["time"]
+        self.central_wavelength = self.observing_scenario.scenario["central_wavelength"]
+        self.time = self.observing_scenario.scenario["time"]
         self.exposure_time = self.observing_scenario.scenario["exposure_time"]
         self.frame_time = self.observing_scenario.scenario["frame_time"]
 
@@ -64,6 +67,18 @@ class Observation:
 
         # Load observing scenario data
         self.bandpass = self.observing_scenario.scenario.get("bandpass")
+        if self.bandpass is None:
+            self.bandpass_model = self.observing_scenario.scenario.get("bandpass_model")
+            self.frac_bandwidth = self.observing_scenario.scenario.get("frac_bandwidth")
+            self.bandpass = SpectralElement(
+                self.bandpass_model,
+                mean=self.central_wavelength,
+                stddev=self.frac_bandwidth
+                * self.central_wavelength
+                / np.sqrt(2 * np.pi),
+            )
+
+        self.bandpass_model = str(self.bandpass.model)
         self.spectral_resolution = self.observing_scenario.scenario.get(
             "spectral_resolution"
         )
@@ -109,7 +124,7 @@ class Observation:
         if self.wavelength_resolved_transmission:
             self.transmission = self.bandpass(self.spectral_wavelength_grid)
         else:
-            self.transmission = self.bandpass(self.obs_wavelength)
+            self.transmission = self.bandpass(self.central_wavelength)
 
         # Solve for illuminated area
         self.illuminated_area = (
@@ -202,7 +217,7 @@ class Observation:
                     )
                 ):
                     object_count_rate[i] = count_rate_function(
-                        _wavelength, self.obs_time, _bandwidth, *args
+                        _wavelength, self.time, _bandwidth, *args
                     )
             else:
                 # In this case, where we're only using the wavelength resolved
@@ -210,7 +225,7 @@ class Observation:
                 # count rates
                 central_bandwidth = self.bandwidth[len(self.bandwidth) // 2]
                 central_count_rate = count_rate_function(
-                    self.obs_wavelength, self.obs_time, central_bandwidth, *args
+                    self.central_wavelength, self.time, central_bandwidth, *args
                 )
                 for i, _ in enumerate(self.spectral_wavelength_grid):
                     object_count_rate[i] = central_count_rate
@@ -218,7 +233,7 @@ class Observation:
             object_count_rate = np.multiply(self.transmission, object_count_rate.T).T
         else:
             object_count_rate = count_rate_function(
-                self.obs_wavelength, self.obs_time, self.bandwidth, *args
+                self.central_wavelength, self.time, self.bandwidth, *args
             )
             object_count_rate *= self.transmission
         return object_count_rate
@@ -267,9 +282,10 @@ class Observation:
         # _planet_xy_separations = (_xyplanet - _xystar) * self.system.star.pixel_scale
         prop_kwargs = {
             "prop": "nbody",
-            "frame": "helio-sky",
+            "ref_frame": "helio-sky",
+            "t0": self.system.star._t[0],
         }
-        orbit_dataset = self.system.propagate(time.reshape(1), **prop_kwargs)
+        orbit_dataset = self.system.propagate(time, **prop_kwargs)
         xystar = np.array([self.coronagraph.npixels / 2] * 2) * u.pix
         # pixscale = self.coronagraph.pixel_scale.to( u.arcsec / u.pixel, lod_eq(wavelength, self.diameter))
         pixscale = (self.coronagraph.pixel_scale * u.pix).to(
@@ -282,9 +298,10 @@ class Observation:
             pixel_scale=pixscale,
             star_pixel=xystar,
         )
-        pixel_data = orbit_dataset.sel(
-            time=time.datetime64, object="planet", **prop_kwargs
-        )[["x(pix)", "y(pix)"]]
+        prop_kwargs.pop("t0")
+        pixel_data = orbit_dataset.sel(object="planet", **prop_kwargs)[
+            ["x(pix)", "y(pix)"]
+        ]
         xyplanet = (
             np.stack(
                 [pixel_data["x(pix)"].values, pixel_data["y(pix)"].values], axis=-1
@@ -709,14 +726,15 @@ class Observation:
             # Sum over the frame axis if we're not returning the frames
             obs_ds = obs_ds.sum(dim="frame")
 
-        # Add the time coordinate
-        obs_ds = obs_ds.expand_dims(
-            {
-                "time": self.obs_time.datetime64.reshape(1),
-                "central_wavelength(nm)": self.obs_wavelength.to(u.nm).value.reshape(1),
-            }
-        )
-        breakpoint()
+        # # Add the time coordinate
+        # obs_ds = obs_ds.expand_dims(
+        #     {
+        #         "time": self.time.datetime64.reshape(1),
+        #         "central_wavelength(nm)": self.central_wavelength.to(
+        #             u.nm
+        #         ).value.reshape(1),
+        #     }
+        # )
 
         return obs_ds
 
@@ -798,70 +816,70 @@ class Observation:
         nframes = int(full_frames)
         return nframes, frame_time
 
-    def create_coords_and_dims(self):
-        """
-        Create the coordinates and dimensions for the image dataset.
+    # def create_coords_and_dims(self):
+    #     """
+    #     Create the coordinates and dimensions for the image dataset.
 
-        Returns:
-            coro_coords (list of np.arrays):
-                Coronagraph data coordinates (the arrays of valid values)
-            coro_dims (list of strs):
-                Coronagraph data dimensions (the names of the coordinates)
-            det_coords (list of np.arrays):
-                Detector data coordinates (the arrays of valid values)
-            det_dims (list of strs):
-                Coronagraph data dimensions (the names of the coordinates)
-            final_coords (list of np.arrays):
-                The data coordinates in the final photon Dataset of count_photons()
-            final_dims (list of strs):
-                The data dimensions in the final photon Dataset of count_photons()
-        """
-        # Get the number of frames
-        nframes, _ = self.calc_frame_info()
-        coro_pixel_arr = np.arange(self.coronagraph.npixels)
+    #     Returns:
+    #         coro_coords (list of np.arrays):
+    #             Coronagraph data coordinates (the arrays of valid values)
+    #         coro_dims (list of strs):
+    #             Coronagraph data dimensions (the names of the coordinates)
+    #         det_coords (list of np.arrays):
+    #             Detector data coordinates (the arrays of valid values)
+    #         det_dims (list of strs):
+    #             Coronagraph data dimensions (the names of the coordinates)
+    #         final_coords (list of np.arrays):
+    #             The data coordinates in the final photon Dataset of count_photons()
+    #         final_dims (list of strs):
+    #             The data dimensions in the final photon Dataset of count_photons()
+    #     """
+    #     # Get the number of frames
+    #     nframes, _ = self.calc_frame_info()
+    #     coro_pixel_arr = np.arange(self.coronagraph.npixels)
 
-        # Set up the coordinates and dimensions for the returned Dataset
-        final_coords = [
-            self.obs_time.datetime64.reshape(1),
-            self.obs_wavelength.to(u.nm).value.reshape(1),
-            coro_pixel_arr,
-            coro_pixel_arr,
-        ]
-        final_dims = ["time", "central_wavelength(nm)", "xpix(coro)", "ypix(coro)"]
-        wavelength_ind = 2
-        if self.return_frames:
-            final_coords.insert(2, np.arange(nframes))
-            final_dims.insert(2, "frame")
-            wavelength_ind += 1
-        if self.return_spectrum:
-            final_coords.insert(
-                wavelength_ind, self.spectral_wavelength_grid.to(u.nm).value
-            )
-            final_dims.insert(wavelength_ind, "spectral_wavelength(nm)")
+    #     # Set up the coordinates and dimensions for the returned Dataset
+    #     final_coords = [
+    #         self.time.datetime64.reshape(1),
+    #         self.central_wavelength.to(u.nm).value.reshape(1),
+    #         coro_pixel_arr,
+    #         coro_pixel_arr,
+    #     ]
+    #     final_dims = ["time", "central_wavelength(nm)", "xpix(coro)", "ypix(coro)"]
+    #     wavelength_ind = 2
+    #     if self.return_frames:
+    #         final_coords.insert(2, np.arange(nframes))
+    #         final_dims.insert(2, "frame")
+    #         wavelength_ind += 1
+    #     if self.return_spectrum:
+    #         final_coords.insert(
+    #             wavelength_ind, self.spectral_wavelength_grid.to(u.nm).value
+    #         )
+    #         final_dims.insert(wavelength_ind, "spectral_wavelength(nm)")
 
-        # Coronagraph coordinates and dimensions
-        coro_coords = [np.arange(nframes), coro_pixel_arr, coro_pixel_arr]
-        coro_dims = ["frame", "xpix(coro)", "ypix(coro)"]
-        if self.any_wavelength_dependence:
-            # Add the wavelength coordinates and dimensions if necessary
-            wavelength_coords = self.spectral_wavelength_grid.to(u.nm).value
-            coro_coords.insert(1, wavelength_coords)
-            coro_dims.insert(1, "spectral_wavelength(nm)")
+    #     # Coronagraph coordinates and dimensions
+    #     coro_coords = [np.arange(nframes), coro_pixel_arr, coro_pixel_arr]
+    #     coro_dims = ["frame", "xpix(coro)", "ypix(coro)"]
+    #     if self.any_wavelength_dependence:
+    #         # Add the wavelength coordinates and dimensions if necessary
+    #         wavelength_coords = self.spectral_wavelength_grid.to(u.nm).value
+    #         coro_coords.insert(1, wavelength_coords)
+    #         coro_dims.insert(1, "spectral_wavelength(nm)")
 
-        # All coordinates and dimensions
-        if self.has_detector:
-            # Detector coordinates and dimensions
-            detector_xpix_arr = np.arange(self.detector_shape[0])
-            detector_ypix_arr = np.arange(self.detector_shape[1])
-            det_coords = coro_coords[:-2] + [detector_xpix_arr, detector_ypix_arr]
-            det_dims = coro_dims[:-2] + ["xpix(det)", "ypix(det)"]
+    #     # All coordinates and dimensions
+    #     if self.has_detector:
+    #         # Detector coordinates and dimensions
+    #         detector_xpix_arr = np.arange(self.detector_shape[0])
+    #         detector_ypix_arr = np.arange(self.detector_shape[1])
+    #         det_coords = coro_coords[:-2] + [detector_xpix_arr, detector_ypix_arr]
+    #         det_dims = coro_dims[:-2] + ["xpix(det)", "ypix(det)"]
 
-            final_coords += [detector_xpix_arr, detector_ypix_arr]
-            final_dims += ["xpix(det)", "ypix(det)"]
-        else:
-            det_coords, det_dims = None, None
+    #         final_coords += [detector_xpix_arr, detector_ypix_arr]
+    #         final_dims += ["xpix(det)", "ypix(det)"]
+    #     else:
+    #         det_coords, det_dims = None, None
 
-        return coro_coords, coro_dims, det_coords, det_dims, final_coords, final_dims
+    #     return coro_coords, coro_dims, det_coords, det_dims, final_coords, final_dims
 
     def coro_det_coords_and_dims(self):
         """
@@ -893,8 +911,8 @@ class Observation:
         if self.has_detector:
             detector_xpix_arr = np.arange(self.detector_shape[0])
             detector_ypix_arr = np.arange(self.detector_shape[1])
-            det_coords = [detector_xpix_arr, detector_ypix_arr]
-            det_dims = ["xpix(det)", "ypix(det)"]
+            det_coords = coro_coords[:-2] + [detector_xpix_arr, detector_ypix_arr]
+            det_dims = coro_dims[:-2] + ["xpix(det)", "ypix(det)"]
         else:
             det_coords, det_dims = None, None
 
@@ -914,18 +932,13 @@ class Observation:
         coro_pixel_arr = np.arange(self.coronagraph.npixels)
 
         # Set up the coordinates and dimensions for the final dataset
-        final_coords = [
-            self.obs_time.datetime64.reshape(1),
-            self.obs_wavelength.to(u.nm).value.reshape(1),
-            coro_pixel_arr,
-            coro_pixel_arr,
-        ]
-        final_dims = ["time", "central_wavelength(nm)", "xpix(coro)", "ypix(coro)"]
-        wavelength_ind = 2
+        final_coords = [coro_pixel_arr, coro_pixel_arr]
+        final_dims = ["xpix(coro)", "ypix(coro)"]
+        wavelength_ind = 0
 
         if self.return_frames:
-            final_coords.insert(2, np.arange(nframes))
-            final_dims.insert(2, "frame")
+            final_coords.insert(0, np.arange(nframes))
+            final_dims.insert(0, "frame")
             wavelength_ind += 1
 
         if self.return_spectrum:
@@ -958,7 +971,7 @@ class Observation:
         if self.any_wavelength_dependence:
             lam = self.spectral_wavelength_grid
         else:
-            lam = self.obs_wavelength
+            lam = self.central_wavelength
         det_counts = util.get_detector_images(
             coro_counts,
             self.coronagraph.pixel_scale,
@@ -976,7 +989,7 @@ class Observation:
         min_val = np.min(self.total_count_rate.value * 1e-5)
         max_val = np.max(self.total_count_rate.value)
         norm = LogNorm(vmin=min_val, vmax=max_val)
-        for i, time in enumerate(self.obs_times):
+        for i, time in enumerate(self.times):
             for j, wavelength in enumerate(self.obs_wavelengths):
                 fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(8, 8))
                 data = [
