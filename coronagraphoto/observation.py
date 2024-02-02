@@ -695,8 +695,25 @@ class Observation:
                         frame = np.random.poisson(expected_photons_per_frame[j])
                         frame_counts[i, j] = frame
             else:
-                frame = np.random.poisson(expected_photons_per_frame)
-                frame_counts[i] = frame
+                if self.return_sources:
+                    if self.include_star:
+                        star_frame_counts[i] = np.random.poisson(
+                            expected_star_photons_per_frame
+                        )
+                        frame_counts[i] += star_frame_counts[i]
+                    if self.include_planets:
+                        planet_frame_counts[i] = np.random.poisson(
+                            expected_planet_photons_per_frame
+                        )
+                        frame_counts[i] += planet_frame_counts[i]
+                    if self.include_disk:
+                        disk_frame_counts[i] = np.random.poisson(
+                            expected_disk_photons_per_frame
+                        )
+                        frame_counts[i] += disk_frame_counts[i]
+                else:
+                    frame = np.random.poisson(expected_photons_per_frame)
+                    frame_counts[i] = frame
 
         coro_coords, coro_dims, det_coords, det_dims = self.coro_det_coords_and_dims()
         args = (coro_coords, coro_dims, det_coords, det_dims)
@@ -725,16 +742,6 @@ class Observation:
         if not self.return_frames:
             # Sum over the frame axis if we're not returning the frames
             obs_ds = obs_ds.sum(dim="frame")
-
-        # # Add the time coordinate
-        # obs_ds = obs_ds.expand_dims(
-        #     {
-        #         "time": self.time.datetime64.reshape(1),
-        #         "central_wavelength(nm)": self.central_wavelength.to(
-        #             u.nm
-        #         ).value.reshape(1),
-        #     }
-        # )
 
         return obs_ds
 

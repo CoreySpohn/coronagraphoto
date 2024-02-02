@@ -323,6 +323,7 @@ def find_distinguishing_attributes(*observations):
         "transmission",
         "bandwidth",
         "bandpass_model",
+        "psf_datacube",
     ]
     whitelisted_types = []
 

@@ -1,4 +1,5 @@
 import copy
+import sys
 from itertools import product
 from pathlib import Path
 
@@ -18,7 +19,7 @@ import coronagraphoto.util as util
 
 class Observations:
     def __init__(self, base_observation, times, central_wavelengths):
-        """Class to generate multipl observations.
+        """Class to generate multiple observations.
         Args:
             base_observation (Observation object):
                 Observation object with default parameters.
@@ -57,7 +58,6 @@ class Observations:
             final_coords, _ = _obs.final_coords_and_dims()
             for coord, dim in zip(final_coords, unique_dims):
                 unique_coords[dim].update(coord)
-            # observations.append(_obs)
 
         for dim in unique_dims:
             unique_coords[dim] = np.array(sorted(unique_coords[dim]))
@@ -118,17 +118,31 @@ class Observations:
 
     def create_observations(self):
         observations = []
-        labeled_observations = {}
         all_scenarios = list(product(self.times, self.central_wavelengths))
 
         # Loop through all scenarios and create the observation then get the unique
         # coordinates for each dimension
         for time, wavelength in all_scenarios:
-            _obs = copy.deepcopy(self.base_observation)
-            _obs_scenario = copy.deepcopy(self.base_obs_scenario)
-            _obs_scenario.scenario["time"] = time
-            _obs_scenario.scenario["central_wavelength"] = wavelength
-            _obs.load_observing_scenario(_obs_scenario)
-            observations.append(_obs)
-            labeled_observations[(_obs.time, _obs.central_wavelength)] = _obs
+            obs = copy.copy(self.base_observation)
+
+            # Manually assign the shared "system" and "coronagraph" attributes
+            # so that memory doesn't explode for large numbers of observations
+            obs.system = self.base_observation.system
+            obs.coronagraph = self.base_observation.coronagraph
+
+            # Adjust observation scenario
+            obs_scenario = copy.deepcopy(self.base_obs_scenario)
+            obs_scenario.scenario["time"] = time
+            obs_scenario.scenario["central_wavelength"] = wavelength
+            obs.load_observing_scenario(obs_scenario)
+
+            observations.append(obs)
+
+        if self.base_observation.observing_scenario.scenario["include_disk"]:
+            # Create the psf datacube and then share it among the observations
+            psfs = self.base_observation.get_disk_psfs()
+            for obs in observations:
+                obs.psf_datacube = psfs
+                obs.has_psf_datacube = True
+
         return observations
