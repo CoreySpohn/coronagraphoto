@@ -10,7 +10,7 @@ import xarray as xr
 from astropy.stats import SigmaClip
 from astropy.time import Time
 from exoverses.util import misc
-from lod_unit.lod_unit import lod, lod_eq, lod_eq_old
+from lod_unit.lod_unit import lod, lod_eq
 from matplotlib.colors import LogNorm, Normalize
 from photutils.aperture import (ApertureStats, CircularAnnulus,
                                 CircularAperture, aperture_photometry)
@@ -64,6 +64,11 @@ class Observation:
         self.return_frames = self.observing_scenario.scenario.get("return_frames")
         self.return_spectrum = self.observing_scenario.scenario.get("return_spectrum")
         self.return_sources = self.observing_scenario.scenario.get("return_sources")
+        self.static_during_exposure = self.observing_scenario.scenario.get(
+            "static_during_exposure"
+        )
+        if not self.static_during_exposure:
+            *_, self.frame_start_times = self.calc_frame_info()
 
         # Load observing scenario data
         self.bandpass = self.observing_scenario.scenario.get("bandpass")
@@ -140,6 +145,9 @@ class Observation:
         shape = []
         if self.any_wavelength_dependence:
             shape.append(len(self.spectral_wavelength_grid))
+        if not self.static_during_exposure:
+            nframes, _, _ = self.calc_frame_info()
+            shape.append(nframes)
         shape.extend([self.coronagraph.npixels, self.coronagraph.npixels])
 
         self.total_count_rate = np.zeros(tuple(shape)) * u.ph / u.s
@@ -216,26 +224,56 @@ class Observation:
                         delay=0.5,
                     )
                 ):
-                    object_count_rate[i] = count_rate_function(
-                        _wavelength, self.time, _bandwidth, *args
-                    )
+                    if self.static_during_exposure:
+                        object_count_rate[i] = count_rate_function(
+                            _wavelength, self.time, _bandwidth, *args
+                        )
+                    else:
+                        for j, frame_start_time in enumerate(self.frame_start_times):
+                            object_count_rate[i, j] = count_rate_function(
+                                _wavelength, frame_start_time, _bandwidth, *args
+                            )
+
             else:
                 # In this case, where we're only using the wavelength resolved
                 # transmission, we calculate and then copy the central
                 # count rates
                 central_bandwidth = self.bandwidth[len(self.bandwidth) // 2]
-                central_count_rate = count_rate_function(
-                    self.central_wavelength, self.time, central_bandwidth, *args
-                )
-                for i, _ in enumerate(self.spectral_wavelength_grid):
-                    object_count_rate[i] = central_count_rate
+                if self.static_during_exposure:
+                    central_count_rate = count_rate_function(
+                        self.central_wavelength, self.time, central_bandwidth, *args
+                    )
+                    for i, _ in enumerate(self.spectral_wavelength_grid):
+                        object_count_rate[i] = central_count_rate
+                else:
+                    for j, frame_start_time in enumerate(self.frame_start_times):
+                        central_count_rate = count_rate_function(
+                            self.central_wavelength,
+                            frame_start_time,
+                            central_bandwidth,
+                            *args,
+                        )
+                        for i, _ in enumerate(self.spectral_wavelength_grid):
+                            object_count_rate[i, j] = central_count_rate
 
             object_count_rate = np.multiply(self.transmission, object_count_rate.T).T
         else:
-            object_count_rate = count_rate_function(
-                self.central_wavelength, self.time, self.bandwidth, *args
-            )
-            object_count_rate *= self.transmission
+            if self.static_during_exposure:
+                object_count_rate = count_rate_function(
+                    self.central_wavelength, self.time, self.bandwidth, *args
+                )
+                object_count_rate *= self.transmission
+            else:
+                for j, frame_start_time in enumerate(self.frame_start_times):
+                    object_count_rate[j] = (
+                        count_rate_function(
+                            self.central_wavelength,
+                            frame_start_time,
+                            self.bandwidth,
+                            *args,
+                        )
+                        * self.transmission
+                    )
         return object_count_rate
 
     def gen_star_count_rate(self, wavelength, time, bandwidth):
@@ -805,6 +843,8 @@ class Observation:
                 Number of frames
             frame_time (astropy.units.Quantity):
                 Length of time per frame
+            frame_start_times (astropy Time array):
+                The start times of each frame
         """
         if self.return_frames:
             partial_frame, full_frames = np.modf(
@@ -818,10 +858,19 @@ class Observation:
             # one call due to its Poisson nature
             full_frames = 1
             frame_time = self.exposure_time
+        frame_start_times = Time(
+            np.arange(
+                self.time.jd,
+                self.time.jd + self.exposure_time.to(u.d).value,
+                frame_time.to(u.d).value,
+            ),
+            format="jd",
+        )
+        # frame_start_times = np.arange( self.time, self.time + self.exposure_time, frame_time)
 
         # Setting up the proper shape of the array that counts the photons
         nframes = int(full_frames)
-        return nframes, frame_time
+        return nframes, frame_time, frame_start_times
 
     # def create_coords_and_dims(self):
     #     """

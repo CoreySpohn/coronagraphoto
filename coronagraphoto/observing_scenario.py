@@ -19,6 +19,7 @@ class ObservingScenario:
             "bandpass": None,
             "detector_shape": None,
             "detector_pixel_scale": None,
+            "static_during_exposure": True,
         }
         self.scenario = default_scenario
         if scenario is not None:

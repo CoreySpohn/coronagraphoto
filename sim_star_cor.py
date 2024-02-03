@@ -8,12 +8,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 from astropy.time import Time
 from exoverses.exovista.system import ExovistaSystem
-from synphot import Observation, SourceSpectrum, SpectralElement
+from synphot import SourceSpectrum, SpectralElement
 from synphot.models import (BlackBodyNorm1D, Box1D, Empirical1D, Gaussian1D,
                             GaussianFlux1D)
 
-from coronagraphoto import (coronagraph, observation, observations,
-                            observing_scenario, render_engine)
+from coronagraphoto import (Coronagraph, Observation, Observations,
+                            ObservingScenario)
 
 # Input files
 scene = Path("input/scenes/999-HIP_-TYC_SUN-mv_4.83-L_1.00-d_10.00-Teff_5778.00.fits")
@@ -28,56 +28,57 @@ bandpass = SpectralElement(
 
 high_fid = {
     "diameter": 8 * u.m,
-    "wavelength": wavelength,
+    "central_wavelength": wavelength,
     "time": time,
     "exposure_time": 48 * u.hr,
-    "frame_time": 1 * u.hr,
-    "include_star": True,
+    "frame_time": 24 * u.hr,
+    "include_star": False,
     "include_planets": True,
-    "include_disk": True,
+    "include_disk": False,
     "bandpass": bandpass,
     "spectral_resolution": 100,
-    "return_spectrum": True,
+    # "return_spectrum": True,
     "return_frames": True,
-    "return_sources": True,
-    "wavelength_resolved_flux": True,
-    "wavelength_resolved_transmission": True,
+    # "return_sources": True,
+    # "wavelength_resolved_flux": True,
+    # "wavelength_resolved_transmission": True,
+    "static_during_exposure": False,
 }
-med_fid = {
-    "diameter": 8 * u.m,
-    "wavelength": wavelength,
-    "time": time,
-    "exposure_time": 48 * u.hr,
-    "frame_time": 1 * u.hr,
-    "include_star": True,
-    "include_planets": True,
-    "include_disk": True,
-    "bandpass": bandpass,
-    "spectral_resolution": 100,
-    "return_spectrum": False,
-    "return_frames": False,
-    "return_sources": False,
-    "wavelength_resolved_flux": True,
-    "wavelength_resolved_transmission": True,
-}
-low_fid = {
-    "diameter": 8 * u.m,
-    "wavelength": wavelength,
-    "time": time,
-    "exposure_time": 48 * u.hr,
-    "include_star": True,
-    "include_planets": True,
-    "include_disk": True,
-    "bandpass": bandpass,
-    "return_spectrum": False,
-    "return_frames": False,
-    "return_sources": False,
-    "wavelength_resolved_flux": False,
-    "wavelength_resolved_transmission": False,
-}
-high_fid_scen = observing_scenario.ObservingScenario(high_fid)
-med_fid_scen = observing_scenario.ObservingScenario(med_fid)
-low_fid_scen = observing_scenario.ObservingScenario(low_fid)
+# med_fid = {
+#     "diameter": 8 * u.m,
+#     "wavelength": wavelength,
+#     "time": time,
+#     "exposure_time": 48 * u.hr,
+#     "frame_time": 1 * u.hr,
+#     "include_star": True,
+#     "include_planets": True,
+#     "include_disk": True,
+#     "bandpass": bandpass,
+#     "spectral_resolution": 100,
+#     "return_spectrum": False,
+#     "return_frames": False,
+#     "return_sources": False,
+#     "wavelength_resolved_flux": True,
+#     "wavelength_resolved_transmission": True,
+# }
+# low_fid = {
+#     "diameter": 8 * u.m,
+#     "wavelength": wavelength,
+#     "time": time,
+#     "exposure_time": 48 * u.hr,
+#     "include_star": True,
+#     "include_planets": True,
+#     "include_disk": True,
+#     "bandpass": bandpass,
+#     "return_spectrum": False,
+#     "return_frames": False,
+#     "return_sources": False,
+#     "wavelength_resolved_flux": False,
+#     "wavelength_resolved_transmission": False,
+# }
+high_fid_scen = ObservingScenario(high_fid)
+# med_fid_scen = ObservingScenario(med_fid)
+# low_fid_scen = ObservingScenario(low_fid)
 
 # Initialize coronagraph object.
 # Load ExoVista scene
@@ -91,10 +92,11 @@ cdirs = [coronagraph_dir2, coronagraph_dir1]
 
 # Loop over coronagraphs and simulate observations
 for cdir in cdirs:
-    coro = coronagraph.Coronagraph(cdir)
-    obs = observation.Observation(coro, system, high_fid_scen)
+    coro = Coronagraph(cdir)
+    obs = Observation(coro, system, high_fid_scen)
     # obs = observation.Observation(coro, system, med_fid_scen)
     obs.create_count_rates()
+    breakpoint()
 
     start = datetime.datetime.now()
     obs.create_count_rates()
