@@ -42,11 +42,21 @@ class Observations:
             observations = self.create_observations()
 
         # Start by getting the dimensions for the final Dataset
-        unique_dims = set()
+        # unique_dims = set()
+        # for _obs in observations:
+        #     _, final_dims = _obs.final_coords_and_dims()
+        #     unique_dims.update(final_dims)
+        # unique_dims = list(unique_dims)
+        # To track what's been added
+        unique_dims_set = set()
+        # To maintain order
+        unique_dims = []
         for _obs in observations:
             _, final_dims = _obs.final_coords_and_dims()
-            unique_dims.update(final_dims)
-        unique_dims = list(unique_dims)
+            for dim in final_dims:
+                if dim not in unique_dims_set:
+                    unique_dims_set.add(dim)
+                    unique_dims.append(dim)
 
         # Create a dictionary of sets to store the unique coordinates for each
         # dimension

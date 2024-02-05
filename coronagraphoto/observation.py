@@ -45,9 +45,6 @@ class Observation:
         # Create save directory
         self.save_dir = Path("results", system.file.stem, coronagraph.dir.parts[-1])
 
-        # Flag to indicate whether the disk PSF datacube has been loaded
-        self.has_psf_datacube = False
-
     def load_observing_scenario(self, observing_scenario):
         self.observing_scenario = observing_scenario
         # Load observing scenario parameters
@@ -64,10 +61,10 @@ class Observation:
         self.return_frames = self.observing_scenario.scenario.get("return_frames")
         self.return_spectrum = self.observing_scenario.scenario.get("return_spectrum")
         self.return_sources = self.observing_scenario.scenario.get("return_sources")
-        self.static_during_exposure = self.observing_scenario.scenario.get(
-            "static_during_exposure"
+        self.prop_during_exposure = self.observing_scenario.scenario.get(
+            "prop_during_exposure"
         )
-        if not self.static_during_exposure:
+        if self.prop_during_exposure:
             *_, self.frame_start_times = self.calc_frame_info()
 
         # Load observing scenario data
@@ -120,16 +117,16 @@ class Observation:
             self.logger.info("Creating wavelength grid")
             (
                 self.spectral_wavelength_grid,
-                self.bandwidth,
+                self.spectral_bandwidths,
             ) = util.gen_wavelength_grid(self.bandpass, self.spectral_resolution)
         else:
-            self.bandwidth = self.bandpass.waveset[-1] - self.bandpass.waveset[0]
+            self.full_bandwidth = self.bandpass.waveset[-1] - self.bandpass.waveset[0]
 
         # Create the transmission array (or single value)
         if self.wavelength_resolved_transmission:
-            self.transmission = self.bandpass(self.spectral_wavelength_grid)
+            self.spectral_transmission = self.bandpass(self.spectral_wavelength_grid)
         else:
-            self.transmission = self.bandpass(self.central_wavelength)
+            self.central_transmission = self.bandpass(self.central_wavelength)
 
         # Solve for illuminated area
         self.illuminated_area = (
@@ -142,13 +139,14 @@ class Observation:
         """
         self.logger.info("Creating count rates")
 
-        shape = []
         if self.any_wavelength_dependence:
-            shape.append(len(self.spectral_wavelength_grid))
-        if not self.static_during_exposure:
-            nframes, _, _ = self.calc_frame_info()
-            shape.append(nframes)
-        shape.extend([self.coronagraph.npixels, self.coronagraph.npixels])
+            nwave = len(self.spectral_wavelength_grid)
+        else:
+            nwave = 1
+        # if not self.prop_during_exposure:
+        nframes, _, _ = self.calc_frame_info()
+        npix = self.coronagraph.npixels
+        shape = [nframes, nwave, npix, npix]
 
         self.total_count_rate = np.zeros(tuple(shape)) * u.ph / u.s
 
@@ -164,7 +162,7 @@ class Observation:
 
         if self.include_planets:
             self.logger.info("Creating planets count rate")
-            self.planet_count_rate = self.generic_count_rate_logic(
+            self.planet_count_rate = self.generic_count_rate_logic_refactored(
                 self.gen_planet_count_rate, base_count_rate_arr
             )
             self.total_count_rate += self.planet_count_rate
@@ -172,17 +170,21 @@ class Observation:
             self.logger.info("Not including planets")
 
         if self.include_disk:
-            if not self.has_psf_datacube:
-                self.psf_datacube = self.get_disk_psfs()
+            if not self.coronagraph.has_psf_datacube:
+                self.coronagraph.get_disk_psfs()
             self.logger.info("Creating disk count rate")
             self.disk_count_rate = self.generic_count_rate_logic(
-                self.gen_disk_count_rate, base_count_rate_arr, self.psf_datacube
+                self.gen_disk_count_rate,
+                base_count_rate_arr,
+                self.coronagraph.psf_datacube,
             )
             self.total_count_rate += self.disk_count_rate
         else:
             self.logger.info("Not including disk")
 
-    def generic_count_rate_logic(self, count_rate_function, object_count_rate, *args):
+    def old_generic_count_rate_logic(
+        self, count_rate_function, object_count_rate, *args
+    ):
         """
         Computes the count rate for an object over a spectral wavelength grid.
 
@@ -211,6 +213,159 @@ class Observation:
                 Accumulates the calculated count rates to the object's total count rate.
 
         """
+        nwavelengths, nframes, npixels, _ = object_count_rate.shape
+        if self.any_wavelength_dependence:
+            # If we are calculating the count rate for each wavelength
+            if self.wavelength_resolved_flux:
+                # This indicates that we're generating the count rate
+                # with the flux varying over the wavelength grid
+                for i, (_wavelength, _bandwidth) in enumerate(
+                    tqdm(
+                        zip(self.spectral_wavelength_grid, self.spectral_bandwidths),
+                        desc="Generating count rate for each wavelength",
+                        total=len(self.spectral_wavelength_grid),
+                        delay=0.5,
+                    )
+                ):
+                    object_count_rate[i] = count_rate_function(
+                        _wavelength, self.time, _bandwidth, *args
+                    )
+            else:
+                # In this case, where we're only using the wavelength resolved
+                # transmission, we calculate and then copy the central
+                # count rates
+                central_bandwidth = self.bandwidth[len(self.bandwidth) // 2]
+                central_count_rate = count_rate_function(
+                    self.central_wavelength, self.time, central_bandwidth, *args
+                )
+                for i, _ in enumerate(self.spectral_wavelength_grid):
+                    object_count_rate[i] = central_count_rate
+
+            object_count_rate = np.multiply(self.transmission, object_count_rate.T).T
+        else:
+            object_count_rate = count_rate_function(
+                self.central_wavelength, self.time, self.bandwidth, *args
+            )
+            object_count_rate *= self.transmission
+        return object_count_rate
+
+    def generic_count_rate_logic_refactored(
+        self, count_rate_function, object_count_rate, *args
+    ):
+        """
+        Streamlined logic to handle input and output array shapes of:
+        (nwavelengths, nframes, npixels, npixels), incorporating prop_during_exposure.
+
+        Args:
+            count_rate_function (callable): Function that computes count rate.
+            object_count_rate (numpy.ndarray): Array for computed count rates.
+                Shape: (nframes, nwavelengths, npixels, npixels).
+
+        Returns:
+            Updated object_count_rate with computed count rates.
+        """
+        # Determine the dimensions
+        nframes, nlam, *_ = object_count_rate.shape
+
+        # Gross logic to determine the minimal set of values needed to generate
+        # the count rates at
+
+        # Set up whether we need to tile to other frames
+        tile_frames = (nframes > 1) and (not self.prop_during_exposure)
+
+        # Set up whether we need to tile to other wavelengths
+        tile_lam = (
+            self.wavelength_resolved_transmission and not self.wavelength_resolved_flux
+        )
+
+        # Set up wavelength and bandwidth arrays
+        if self.wavelength_resolved_flux:
+            lams = self.spectral_wavelength_grid
+            bws = self.spectral_bandwidths
+        else:
+            lams = [self.central_wavelength]
+            if self.wavelength_resolved_transmission:
+                # bandwidth at the central wavelength
+                bws = np.repeat(self.spectral_bandwidth[nlam // 2], nlam)
+            else:
+                bws = [self.full_bandwidth]
+
+        # Create transmission array
+        if self.wavelength_resolved_transmission:
+            transmissions = self.spectral_transmission
+        else:
+            # This is a single value, so we can just repeat it
+            transmissions = np.repeat(self.central_transmission, nlam)
+
+        if self.prop_during_exposure:
+            frame_times = self.frame_start_times
+        else:
+            frame_times = [self.time]
+
+        for frame_ind, frame_time in enumerate(
+            tqdm(frame_times, desc="Generating count per frame", delay=0.5)
+        ):
+            for lam_ind, (lam, bw) in enumerate(
+                tqdm(
+                    zip(lams, bws),
+                    desc="Generating count per wavelength",
+                    total=len(bws),
+                    delay=0.5,
+                    position=1,
+                )
+            ):
+                # Calculate the count rate (npix, npix)
+                base_count_rate = count_rate_function(lam, frame_time, bw, *args)
+
+                if tile_lam:
+                    # Apply transmission to separate the counts by wavelength
+                    # (nlam, npixels, npixels)
+                    object_count_rate[frame_ind, :] = (
+                        transmissions[:, None, None] * base_count_rate
+                    )
+                else:
+                    # Apply transmission to the current lam count rate
+                    # (npix, npix)
+                    trans_applied_rate = transmissions[lam_ind] * base_count_rate
+                    object_count_rate[frame_ind, lam_ind] = trans_applied_rate
+
+            if tile_frames:
+                # No change between frames, so apply this to all frames
+                object_count_rate[:] = np.repeat(
+                    object_count_rate[0][None, ...], nframes, axis=0
+                )
+        return object_count_rate
+
+    def generic_count_rate_logic(self, count_rate_function, object_count_rate, *args):
+        """
+        Computes the count rate for an object over a spectral wavelength grid.
+
+        This function calculates the count rate of an object by applying a specified
+        count rate function over a spectral wavelength grid. The count rate is computed
+        differently based on whether the object has wavelength dependence and whether
+        the flux and transmission are wavelength resolved.
+
+        Args:
+            count_rate_function (callable): A function that takes a wavelength and
+                observation time as inputs and returns the count rate.
+            object_count_rate (list or numpy.ndarray): An array to store the computed
+                count rates for each wavelength in the spectral wavelength grid.
+
+        Behavior:
+            - If the object has wavelength dependence and both flux and transmission
+              are wavelength resolved, the count rate is calculated for each wavelength.
+            - If only transmission is wavelength resolved, a central count rate
+              is calculated and all wavelength dependence is from the varying
+              transmission of the bandpass.
+            - If there is no wavelength dependence, the count rate is calculated using a
+              single wavelength and observation time.
+
+        Returns:
+            object_count_rate:
+                Accumulates the calculated count rates to the object's total count rate.
+                shape: (n_wavelengths, n_frames, n_pixels, n_pixels)
+
+        """
         if self.any_wavelength_dependence:
             # If we are calculating the count rate for each wavelength
             if self.wavelength_resolved_flux:
@@ -224,7 +379,7 @@ class Observation:
                         delay=0.5,
                     )
                 ):
-                    if self.static_during_exposure:
+                    if self.prop_during_exposure:
                         object_count_rate[i] = count_rate_function(
                             _wavelength, self.time, _bandwidth, *args
                         )
@@ -233,13 +388,12 @@ class Observation:
                             object_count_rate[i, j] = count_rate_function(
                                 _wavelength, frame_start_time, _bandwidth, *args
                             )
-
             else:
                 # In this case, where we're only using the wavelength resolved
                 # transmission, we calculate and then copy the central
                 # count rates
                 central_bandwidth = self.bandwidth[len(self.bandwidth) // 2]
-                if self.static_during_exposure:
+                if self.prop_during_exposure:
                     central_count_rate = count_rate_function(
                         self.central_wavelength, self.time, central_bandwidth, *args
                     )
@@ -258,7 +412,7 @@ class Observation:
 
             object_count_rate = np.multiply(self.transmission, object_count_rate.T).T
         else:
-            if self.static_during_exposure:
+            if self.prop_during_exposure:
                 object_count_rate = count_rate_function(
                     self.central_wavelength, self.time, self.bandwidth, *args
                 )
@@ -274,6 +428,14 @@ class Observation:
                         )
                         * self.transmission
                     )
+        if self.prop_during_exposure:
+            nframes, _, _ = self.calc_frame_info()
+            if self.any_wavelength_dependence:
+                expanded_count_rate = object_count_rate[np.newaxis, :, :]
+                object_count_rate = np.repeat(expanded_count_rate, nframes, axis=0)
+            else:
+                expanded_count_rate = object_count_rate[:, np.newaxis, :, :]
+                object_count_rate = np.repeat(expanded_count_rate, nframes, axis=1)
         return object_count_rate
 
     def gen_star_count_rate(self, wavelength, time, bandwidth):
@@ -325,7 +487,9 @@ class Observation:
         }
         orbit_dataset = self.system.propagate(time, **prop_kwargs)
         xystar = np.array([self.coronagraph.npixels / 2] * 2) * u.pix
-        # pixscale = self.coronagraph.pixel_scale.to( u.arcsec / u.pixel, lod_eq(wavelength, self.diameter))
+        # pixscale = self.coronagraph.pixel_scale.to( u.arcsec / u.pixel,
+        # lod_eq(wavelength,
+        # self.diameter))
         pixscale = (self.coronagraph.pixel_scale * u.pix).to(
             u.arcsec, lod_eq(wavelength, self.diameter)
         ) / u.pix
@@ -457,171 +621,7 @@ class Observation:
         # self.planet_count_rate += planet_image
         # self.total_count_rate += self.planet_count_rate
 
-    def get_disk_psfs(self):
-        """
-        Load the disk image from a file or generate it if it doesn't exist
-        """
-        # Load data cube of spatially dependent PSFs.
-        disk_dir = Path(".cache/disks/")
-        if not disk_dir.exists():
-            disk_dir.mkdir(parents=True, exist_ok=True)
-        path = Path(
-            disk_dir,
-            self.coronagraph.dir.name + ".nc",
-        )
-
-        coords = {
-            "x psf offset (pix)": np.arange(self.coronagraph.npixels),
-            "y psf offset (pix)": np.arange(self.coronagraph.npixels),
-            "x (pix)": np.arange(self.coronagraph.npixels),
-            "y (pix)": np.arange(self.coronagraph.npixels),
-        }
-        dims = ["x psf offset (pix)", "y psf offset (pix)", "x (pix)", "y (pix)"]
-        if path.exists():
-            self.logger.info(
-                "Loading data cube of spatially dependent PSFs, please hold..."
-            )
-            psfs_xr = xr.open_dataarray(path)
-        else:
-            self.logger.info(
-                "Calculating data cube of spatially dependent PSFs, please hold..."
-            )
-            # Compute pixel grid.
-            # lambda/D
-            pixel_lod = (
-                (
-                    np.arange(self.coronagraph.npixels)
-                    - ((self.coronagraph.npixels - 1) // 2)
-                )
-                * u.pixel
-                * self.coronagraph.pixel_scale
-            )
-
-            x_lod, y_lod = np.meshgrid(pixel_lod, pixel_lod, indexing="xy")
-
-            # lambda/D
-            pixel_dist_lod = np.sqrt(x_lod**2 + y_lod**2)
-
-            # deg
-            pixel_angle = np.arctan2(y_lod, x_lod)
-
-            # Compute pixel grid contrast.
-            psfs_shape = (
-                pixel_dist_lod.shape[0],
-                pixel_dist_lod.shape[1],
-                self.coronagraph.npixels,
-                self.coronagraph.npixels,
-            )
-            psfs = np.zeros(psfs_shape, dtype=np.float32)
-            npsfs = np.prod(pixel_dist_lod.shape)
-
-            pbar = tqdm(
-                total=npsfs, desc="Computing datacube of PSFs at every pixel", delay=0.5
-            )
-
-            radially_symmetric_psf = "1d" in self.coronagraph.type
-            # Get the PSF (npixel, npixel) of a source at every pixel
-
-            # Note: intention is that i value maps to x offset and j value maps
-            # to y offset
-            for i in range(pixel_dist_lod.shape[0]):
-                for j in range(pixel_dist_lod.shape[1]):
-                    # Basic structure here is to get the distance in lambda/D,
-                    # determine whether the psf has to be rotated (if the
-                    # coronagraph is defined in 1 dimension), evaluate
-                    # the offaxis psf at the distance, then rotate the
-                    # image
-                    if self.coronagraph.type == "1d":
-                        psf_eval_dists = pixel_dist_lod[i, j]
-                        rotate_angle = pixel_angle[i, j]
-                    elif self.coronagraph.type == "1dno0":
-                        psf_eval_dists = np.sqrt(
-                            pixel_dist_lod[i, j] ** 2
-                            - self.coronagraph.offax_psf_offset_x[0] ** 2
-                        )
-                        rotate_angle = pixel_angle[i, j] + np.arcsin(
-                            self.coronagraph.offax_psf_offset_x[0]
-                            / pixel_dist_lod[i, j]
-                        )
-                    elif self.coronagraph.type == "2dq":
-                        # lambda/D
-                        temp = np.array([y_lod[i, j], x_lod[i, j]])
-                        psf = self.coronagraph.offax_psf_interp(np.abs(temp))[0]
-                        if y_lod[i, j] < 0.0:
-                            # lambda/D
-                            psf = psf[::-1, :]
-                        if x_lod[i, j] < 0.0:
-                            # lambda/D
-                            psf = psf[:, ::-1]
-                    else:
-                        # lambda/D
-                        temp = np.array([y_lod[i, j], x_lod[i, j]])
-                        psf = self.coronagraph.offax_psf_interp(temp)[0]
-
-                    if radially_symmetric_psf:
-                        # if rotate_angle < 0.0:
-                        #     rotate_angle += 2 * np.pi * u.rad
-                        psf = self.coronagraph.ln_offax_psf_interp(psf_eval_dists)
-                        temp = np.exp(
-                            rotate(
-                                psf,
-                                -rotate_angle.to(u.deg).value,
-                                reshape=False,
-                                mode="nearest",
-                                order=5,
-                            )
-                        )
-                    psfs[i, j] = temp
-                    # if i == 10 and j == 100:
-                    #     # r1 = rotate(
-                    #     #     psf,
-                    #     #     -135,
-                    #     #     reshape=False,
-                    #     #     mode="nearest",
-                    #     #     order=5,
-                    #     # )
-                    #     # r2 = rotate(
-                    #     #     psf,
-                    #     #     -180,
-                    #     #     reshape=False,
-                    #     #     mode="nearest",
-                    #     #     order=5,
-                    #     # )
-                    #     # r3 = rotate(
-                    #     #     psf,
-                    #     #     -225,
-                    #     #     reshape=False,
-                    #     #     mode="nearest",
-                    #     #     order=5,
-                    #     # )
-
-                    #     fig, ax = plt.subplots(ncols=2)
-                    #     # ax[0].imshow(psf, origin="lower")
-                    #     # ax[1].imshow(r1, origin="lower")
-                    #     # ax[2].imshow(r2, origin="lower")
-                    #     # ax[3].imshow(r3, origin="lower")
-
-                    #     ax[0].imshow(psf, origin="lower")
-                    #     ax[1].imshow(temp, origin="lower")
-                    #     ax[1].scatter(j, i, color="red", marker="s")
-                    #     ax[1].set_title(
-                    #         f"Rotated by {-rotate_angle.to(u.deg).value:.2f}"
-                    #     )
-                    #     plt.show()
-                    #     breakpoint()
-                    pbar.update(1)
-
-            # Save data cube of spatially dependent PSFs.
-            psfs_xr = xr.DataArray(
-                psfs,
-                coords=coords,
-                dims=dims,
-            )
-            psfs_xr.to_netcdf(path)
-        self.has_psf_datacube = True
-        return np.ascontiguousarray(psfs_xr)
-
-    def gen_disk_count_rate(self, wavelength, time, bandwidth, psfs):
+    def gen_disk_count_rate(self, wavelength, time, bandwidth):
         disk_image = self.system.disk.spec_flux_density(wavelength, time)
 
         # This is the factor to scale the disk image, from exovista, to the
@@ -671,7 +671,11 @@ class Observation:
         # count_rate = np.einsum("ij,ijkl->kl", scaled_disk, psfs) * u.ph / u.s
         scaled_disk = np.ascontiguousarray(scaled_disk)
         count_rate = (
-            nb_gen_disk_count_rate(scaled_disk, psfs, scaled_disk.shape[0]) * u.ph / u.s
+            nb_gen_disk_count_rate(
+                scaled_disk, self.coronagraph.psf_datacube, scaled_disk.shape[0]
+            )
+            * u.ph
+            / u.s
         )
         return count_rate
 
@@ -682,76 +686,82 @@ class Observation:
         """
         self.logger.info("Creating images")
 
-        nframes, frame_time = self.calc_frame_info()
+        nframes, frame_time, _ = self.calc_frame_info()
         coro_image_shape = self.get_coro_image_shape()
 
-        frame_counts = np.zeros(coro_image_shape)
-
-        # Calculate the expected number of photons per frame
-        expected_photons_per_frame = (
-            (self.total_count_rate * frame_time).decompose().value
-        )
         # Create the arrays to store the frame counts for each source
         # if we're returning them
         if self.return_sources:
+            frame_counts = np.zeros(coro_image_shape)
             if self.include_star:
-                star_frame_counts = np.zeros(coro_image_shape)
                 expected_star_photons_per_frame = (
                     (self.star_count_rate * frame_time).decompose().value
                 )
+                star_frame_counts = np.random.poisson(expected_star_photons_per_frame)
+                frame_counts += star_frame_counts
             if self.include_planets:
-                planet_frame_counts = np.zeros(coro_image_shape)
                 expected_planet_photons_per_frame = (
                     (self.planet_count_rate * frame_time).decompose().value
                 )
+                planet_frame_counts = np.random.poisson(
+                    expected_planet_photons_per_frame
+                )
+                frame_counts += planet_frame_counts
             if self.include_disk:
-                disk_frame_counts = np.zeros(coro_image_shape)
                 expected_disk_photons_per_frame = (
                     (self.disk_count_rate * frame_time).decompose().value
                 )
+                disk_frame_counts = np.random.poisson(expected_disk_photons_per_frame)
+                frame_counts += disk_frame_counts
+        else:
+            # Calculate the expected number of photons per frame
+            expected_photons_per_frame = (
+                (self.total_count_rate * frame_time).decompose().value
+            )
+            frame_counts = np.random.poisson(expected_photons_per_frame)
 
-        for i in tqdm(range(nframes), desc="Simulating frames", delay=0.5):
-            if self.any_wavelength_dependence:
-                for j, _ in enumerate(self.spectral_wavelength_grid):
-                    if self.return_sources:
-                        if self.include_star:
-                            star_frame_counts[i, j] = np.random.poisson(
-                                expected_star_photons_per_frame[j]
-                            )
-                            frame_counts[i, j] += star_frame_counts[i, j]
-                        if self.include_planets:
-                            planet_frame_counts[i, j] = np.random.poisson(
-                                expected_planet_photons_per_frame[j]
-                            )
-                            frame_counts[i, j] += planet_frame_counts[i, j]
-                        if self.include_disk:
-                            disk_frame_counts[i, j] = np.random.poisson(
-                                expected_disk_photons_per_frame[j]
-                            )
-                            frame_counts[i, j] += disk_frame_counts[i, j]
-                    else:
-                        frame = np.random.poisson(expected_photons_per_frame[j])
-                        frame_counts[i, j] = frame
-            else:
-                if self.return_sources:
-                    if self.include_star:
-                        star_frame_counts[i] = np.random.poisson(
-                            expected_star_photons_per_frame
-                        )
-                        frame_counts[i] += star_frame_counts[i]
-                    if self.include_planets:
-                        planet_frame_counts[i] = np.random.poisson(
-                            expected_planet_photons_per_frame
-                        )
-                        frame_counts[i] += planet_frame_counts[i]
-                    if self.include_disk:
-                        disk_frame_counts[i] = np.random.poisson(
-                            expected_disk_photons_per_frame
-                        )
-                        frame_counts[i] += disk_frame_counts[i]
-                else:
-                    frame = np.random.poisson(expected_photons_per_frame)
-                    frame_counts[i] = frame
+        # for i in tqdm(range(nframes), desc="Simulating frames", delay=0.5):
+        #     if self.any_wavelength_dependence:
+        #         for j, _ in enumerate(self.spectral_wavelength_grid):
+        #             if self.return_sources:
+        #                 if self.include_star:
+        #                     star_frame_counts[i, j] = np.random.poisson(
+        #                         expected_star_photons_per_frame[j]
+        #                     )
+        #                     frame_counts[i, j] += star_frame_counts[i, j]
+        #                 if self.include_planets:
+        #                     planet_frame_counts[i, j] = np.random.poisson(
+        #                         expected_planet_photons_per_frame[j]
+        #                     )
+        #                     frame_counts[i, j] += planet_frame_counts[i, j]
+        #                 if self.include_disk:
+        #                     disk_frame_counts[i, j] = np.random.poisson(
+        #                         expected_disk_photons_per_frame[j]
+        #                     )
+        #                     frame_counts[i, j] += disk_frame_counts[i, j]
+        #             else:
+        #                 frame = np.random.poisson(expected_photons_per_frame[j])
+        #                 frame_counts[i, j] = frame
+        #     else:
+        #         if self.return_sources:
+        #             if self.include_star:
+        #                 star_frame_counts[i] = np.random.poisson(
+        #                     expected_star_photons_per_frame
+        #                 )
+        #                 frame_counts[i] += star_frame_counts[i]
+        #             if self.include_planets:
+        #                 planet_frame_counts[i] = np.random.poisson(
+        #                     expected_planet_photons_per_frame
+        #                 )
+        #                 frame_counts[i] += planet_frame_counts[i]
+        #             if self.include_disk:
+        #                 disk_frame_counts[i] = np.random.poisson(
+        #                     expected_disk_photons_per_frame
+        #                 )
+        #                 frame_counts[i] += disk_frame_counts[i]
+        #         else:
+        #             frame = np.random.poisson(expected_photons_per_frame)
+        #             frame_counts[i] = frame
 
         coro_coords, coro_dims, det_coords, det_dims = self.coro_det_coords_and_dims()
         args = (coro_coords, coro_dims, det_coords, det_dims)
@@ -773,7 +783,8 @@ class Observation:
                 obs_ds = self.add_source_to_dataset(
                     disk_frame_counts, "disk", obs_ds, *args
                 )
-        if self.any_wavelength_dependence and not self.return_spectrum:
+        # if self.any_wavelength_dependence and not self.return_spectrum:
+        if not self.return_spectrum:
             # Sum over the wavelength axis if we're not returning the spectrum
             # but we did calculate it
             obs_ds = obs_ds.sum(dim="spectral_wavelength(nm)")
@@ -826,10 +837,13 @@ class Observation:
             coro_image_shape (tuple of ints):
                 The shape of the coronagraph count/image pixel array
         """
-        nframes, _ = self.calc_frame_info()
+        nframes, *_ = self.calc_frame_info()
         coro_image_shape = [nframes]
         if self.any_wavelength_dependence:
             coro_image_shape.append(len(self.spectral_wavelength_grid))
+        else:
+            coro_image_shape.append(1)
+
         coro_image_shape.extend([self.coronagraph.npixels, self.coronagraph.npixels])
         return tuple(coro_image_shape)
 
@@ -866,76 +880,10 @@ class Observation:
             ),
             format="jd",
         )
-        # frame_start_times = np.arange( self.time, self.time + self.exposure_time, frame_time)
 
         # Setting up the proper shape of the array that counts the photons
         nframes = int(full_frames)
         return nframes, frame_time, frame_start_times
-
-    # def create_coords_and_dims(self):
-    #     """
-    #     Create the coordinates and dimensions for the image dataset.
-
-    #     Returns:
-    #         coro_coords (list of np.arrays):
-    #             Coronagraph data coordinates (the arrays of valid values)
-    #         coro_dims (list of strs):
-    #             Coronagraph data dimensions (the names of the coordinates)
-    #         det_coords (list of np.arrays):
-    #             Detector data coordinates (the arrays of valid values)
-    #         det_dims (list of strs):
-    #             Coronagraph data dimensions (the names of the coordinates)
-    #         final_coords (list of np.arrays):
-    #             The data coordinates in the final photon Dataset of count_photons()
-    #         final_dims (list of strs):
-    #             The data dimensions in the final photon Dataset of count_photons()
-    #     """
-    #     # Get the number of frames
-    #     nframes, _ = self.calc_frame_info()
-    #     coro_pixel_arr = np.arange(self.coronagraph.npixels)
-
-    #     # Set up the coordinates and dimensions for the returned Dataset
-    #     final_coords = [
-    #         self.time.datetime64.reshape(1),
-    #         self.central_wavelength.to(u.nm).value.reshape(1),
-    #         coro_pixel_arr,
-    #         coro_pixel_arr,
-    #     ]
-    #     final_dims = ["time", "central_wavelength(nm)", "xpix(coro)", "ypix(coro)"]
-    #     wavelength_ind = 2
-    #     if self.return_frames:
-    #         final_coords.insert(2, np.arange(nframes))
-    #         final_dims.insert(2, "frame")
-    #         wavelength_ind += 1
-    #     if self.return_spectrum:
-    #         final_coords.insert(
-    #             wavelength_ind, self.spectral_wavelength_grid.to(u.nm).value
-    #         )
-    #         final_dims.insert(wavelength_ind, "spectral_wavelength(nm)")
-
-    #     # Coronagraph coordinates and dimensions
-    #     coro_coords = [np.arange(nframes), coro_pixel_arr, coro_pixel_arr]
-    #     coro_dims = ["frame", "xpix(coro)", "ypix(coro)"]
-    #     if self.any_wavelength_dependence:
-    #         # Add the wavelength coordinates and dimensions if necessary
-    #         wavelength_coords = self.spectral_wavelength_grid.to(u.nm).value
-    #         coro_coords.insert(1, wavelength_coords)
-    #         coro_dims.insert(1, "spectral_wavelength(nm)")
-
-    #     # All coordinates and dimensions
-    #     if self.has_detector:
-    #         # Detector coordinates and dimensions
-    #         detector_xpix_arr = np.arange(self.detector_shape[0])
-    #         detector_ypix_arr = np.arange(self.detector_shape[1])
-    #         det_coords = coro_coords[:-2] + [detector_xpix_arr, detector_ypix_arr]
-    #         det_dims = coro_dims[:-2] + ["xpix(det)", "ypix(det)"]
-
-    #         final_coords += [detector_xpix_arr, detector_ypix_arr]
-    #         final_dims += ["xpix(det)", "ypix(det)"]
-    #     else:
-    #         det_coords, det_dims = None, None
-
-    #     return coro_coords, coro_dims, det_coords, det_dims, final_coords, final_dims
 
     def coro_det_coords_and_dims(self):
         """
@@ -952,16 +900,22 @@ class Observation:
             det_dims (list of strs):
                 Detector data dimensions.
         """
-        nframes, _ = self.calc_frame_info()
+        nframes, *_ = self.calc_frame_info()
         coro_pixel_arr = np.arange(self.coronagraph.npixels)
 
-        # Coronagraph coordinates and dimensions
-        coro_coords = [np.arange(nframes), coro_pixel_arr, coro_pixel_arr]
-        coro_dims = ["frame", "xpix(coro)", "ypix(coro)"]
         if self.any_wavelength_dependence:
             wavelength_coords = self.spectral_wavelength_grid.to(u.nm).value
-            coro_coords.insert(1, wavelength_coords)
-            coro_dims.insert(1, "spectral_wavelength(nm)")
+        else:
+            wavelength_coords = [self.central_wavelength.to(u.nm).value]
+
+        # Coronagraph coordinates and dimensions
+        coro_coords = [
+            np.arange(nframes),
+            wavelength_coords,
+            coro_pixel_arr,
+            coro_pixel_arr,
+        ]
+        coro_dims = ["frame", "spectral_wavelength(nm)", "xpix(coro)", "ypix(coro)"]
 
         # Detector coordinates and dimensions
         if self.has_detector:
@@ -984,7 +938,7 @@ class Observation:
             final_dims (list of strs):
                 Dimensions for the final dataset.
         """
-        nframes, _ = self.calc_frame_info()
+        nframes, *_ = self.calc_frame_info()
         coro_pixel_arr = np.arange(self.coronagraph.npixels)
 
         # Set up the coordinates and dimensions for the final dataset
@@ -1211,20 +1165,10 @@ def nb_gen_disk_count_rate(disk, psfs, npix):
     assert psfs.shape[2] == npix
     assert psfs.shape[3] == npix
     res = np.zeros((npix, npix), dtype=np.float32)
-    # tol = 1e-8
-    # disk_inds_to_skip = np.where(disk < tol)
     for i in nb.prange(npix):
         for j in range(npix):
             # i, j represent the offset of the PSF to be multiplied by the disk
             # flux
             res += np.multiply(disk, psfs[i, j])
-            # for ii in range(npix):
-            #     for jj in range(npix):
-            #         res[ii, jj] += disk[ii, jj] * current_psf[ii, jj]
-            # psf_val = current_psf[ii, jj]
-            # if psf_val:
-            #     disk_val = disk[ii, jj]
-            #     if disk_val:
-            #         res[ii, jj] += disk[ii, jj] * psf_val
 
     return res

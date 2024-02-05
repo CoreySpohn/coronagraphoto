@@ -3,10 +3,13 @@ from pathlib import Path
 import astropy.io.fits as pyfits
 import astropy.units as u
 import matplotlib.pyplot as plt
+import numba as nb
 import numpy as np
+import xarray as xr
 from lod_unit.lod_unit import lod
 from scipy.interpolate import RegularGridInterpolator, interp1d
-from scipy.ndimage import zoom
+from scipy.ndimage import rotate, zoom
+from tqdm import tqdm
 
 from coronagraphoto.logger import logger
 
@@ -242,20 +245,12 @@ class Coronagraph:
 
         # fractional obscuration
         self.frac_obscured = head["OBSCURED"]
-        # print(f"Fractional obscuration = {self.frac_obscured:.3f}")
 
         # fractional bandpass
         self.frac_bandwidth = (head["MAXLAM"] - head["MINLAM"]) / head["LAMBDA"]
-        # print(f"Fractional bandpass = {self.frac_bandwidth:.3f}")
 
-        # instrument throughput
-        # TODO: Why is this here if its hardcoded?
-        # self.inst_thruput = 1.0
-        # print(f"Instrument throughput = {self.inst_thruput:.3f}")
-
-        # Calculate coronagraph throughput
-        # self.coro_thruput = self.get_coro_thruput(plot=False)
-        # print(f"Coronagraph throughput = {self.coro_thruput:.3f}")
+        # PSF datacube info
+        self.has_psf_datacube = False
 
     def get_coro_thruput(self, aperture_radius_lod=0.8, oversample=100, plot=True):
         """
@@ -383,3 +378,124 @@ class Coronagraph:
             plt.close()
 
         return coro_thruput
+
+    def get_disk_psfs(self):
+        """
+        Load the disk image from a file or generate it if it doesn't exist
+        """
+        # Load data cube of spatially dependent PSFs.
+        disk_dir = Path(".cache/disks/")
+        if not disk_dir.exists():
+            disk_dir.mkdir(parents=True, exist_ok=True)
+        path = Path(
+            disk_dir,
+            self.dir.name + ".nc",
+        )
+
+        coords = {
+            "x psf offset (pix)": np.arange(self.npixels),
+            "y psf offset (pix)": np.arange(self.npixels),
+            "x (pix)": np.arange(self.npixels),
+            "y (pix)": np.arange(self.npixels),
+        }
+        dims = ["x psf offset (pix)", "y psf offset (pix)", "x (pix)", "y (pix)"]
+        if path.exists():
+            self.logger.info(
+                "Loading data cube of spatially dependent PSFs, please hold..."
+            )
+            psfs_xr = xr.open_dataarray(path)
+        else:
+            self.logger.info(
+                "Calculating data cube of spatially dependent PSFs, please hold..."
+            )
+            # Compute pixel grid.
+            # lambda/D
+            pixel_lod = (
+                (np.arange(self.npixels) - ((self.npixels - 1) // 2))
+                * u.pixel
+                * self.pixel_scale
+            )
+
+            x_lod, y_lod = np.meshgrid(pixel_lod, pixel_lod, indexing="xy")
+
+            # lambda/D
+            pixel_dist_lod = np.sqrt(x_lod**2 + y_lod**2)
+
+            # deg
+            pixel_angle = np.arctan2(y_lod, x_lod)
+
+            # Compute pixel grid contrast.
+            psfs_shape = (
+                pixel_dist_lod.shape[0],
+                pixel_dist_lod.shape[1],
+                self.npixels,
+                self.npixels,
+            )
+            psfs = np.zeros(psfs_shape, dtype=np.float32)
+            npsfs = np.prod(pixel_dist_lod.shape)
+
+            pbar = tqdm(
+                total=npsfs, desc="Computing datacube of PSFs at every pixel", delay=0.5
+            )
+
+            radially_symmetric_psf = "1d" in self.type
+            # Get the PSF (npixel, npixel) of a source at every pixel
+
+            # Note: intention is that i value maps to x offset and j value maps
+            # to y offset
+            for i in range(pixel_dist_lod.shape[0]):
+                for j in range(pixel_dist_lod.shape[1]):
+                    # Basic structure here is to get the distance in lambda/D,
+                    # determine whether the psf has to be rotated (if the
+                    # coronagraph is defined in 1 dimension), evaluate
+                    # the offaxis psf at the distance, then rotate the
+                    # image
+                    if self.type == "1d":
+                        psf_eval_dists = pixel_dist_lod[i, j]
+                        rotate_angle = pixel_angle[i, j]
+                    elif self.type == "1dno0":
+                        psf_eval_dists = np.sqrt(
+                            pixel_dist_lod[i, j] ** 2 - self.offax_psf_offset_x[0] ** 2
+                        )
+                        rotate_angle = pixel_angle[i, j] + np.arcsin(
+                            self.offax_psf_offset_x[0] / pixel_dist_lod[i, j]
+                        )
+                    elif self.type == "2dq":
+                        # lambda/D
+                        temp = np.array([y_lod[i, j], x_lod[i, j]])
+                        psf = self.offax_psf_interp(np.abs(temp))[0]
+                        if y_lod[i, j] < 0.0:
+                            # lambda/D
+                            psf = psf[::-1, :]
+                        if x_lod[i, j] < 0.0:
+                            # lambda/D
+                            psf = psf[:, ::-1]
+                    else:
+                        # lambda/D
+                        temp = np.array([y_lod[i, j], x_lod[i, j]])
+                        psf = self.offax_psf_interp(temp)[0]
+
+                    if radially_symmetric_psf:
+                        psf = self.ln_offax_psf_interp(psf_eval_dists)
+                        temp = np.exp(
+                            rotate(
+                                psf,
+                                -rotate_angle.to(u.deg).value,
+                                reshape=False,
+                                mode="nearest",
+                                order=5,
+                            )
+                        )
+                    psfs[i, j] = temp
+                    pbar.update(1)
+
+            # Save data cube of spatially dependent PSFs.
+            psfs_xr = xr.DataArray(
+                psfs,
+                coords=coords,
+                dims=dims,
+            )
+            psfs_xr.to_netcdf(path)
+        self.has_psf_datacube = True
+        self.psf_datacube = np.ascontiguousarray(psfs_xr)
+        # return np.ascontiguousarray(psfs_xr)

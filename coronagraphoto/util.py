@@ -264,12 +264,12 @@ def get_detector_images(lod_arr, lod_scale, lam, D, det_shape, det_scale):
         final_images = np.zeros((nframes, nlambda, det_shape[0], det_shape[1]))
 
         # Validate the length of lam if it's not a scalar
-        if not np.isscalar(lam) and len(lam) != nlambda:
+        if not lam.isscalar and len(lam) != nlambda:
             raise ValueError("Length of lam must match nlambda in lod_arr")
 
         for frame_idx in range(nframes):
             for lambda_idx in range(nlambda):
-                wavelength = lam if np.isscalar(lam) else lam[lambda_idx]
+                wavelength = lam if lam.isscalar else lam[lambda_idx]
                 final_images[frame_idx, lambda_idx] = resample_single_image(
                     lod_arr[frame_idx, lambda_idx],
                     lod_scale,
@@ -324,6 +324,8 @@ def find_distinguishing_attributes(*observations):
         "bandwidth",
         "bandpass_model",
         "psf_datacube",
+        "full_bandwidth",
+        "spectral_wavelength",
     ]
     whitelisted_types = []
 
