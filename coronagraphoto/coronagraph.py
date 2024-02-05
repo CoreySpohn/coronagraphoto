@@ -50,11 +50,11 @@ class Coronagraph:
         dir = Path(dir)
         self.name = dir.stem
         # Get header and calculate the lambda/D value
-        stellar_intens_header = pyfits.getheader(Path(dir, "stellar_intens_1.fits"), 0)
+        stellar_intens_header = pyfits.getheader(Path(dir, "stellar_intens.fits"), 0)
 
         # Stellar intensity of the star being observed as function of stellar
         # angular diameter (unitless)
-        self.stellar_intens = pyfits.getdata(Path(dir, "stellar_intens_1.fits"), 0)
+        self.stellar_intens = pyfits.getdata(Path(dir, "stellar_intens.fits"), 0)
         # the stellar angular diameters in stellar_intens_1 in units of lambda/D
         self.stellar_intens_diam_list = (
             pyfits.getdata(Path(dir, "stellar_intens_diam_list.fits"), 0) * lod
@@ -75,12 +75,13 @@ class Coronagraph:
         # Determine the format of the input coronagraph files so we can handle #
         # the coronagraph correctly (e.g. radially symmetric in x direction)   #
         ########################################################################
-        if (self.offax_psf_offset_list.shape[1] != 2) and (
-            self.offax_psf_offset_list.shape[0] == 2
-        ):
-            # This condition occurs when the offax_psf_offset_list is transposed
-            # from the expected format for radially symmetric coronagraphs
-            self.offax_psf_offset_list = self.offax_psf_offset_list.T
+        if len(self.offax_psf_offset_list.shape) > 1:
+            if (self.offax_psf_offset_list.shape[1] != 2) and (
+                self.offax_psf_offset_list.shape[0] == 2
+            ):
+                # This condition occurs when the offax_psf_offset_list is transposed
+                # from the expected format for radially symmetric coronagraphs
+                self.offax_psf_offset_list = self.offax_psf_offset_list.T
 
         # Check that we have both x and y offset information (even if there
         # is only one axis with multiple values)
@@ -241,7 +242,7 @@ class Coronagraph:
         self.npixels = self.img_pixels.value.astype(int)
 
         # Photometric parameters.
-        head = pyfits.getheader(Path(dir, "stellar_intens_1.fits"), 0)
+        head = pyfits.getheader(Path(dir, "stellar_intens.fits"), 0)
 
         # fractional obscuration
         self.frac_obscured = head["OBSCURED"]
