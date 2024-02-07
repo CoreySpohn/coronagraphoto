@@ -61,11 +61,16 @@ class Observation:
         self.return_frames = self.observing_scenario.scenario.get("return_frames")
         self.return_spectrum = self.observing_scenario.scenario.get("return_spectrum")
         self.return_sources = self.observing_scenario.scenario.get("return_sources")
-        self.prop_during_exposure = self.observing_scenario.scenario.get(
-            "prop_during_exposure"
+        self.time_invariant_planets = self.observing_scenario.scenario.get(
+            "time_invariant_planets"
         )
-        if self.prop_during_exposure:
-            *_, self.frame_start_times = self.calc_frame_info()
+        self.time_invariant_star = self.observing_scenario.scenario.get(
+            "time_invariant_star"
+        )
+        self.time_invariant_disk = self.observing_scenario.scenario.get(
+            "time_invariant_disk"
+        )
+        *_, self.frame_start_times = self.calc_frame_info()
 
         # Load observing scenario data
         self.bandpass = self.observing_scenario.scenario.get("bandpass")
@@ -154,7 +159,9 @@ class Observation:
         if self.include_star:
             self.logger.info("Creating star count rate")
             self.star_count_rate = self.generic_count_rate_logic(
-                self.gen_star_count_rate, base_count_rate_arr
+                self.gen_star_count_rate,
+                base_count_rate_arr,
+                time_invariant=self.time_invariant_star,
             )
             self.total_count_rate += self.star_count_rate
         else:
@@ -162,8 +169,10 @@ class Observation:
 
         if self.include_planets:
             self.logger.info("Creating planets count rate")
-            self.planet_count_rate = self.generic_count_rate_logic_refactored(
-                self.gen_planet_count_rate, base_count_rate_arr
+            self.planet_count_rate = self.generic_count_rate_logic(
+                self.gen_planet_count_rate,
+                base_count_rate_arr,
+                time_invariant=self.time_invariant_planets,
             )
             self.total_count_rate += self.planet_count_rate
         else:
@@ -177,84 +186,18 @@ class Observation:
                 self.gen_disk_count_rate,
                 base_count_rate_arr,
                 self.coronagraph.psf_datacube,
+                time_invariant=self.time_invariant_disk,
             )
             self.total_count_rate += self.disk_count_rate
         else:
             self.logger.info("Not including disk")
 
-    def old_generic_count_rate_logic(
-        self, count_rate_function, object_count_rate, *args
-    ):
-        """
-        Computes the count rate for an object over a spectral wavelength grid.
-
-        This function calculates the count rate of an object by applying a specified
-        count rate function over a spectral wavelength grid. The count rate is computed
-        differently based on whether the object has wavelength dependence and whether
-        the flux and transmission are wavelength resolved.
-
-        Args:
-            count_rate_function (callable): A function that takes a wavelength and
-                observation time as inputs and returns the count rate.
-            object_count_rate (list or numpy.ndarray): An array to store the computed
-                count rates for each wavelength in the spectral wavelength grid.
-
-        Behavior:
-            - If the object has wavelength dependence and both flux and transmission
-              are wavelength resolved, the count rate is calculated for each wavelength.
-            - If only transmission is wavelength resolved, a central count rate
-              is calculated and all wavelength dependence is from the varying
-              transmission of the bandpass.
-            - If there is no wavelength dependence, the count rate is calculated using a
-              single wavelength and observation time.
-
-        Returns:
-            object_count_rate:
-                Accumulates the calculated count rates to the object's total count rate.
-
-        """
-        nwavelengths, nframes, npixels, _ = object_count_rate.shape
-        if self.any_wavelength_dependence:
-            # If we are calculating the count rate for each wavelength
-            if self.wavelength_resolved_flux:
-                # This indicates that we're generating the count rate
-                # with the flux varying over the wavelength grid
-                for i, (_wavelength, _bandwidth) in enumerate(
-                    tqdm(
-                        zip(self.spectral_wavelength_grid, self.spectral_bandwidths),
-                        desc="Generating count rate for each wavelength",
-                        total=len(self.spectral_wavelength_grid),
-                        delay=0.5,
-                    )
-                ):
-                    object_count_rate[i] = count_rate_function(
-                        _wavelength, self.time, _bandwidth, *args
-                    )
-            else:
-                # In this case, where we're only using the wavelength resolved
-                # transmission, we calculate and then copy the central
-                # count rates
-                central_bandwidth = self.bandwidth[len(self.bandwidth) // 2]
-                central_count_rate = count_rate_function(
-                    self.central_wavelength, self.time, central_bandwidth, *args
-                )
-                for i, _ in enumerate(self.spectral_wavelength_grid):
-                    object_count_rate[i] = central_count_rate
-
-            object_count_rate = np.multiply(self.transmission, object_count_rate.T).T
-        else:
-            object_count_rate = count_rate_function(
-                self.central_wavelength, self.time, self.bandwidth, *args
-            )
-            object_count_rate *= self.transmission
-        return object_count_rate
-
-    def generic_count_rate_logic_refactored(
-        self, count_rate_function, object_count_rate, *args
+    def generic_count_rate_logic(
+        self, count_rate_function, object_count_rate, *args, time_invariant=False
     ):
         """
         Streamlined logic to handle input and output array shapes of:
-        (nwavelengths, nframes, npixels, npixels), incorporating prop_during_exposure.
+        (nwavelengths, nframes, npixels, npixels), incorporating time invariance.
 
         Args:
             count_rate_function (callable): Function that computes count rate.
@@ -269,9 +212,6 @@ class Observation:
 
         # Gross logic to determine the minimal set of values needed to generate
         # the count rates at
-
-        # Set up whether we need to tile to other frames
-        tile_frames = (nframes > 1) and (not self.prop_during_exposure)
 
         # Set up whether we need to tile to other wavelengths
         tile_lam = (
@@ -297,10 +237,10 @@ class Observation:
             # This is a single value, so we can just repeat it
             transmissions = np.repeat(self.central_transmission, nlam)
 
-        if self.prop_during_exposure:
-            frame_times = self.frame_start_times
-        else:
+        if time_invariant:
             frame_times = [self.time]
+        else:
+            frame_times = self.frame_start_times
 
         for frame_ind, frame_time in enumerate(
             tqdm(frame_times, desc="Generating count per frame", delay=0.5)
@@ -329,113 +269,11 @@ class Observation:
                     trans_applied_rate = transmissions[lam_ind] * base_count_rate
                     object_count_rate[frame_ind, lam_ind] = trans_applied_rate
 
-            if tile_frames:
+            if time_invariant:
                 # No change between frames, so apply this to all frames
                 object_count_rate[:] = np.repeat(
                     object_count_rate[0][None, ...], nframes, axis=0
                 )
-        return object_count_rate
-
-    def generic_count_rate_logic(self, count_rate_function, object_count_rate, *args):
-        """
-        Computes the count rate for an object over a spectral wavelength grid.
-
-        This function calculates the count rate of an object by applying a specified
-        count rate function over a spectral wavelength grid. The count rate is computed
-        differently based on whether the object has wavelength dependence and whether
-        the flux and transmission are wavelength resolved.
-
-        Args:
-            count_rate_function (callable): A function that takes a wavelength and
-                observation time as inputs and returns the count rate.
-            object_count_rate (list or numpy.ndarray): An array to store the computed
-                count rates for each wavelength in the spectral wavelength grid.
-
-        Behavior:
-            - If the object has wavelength dependence and both flux and transmission
-              are wavelength resolved, the count rate is calculated for each wavelength.
-            - If only transmission is wavelength resolved, a central count rate
-              is calculated and all wavelength dependence is from the varying
-              transmission of the bandpass.
-            - If there is no wavelength dependence, the count rate is calculated using a
-              single wavelength and observation time.
-
-        Returns:
-            object_count_rate:
-                Accumulates the calculated count rates to the object's total count rate.
-                shape: (n_wavelengths, n_frames, n_pixels, n_pixels)
-
-        """
-        if self.any_wavelength_dependence:
-            # If we are calculating the count rate for each wavelength
-            if self.wavelength_resolved_flux:
-                # This indicates that we're generating the count rate
-                # with the flux varying over the wavelength grid
-                for i, (_wavelength, _bandwidth) in enumerate(
-                    tqdm(
-                        zip(self.spectral_wavelength_grid, self.bandwidth),
-                        desc="Generating count rate for each wavelength",
-                        total=len(self.spectral_wavelength_grid),
-                        delay=0.5,
-                    )
-                ):
-                    if self.prop_during_exposure:
-                        object_count_rate[i] = count_rate_function(
-                            _wavelength, self.time, _bandwidth, *args
-                        )
-                    else:
-                        for j, frame_start_time in enumerate(self.frame_start_times):
-                            object_count_rate[i, j] = count_rate_function(
-                                _wavelength, frame_start_time, _bandwidth, *args
-                            )
-            else:
-                # In this case, where we're only using the wavelength resolved
-                # transmission, we calculate and then copy the central
-                # count rates
-                central_bandwidth = self.bandwidth[len(self.bandwidth) // 2]
-                if self.prop_during_exposure:
-                    central_count_rate = count_rate_function(
-                        self.central_wavelength, self.time, central_bandwidth, *args
-                    )
-                    for i, _ in enumerate(self.spectral_wavelength_grid):
-                        object_count_rate[i] = central_count_rate
-                else:
-                    for j, frame_start_time in enumerate(self.frame_start_times):
-                        central_count_rate = count_rate_function(
-                            self.central_wavelength,
-                            frame_start_time,
-                            central_bandwidth,
-                            *args,
-                        )
-                        for i, _ in enumerate(self.spectral_wavelength_grid):
-                            object_count_rate[i, j] = central_count_rate
-
-            object_count_rate = np.multiply(self.transmission, object_count_rate.T).T
-        else:
-            if self.prop_during_exposure:
-                object_count_rate = count_rate_function(
-                    self.central_wavelength, self.time, self.bandwidth, *args
-                )
-                object_count_rate *= self.transmission
-            else:
-                for j, frame_start_time in enumerate(self.frame_start_times):
-                    object_count_rate[j] = (
-                        count_rate_function(
-                            self.central_wavelength,
-                            frame_start_time,
-                            self.bandwidth,
-                            *args,
-                        )
-                        * self.transmission
-                    )
-        if self.prop_during_exposure:
-            nframes, _, _ = self.calc_frame_info()
-            if self.any_wavelength_dependence:
-                expanded_count_rate = object_count_rate[np.newaxis, :, :]
-                object_count_rate = np.repeat(expanded_count_rate, nframes, axis=0)
-            else:
-                expanded_count_rate = object_count_rate[:, np.newaxis, :, :]
-                object_count_rate = np.repeat(expanded_count_rate, nframes, axis=1)
         return object_count_rate
 
     def gen_star_count_rate(self, wavelength, time, bandwidth):
@@ -783,6 +621,15 @@ class Observation:
                 obs_ds = self.add_source_to_dataset(
                     disk_frame_counts, "disk", obs_ds, *args
                 )
+        # Add a linked time coordinate for the frames
+        # if self.prop_during_exposure:
+        # obs_ds = obs_ds.assign_coords(
+        #     frame_time=("frame", self.frame_start_times.datetime64)
+        # )
+        # else:
+        #     obs_ds = obs_ds.assign_coords(
+        #         time=("frame", np.repeat(self.time.datetime64, nframes))
+        #     )
         # if self.any_wavelength_dependence and not self.return_spectrum:
         if not self.return_spectrum:
             # Sum over the wavelength axis if we're not returning the spectrum

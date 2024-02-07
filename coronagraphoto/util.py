@@ -326,6 +326,7 @@ def find_distinguishing_attributes(*observations):
         "psf_datacube",
         "full_bandwidth",
         "spectral_wavelength",
+        "frame_start_times",
     ]
     whitelisted_types = []
 

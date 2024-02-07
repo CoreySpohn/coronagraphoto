@@ -19,7 +19,9 @@ class ObservingScenario:
             "bandpass": None,
             "detector_shape": None,
             "detector_pixel_scale": None,
-            "static_during_exposure": True,
+            "time_invariant_planets": True,
+            "time_invariant_star": True,
+            "time_invariant_disk": True,
         }
         self.scenario = default_scenario
         if scenario is not None:
