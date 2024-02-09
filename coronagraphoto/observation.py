@@ -226,7 +226,7 @@ class Observation:
             lams = [self.central_wavelength]
             if self.wavelength_resolved_transmission:
                 # bandwidth at the central wavelength
-                bws = np.repeat(self.spectral_bandwidth[nlam // 2], nlam)
+                bws = np.repeat(self.spectral_bandwidths[nlam // 2], nlam)
             else:
                 bws = [self.full_bandwidth]
 
@@ -622,10 +622,10 @@ class Observation:
                     disk_frame_counts, "disk", obs_ds, *args
                 )
         # Add a linked time coordinate for the frames
-        # if self.prop_during_exposure:
-        # obs_ds = obs_ds.assign_coords(
-        #     frame_time=("frame", self.frame_start_times.datetime64)
-        # )
+        # if not self.time_invariant_planets:
+        #     obs_ds = obs_ds.assign_coords(
+        #         time=("frame", self.frame_start_times.datetime64)
+        #     )
         # else:
         #     obs_ds = obs_ds.assign_coords(
         #         time=("frame", np.repeat(self.time.datetime64, nframes))

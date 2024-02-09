@@ -327,6 +327,9 @@ def find_distinguishing_attributes(*observations):
         "full_bandwidth",
         "spectral_wavelength",
         "frame_start_times",
+        "spectral_wavelength_grid",
+        "spectral_bandwidths",
+        "spectral_transmission",
     ]
     whitelisted_types = []
 
