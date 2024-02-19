@@ -30,19 +30,19 @@ high_fid = {
     "diameter": 8 * u.m,
     "central_wavelength": wavelength,
     "time": time,
-    "exposure_time": 48 * u.hr,
-    "frame_time": 24 * u.hr,
+    "exposure_time": 5 * 48 * u.hr,
+    "frame_time": 5 * 24 * u.hr,
     "include_star": False,
     "include_planets": True,
     "include_disk": False,
     "bandpass": bandpass,
     "spectral_resolution": 100,
-    # "return_spectrum": True,
+    "return_spectrum": True,
     "return_frames": True,
-    # "return_sources": True,
-    # "wavelength_resolved_flux": True,
-    # "wavelength_resolved_transmission": True,
-    "static_during_exposure": False,
+    "return_sources": True,
+    "wavelength_resolved_flux": True,
+    "wavelength_resolved_transmission": True,
+    "prop_during_exposure": False,
 }
 # med_fid = {
 #     "diameter": 8 * u.m,
@@ -96,7 +96,18 @@ for cdir in cdirs:
     obs = Observation(coro, system, high_fid_scen)
     # obs = observation.Observation(coro, system, med_fid_scen)
     obs.create_count_rates()
+    image = obs.count_photons()
     breakpoint()
+    # fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
+    # ax1.imshow(obs.planet_count_rate[0].value, norm=colors.LogNorm(), origin="lower")
+    # ax2.imshow(obs.planet_count_rate[1].value, norm=colors.LogNorm(), origin="lower")
+    # plt.show()
+    # fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+    # ax.imshow(
+    #     obs.planet_count_rate[1].value - obs.planet_count_rate[0].value,
+    #     norm=colors.LogNorm(),
+    #     origin="lower",
+    # )
 
     start = datetime.datetime.now()
     obs.create_count_rates()

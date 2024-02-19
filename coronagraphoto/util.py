@@ -51,72 +51,6 @@ def gen_wavelength_grid(bandpass, resolution):
     return wavelengths, delta_lambdas
 
 
-# def get_detector_image(lod_arr, lod_scale, lam, D, det_shape, det_scale):
-#     """
-#     Resample an image in lambda/D units to arcseconds based on the detector's
-#     shape and pixel scale.
-
-#     Args:
-#         lod_arr (numpy.ndarray):
-#             The image to be resampled.
-#         lod_scale (astropy.units.quantity.Quantity):
-#             The scale of the image given. Must be lod/u.pix.
-#         lam (astropy.units.quantity.Quantity):
-#             The wavelength of the image given.
-#         D (astropy.units.quantity.Quantity):
-#             The diameter of the telescope.
-#         det_shape (tuple):
-#             The shape of the detector in pixels.
-#         det_scale (astropy.units.quantity.Quantity):
-#             The pixel scale of the detector. Must be u.arcsec/u.pix.
-
-#     Returns:
-#         final_image (numpy.ndarray):
-#             The resampled image.
-#     """
-#     lod_scale_in_arcsec = (lod_scale * u.pix).to(u.arcsec, lod_eq(lam, D)) / u.pix
-
-#     # Calculate the zoom factor
-#     zoom_factor = (lod_scale_in_arcsec / det_scale).decompose().value
-
-#     # Scale the image to the detector's pixel scale
-#     scaled_image = zoom(lod_arr, zoom_factor.value, order=3)
-
-#     # Calculate the offset of the image's center from the detector's center
-#     center_offset = (np.array(scaled_image.shape) - np.array(det_shape)) / 2
-
-#     # Check if padding is needed
-#     if np.any(center_offset < 0):
-#         # Calculate padding amount (absolute value of negative offsets)
-#         pad_amount = np.abs(np.minimum(center_offset, 0)).astype(int)
-#         # Pad the image symmetrically
-#         padded_image = np.pad(
-#             scaled_image,
-#             ((pad_amount[0], pad_amount[0]), (pad_amount[1], pad_amount[1])),
-#             mode="constant",
-#         )
-#         # Crop or further pad as necessary to get to det_shape
-#         final_image = (
-#             padded_image[: det_shape[0], : det_shape[1]]
-#             if padded_image.shape[0] > det_shape[0]
-#             else np.pad(
-#                 padded_image,
-#                 (
-#                     (0, det_shape[0] - padded_image.shape[0]),
-#                     (0, det_shape[1] - padded_image.shape[1]),
-#                 ),
-#                 mode="constant",
-#             )
-#         )
-#     else:
-#         # Crop the image if no padding is needed
-#         final_image = scaled_image[
-#             int(center_offset[0]) : int(center_offset[0] + det_shape[0]),
-#             int(center_offset[1]) : int(center_offset[1] + det_shape[1]),
-#         ]
-#     return final_image
-
-
 def resample_single_image(image, lod_scale, wavelength, diam, det_shape, det_scale):
     """
     Resample a single image from lambda/D units to arcseconds based on the
@@ -187,44 +121,6 @@ def resample_single_image(image, lod_scale, wavelength, diam, det_shape, det_sca
         ]
 
     return final_image
-
-
-# def get_detector_images(lod_arr, lod_scale, lam, diam, det_shape, det_scale):
-#     """
-#     Resample multiple frames in lambda/D units to arcseconds based on the
-#     detector's shape and pixel scale.
-
-#     Args:
-#         lod_arr (numpy.ndarray):
-#             The array of images to be resampled.
-#             Shape: (nframes, nxpix, nypix) or (nframes, nlambda, nxpix, nypix)
-#         lod_scale (astropy.units.quantity.Quantity):
-#             The scale of the images given. Must be lod/u.pix.
-#         lam (astropy.units.quantity.Quantity or list/array):
-#             The wavelength(s) of the images. Can be a scalar or an array with
-#             length nframes.
-#         diam (astropy.units.quantity.Quantity):
-#             The diameter of the telescope.
-#         det_shape (tuple):
-#             The shape of the detector in pixels (height, width).
-#         det_scale (astropy.units.quantity.Quantity):
-#             The pixel scale of the detector. Must be u.arcsec/u.pix.
-
-#     Returns:
-#         numpy.ndarray: The array of resampled images. Shape (nframes
-#                        det_shape[0], det_shape[1]).
-#     """
-#     final_images = np.zeros((lod_arr.shape[0], det_shape[0], det_shape[1]))
-
-#     if lam.isscalar:
-#         lam = lam.reshape(1)
-
-#     for i, frame in enumerate(lod_arr):
-#         final_images[i] = resample_single_image(
-#             frame, lod_scale, lam[i], diam, det_shape, det_scale
-#         )
-
-#     return final_images
 
 
 def get_detector_images(lod_arr, lod_scale, lam, D, det_shape, det_scale):

@@ -73,7 +73,8 @@ class Observations:
             unique_coords[dim] = np.array(sorted(unique_coords[dim]))
 
         # Get all the distinguishing attributes, e.g. what we need to add to
-        # each observation to tell them apart (time, wavelength, include_star, etc.)
+        # each observation to tell them apart (start_time, central_wavelength,
+        # include_star, etc.)
         (
             dist_attr_by_obs,
             dist_attr_dims,
@@ -86,6 +87,8 @@ class Observations:
         obs_ds = xr.Dataset(coords=ds_coords)
         obs_ds.attrs["dist_attrs_for_images"] = dist_attr_dims
         obs_ds.attrs["image_titles"] = {}
+
+        linked_coords = []
 
         # Now loop through all scenarios again and create the observation
         for obs in tqdm(observations, desc="Simulating all observations", position=0):
@@ -142,7 +145,7 @@ class Observations:
 
             # Adjust observation scenario
             obs_scenario = copy.deepcopy(self.base_obs_scenario)
-            obs_scenario.scenario["time"] = time
+            obs_scenario.scenario["start_time"] = time
             obs_scenario.scenario["central_wavelength"] = wavelength
             obs.load_observing_scenario(obs_scenario)
 
