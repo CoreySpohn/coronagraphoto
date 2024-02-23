@@ -750,12 +750,7 @@ class Observation:
             coro_pixel_arr,
             coro_pixel_arr,
         ]
-        coro_dims = [
-            "time",
-            "spectral_wavelength(nm)",
-            "xpix(coro)",
-            "ypix(coro)",
-        ]
+        coro_dims = ["time", "spectral_wavelength(nm)", "xpix(coro)", "ypix(coro)"]
 
         # Detector coordinates and dimensions
         if self.has_detector:
@@ -778,30 +773,6 @@ class Observation:
             final_dims (list of strs):
                 Dimensions for the final dataset.
         """
-        # coro_pixel_arr = np.arange(self.coronagraph.npixels)
-
-        # # Set up the coordinates and dimensions for the final dataset
-        # final_coords = [coro_pixel_arr, coro_pixel_arr]
-        # final_dims = ["xpix(coro)", "ypix(coro)"]
-        # wavelength_ind = 0
-
-        # if self.return_frames:
-        #     final_coords.insert(0, np.arange(self.nframes))
-        #     final_dims.insert(0, "frame")
-        #     wavelength_ind += 1
-
-        # if self.return_spectrum:
-        #     final_coords.insert(
-        #         wavelength_ind, self.spectral_wavelength_grid.to(u.nm).value
-        #     )
-        #     final_dims.insert(wavelength_ind, "spectral_wavelength(nm)")
-
-        # if self.has_detector:
-        #     detector_xpix_arr = np.arange(self.detector_shape[0])
-        #     detector_ypix_arr = np.arange(self.detector_shape[1])
-        #     final_coords += [detector_xpix_arr, detector_ypix_arr]
-        #     final_dims += ["xpix(det)", "ypix(det)"]
-
         coro_coords, coro_dims, det_coords, det_dims = self.coro_det_coords_and_dims()
         final_coords, final_dims = coro_coords.copy(), coro_dims.copy()
 
