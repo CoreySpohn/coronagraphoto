@@ -7,10 +7,6 @@ from astropy.time import Time
 from lod_unit import lod, lod_eq
 from scipy.ndimage import zoom
 
-# =============================================================================
-# UTIL
-# =============================================================================
-
 
 def gen_wavelength_grid(bandpass, resolution):
     """
@@ -49,6 +45,31 @@ def gen_wavelength_grid(bandpass, resolution):
     wavelengths = (np.array(wavelengths) * first_wavelength.unit).to(u.nm)
     delta_lambdas = (np.array(delta_lambdas) * first_wavelength.unit).to(u.nm)
     return wavelengths, delta_lambdas
+
+
+def convert_pixels(unit, obs, plane="coro"):
+    if plane == "coro":
+        pix_arr = np.arange(obs.coronagraph.npixels)
+        lam = obs.central_wavelength
+        diameter = obs.diameter
+        pix_scale = (obs.coronagraph.pixel_scale * u.pix).to(
+            u.rad, lod_eq(lam, diameter)
+        ) / u.pix
+        pix_shape = [obs.coronagraph.npixels] * 2
+    elif plane == "det":
+        pix_arr = np.arange(obs.detector_shape[0])
+        pix_scale = obs.detector_pixel_scale
+        pix_shape = obs.detector_shape
+
+    xnpix, ynpix = pix_shape
+    star_pixel = (xnpix / 2, ynpix / 2)
+    if unit.physical_type == "angle":
+        pix_scale = (pix_scale).to(unit / u.pix)
+        xunit_arr = (pix_arr - star_pixel[0]) * u.pix * pix_scale
+        yunit_arr = (pix_arr - star_pixel[1]) * u.pix * pix_scale
+    else:
+        raise NotImplementedError("Conversion to this unit not implemented.")
+    return xunit_arr, yunit_arr
 
 
 def resample_single_image(image, lod_scale, wavelength, diam, det_shape, det_scale):
