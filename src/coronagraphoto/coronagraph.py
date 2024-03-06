@@ -3,7 +3,6 @@ from pathlib import Path
 import astropy.io.fits as pyfits
 import astropy.units as u
 import matplotlib.pyplot as plt
-import numba as nb
 import numpy as np
 import xarray as xr
 from lod_unit import lod
@@ -401,12 +400,10 @@ class Coronagraph:
         }
         dims = ["x psf offset (pix)", "y psf offset (pix)", "x (pix)", "y (pix)"]
         if path.exists():
-            self.logger.info(
-                "Loading data cube of spatially dependent PSFs, please hold..."
-            )
+            logger.info("Loading data cube of spatially dependent PSFs, please hold...")
             psfs_xr = xr.open_dataarray(path)
         else:
-            self.logger.info(
+            logger.info(
                 "Calculating data cube of spatially dependent PSFs, please hold..."
             )
             # Compute pixel grid.
