@@ -1,16 +1,13 @@
 [build-system]
-requires = ["setuptools", "wheel", "Cython"]
+requires = ['hatchling', "hatch-fancy-pypi-readme"]
+build-backend = "hatchling.build"
 
 [project]
 name = "coronagraphoto"
 version = "0.1.0"
 description = "A python library to simulate coronagraphic observations of exoplanets."
-authors = [
-  {name = "Corey Spohn", email = "corey.a.spohn@nasa.gov"},
-  {name = "Jens Kammerer", email = "jkammerer@stsci.edu"}
-]
-dependencies = ["numpy", "pandas", "astropy", "matplotlib", "lod_unit"]
-readme = "README.md"
+authors = [ {name = "Corey Spohn", email = "corey.a.spohn@nasa.gov"} ]
+dynamic = ['readme']
 license = {file = "LICENSE"}
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -19,9 +16,24 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering :: Astronomy"
 ]
+dependencies = ["astropy",
+                "exoverses",
+                "lod_unit",
+                "matplotlib",
+                "numpy", 
+                "numba",
+                "pandas", 
+                "photutils",
+                "synphot",
+                "tqdm",
+                "xarray"]
 
 [project.urls]
-Home = "https://github.com/CoreySpohn/coronagraphoto"
-Source = "https://github.com/CoreySpohn/coronagraphoto"
-Tracker = "https://github.com/CoreySpohn/coronagraphoto/issues"
+Homepage = "https://github.com/CoreySpohn/coronagraphoto"
+Issues = "https://github.com/CoreySpohn/coronagraphoto/issues"
 
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.md"

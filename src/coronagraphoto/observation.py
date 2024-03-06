@@ -11,7 +11,7 @@ import xarray as xr
 from astropy.stats import SigmaClip
 from astropy.time import Time
 from exoverses.util import misc
-from lod_unit.lod_unit import lod, lod_eq
+from lod_unit import lod, lod_eq
 from matplotlib.colors import LogNorm, Normalize
 from photutils.aperture import (ApertureStats, CircularAnnulus,
                                 CircularAperture, aperture_photometry)

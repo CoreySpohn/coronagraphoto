@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import numba as nb
 import numpy as np
 import xarray as xr
-from lod_unit.lod_unit import lod
+from lod_unit import lod
 from scipy.interpolate import RegularGridInterpolator, interp1d
 from scipy.ndimage import rotate, zoom
 from tqdm import tqdm
