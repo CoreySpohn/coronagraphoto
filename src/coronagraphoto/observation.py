@@ -185,7 +185,6 @@ class Observation:
             self.disk_count_rate = self.generic_count_rate_logic(
                 self.gen_disk_count_rate,
                 base_count_rate_arr,
-                self.coronagraph.psf_datacube,
                 time_invariant=self.time_invariant_disk,
             )
             self.total_count_rate += self.disk_count_rate
@@ -207,6 +206,9 @@ class Observation:
         Returns:
             Updated object_count_rate with computed count rates.
         """
+        # Copy the array to avoid modifying the input
+        object_count_rate = copy.deepcopy(object_count_rate)
+
         # Determine the dimensions
         _, nlam, *_ = object_count_rate.shape
 
@@ -307,27 +309,12 @@ class Observation:
         Add planets to the system.
         """
         # Compute planet separations and position angles.
-        # _xyplanet = np.zeros((len(self.system.planets), 2)) * u.pixel
-        # for i, planet in enumerate(self.system.planets):
-        #     planet_x = planet._x_pix_interp(time) * u.pixel
-        #     planet_y = planet._y_pix_interp(time) * u.pixel
-        #     _xyplanet[i, 0] = planet_x
-        #     _xyplanet[i, 1] = planet_y
-
-        # star_x = self.system.star._x_pix_interp(time)
-        # star_y = self.system.star._y_pix_interp(time)
-        # _xystar = np.array([star_x, star_y]) * u.pixel
-        # _planet_xy_separations = (_xyplanet - _xystar) * self.system.star.pixel_scale
         prop_kwargs = {
             "prop": "nbody",
             "ref_frame": "helio-sky",
-            "t0": self.system.star._t[0],
         }
         orbit_dataset = self.system.propagate(time, **prop_kwargs)
         xystar = np.array([self.coronagraph.npixels / 2] * 2) * u.pix
-        # pixscale = self.coronagraph.pixel_scale.to( u.arcsec / u.pixel,
-        # lod_eq(wavelength,
-        # self.diameter))
         pixscale = (self.coronagraph.pixel_scale * u.pix).to(
             u.arcsec, lod_eq(wavelength, self.diameter)
         ) / u.pix
@@ -338,7 +325,6 @@ class Observation:
             pixel_scale=pixscale,
             star_pixel=xystar,
         )
-        prop_kwargs.pop("t0")
         pixel_data = orbit_dataset.sel(object="planet", **prop_kwargs)[
             ["x(pix)", "y(pix)"]
         ]
@@ -556,49 +542,6 @@ class Observation:
                 (self.total_count_rate * self.frame_time).decompose().value
             )
             frame_counts = np.random.poisson(expected_photons_per_frame)
-
-        # for i in tqdm(range(nframes), desc="Simulating frames", delay=0.5):
-        #     if self.any_wavelength_dependence:
-        #         for j, _ in enumerate(self.spectral_wavelength_grid):
-        #             if self.return_sources:
-        #                 if self.include_star:
-        #                     star_frame_counts[i, j] = np.random.poisson(
-        #                         expected_star_photons_per_frame[j]
-        #                     )
-        #                     frame_counts[i, j] += star_frame_counts[i, j]
-        #                 if self.include_planets:
-        #                     planet_frame_counts[i, j] = np.random.poisson(
-        #                         expected_planet_photons_per_frame[j]
-        #                     )
-        #                     frame_counts[i, j] += planet_frame_counts[i, j]
-        #                 if self.include_disk:
-        #                     disk_frame_counts[i, j] = np.random.poisson(
-        #                         expected_disk_photons_per_frame[j]
-        #                     )
-        #                     frame_counts[i, j] += disk_frame_counts[i, j]
-        #             else:
-        #                 frame = np.random.poisson(expected_photons_per_frame[j])
-        #                 frame_counts[i, j] = frame
-        #     else:
-        #         if self.return_sources:
-        #             if self.include_star:
-        #                 star_frame_counts[i] = np.random.poisson(
-        #                     expected_star_photons_per_frame
-        #                 )
-        #                 frame_counts[i] += star_frame_counts[i]
-        #             if self.include_planets:
-        #                 planet_frame_counts[i] = np.random.poisson(
-        #                     expected_planet_photons_per_frame
-        #                 )
-        #                 frame_counts[i] += planet_frame_counts[i]
-        #             if self.include_disk:
-        #                 disk_frame_counts[i] = np.random.poisson(
-        #                     expected_disk_photons_per_frame
-        #                 )
-        #                 frame_counts[i] += disk_frame_counts[i]
-        #         else:
-        #             frame = np.random.poisson(expected_photons_per_frame)
-        #             frame_counts[i] = frame
 
         coro_coords, coro_dims, det_coords, det_dims = self.coro_det_coords_and_dims()
         args = (coro_coords, coro_dims, det_coords, det_dims)
