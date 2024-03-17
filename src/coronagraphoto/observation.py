@@ -13,10 +13,13 @@ from astropy.time import Time
 from exoverses.util import misc
 from lod_unit import lod, lod_eq
 from matplotlib.colors import LogNorm, Normalize
-from photutils.aperture import (ApertureStats, CircularAnnulus,
-                                CircularAperture, aperture_photometry)
+from photutils.aperture import (
+    ApertureStats,
+    CircularAnnulus,
+    CircularAperture,
+    aperture_photometry,
+)
 from scipy.ndimage import rotate, shift, zoom
-from synphot import SpectralElement
 from tqdm import tqdm
 
 from coronagraphoto import util
@@ -24,15 +27,19 @@ from coronagraphoto.logger import setup_logger
 
 
 class Observation:
-    def __init__(self, coronagraph, system, observing_scenario, logging_level="INFO"):
+    def __init__(
+        self, coronagraph, system, observing_scenario, settings, logging_level="INFO"
+    ):
         """Class to store the parameters of an observation.
         Args:
             coronagraph (Coronagraph object):
                 Coronagraph object containing the coronagraph parameters
             system (ExovistaSystem object):
                 ExovistaSystem object containing the system parameters
-            observing_scenario (dict):
-                Dictionary containing the observing scenario parameters
+            observing_scenario (ObservingScenario object):
+                Object containing the observing scenario parameters
+            settings (Settings object):
+                Object containing the settings parameters
 
         """
         self.coronagraph = coronagraph
@@ -41,102 +48,61 @@ class Observation:
         self.system_name = system.star.name
         self.logger = setup_logger(logging_level)
 
-        self.load_observing_scenario(observing_scenario)
+        self.load_settings(observing_scenario, settings)
 
         # Create save directory
         self.save_dir = Path("results", system.file.stem, coronagraph.dir.parts[-1])
 
-    def load_observing_scenario(self, observing_scenario):
-        self.observing_scenario = observing_scenario
-        # Load observing scenario parameters
-        self.diameter = self.observing_scenario.scenario["diameter"]
-        self.central_wavelength = self.observing_scenario.scenario["central_wavelength"]
-        self.start_time = self.observing_scenario.scenario["start_time"]
-        self.exposure_time = self.observing_scenario.scenario["exposure_time"]
-        self.frame_time = self.observing_scenario.scenario["frame_time"]
+    def load_settings(self, observing_scenario, settings):
+        # self.observing_scenario = observing_scenario
+        self.scenario = observing_scenario
+        self.settings = settings
 
         # Load observing scenario flags
-        self.include_star = self.observing_scenario.scenario.get("include_star")
-        self.include_planets = self.observing_scenario.scenario.get("include_planets")
-        self.include_disk = self.observing_scenario.scenario.get("include_disk")
-        self.return_frames = self.observing_scenario.scenario.get("return_frames")
-        self.return_spectrum = self.observing_scenario.scenario.get("return_spectrum")
-        self.return_sources = self.observing_scenario.scenario.get("return_sources")
-        self.time_invariant_planets = self.observing_scenario.scenario.get(
-            "time_invariant_planets"
+        self.nframes, self.scenario.frame_time, self.frame_start_times = (
+            self.calc_frame_info()
         )
-        self.time_invariant_star = self.observing_scenario.scenario.get(
-            "time_invariant_star"
-        )
-        self.time_invariant_disk = self.observing_scenario.scenario.get(
-            "time_invariant_disk"
-        )
-        self.nframes, self.frame_time, self.frame_start_times = self.calc_frame_info()
-
-        # Load observing scenario data
-        self.bandpass = self.observing_scenario.scenario.get("bandpass")
-        if self.bandpass is None:
-            self.bandpass_model = self.observing_scenario.scenario.get("bandpass_model")
-            self.frac_bandwidth = self.observing_scenario.scenario.get("frac_bandwidth")
-            self.bandpass = SpectralElement(
-                self.bandpass_model,
-                mean=self.central_wavelength,
-                stddev=self.frac_bandwidth
-                * self.central_wavelength
-                / np.sqrt(2 * np.pi),
-            )
-
-        self.bandpass_model = str(self.bandpass.model)
-        self.spectral_resolution = self.observing_scenario.scenario.get(
-            "spectral_resolution"
-        )
-        self.wavelength_resolved_flux = self.observing_scenario.scenario.get(
-            "wavelength_resolved_flux"
-        )
-        self.wavelength_resolved_transmission = self.observing_scenario.scenario.get(
-            "wavelength_resolved_transmission"
-        )
-        self.any_wavelength_dependence = (
-            self.wavelength_resolved_flux or self.wavelength_resolved_transmission
-        )
-        self.detector_shape = self.observing_scenario.scenario.get("detector_shape")
-        self.detector_pixel_scale = self.observing_scenario.scenario.get(
-            "detector_pixel_scale"
-        )
-        assert (self.detector_shape is not None) == (
-            self.detector_pixel_scale is not None
-        ), "Must provide both detector_shape and detector_pixel_scale or neither"
-        self.has_detector = self.detector_shape is not None
 
         # Check inputs
-        if self.return_spectrum:
+        if self.settings.return_spectrum:
             assert (
-                self.spectral_resolution is not None
-            ), "Must provide a spectral_resolution if return_spectrum is True"
-            assert self.any_wavelength_dependence, (
+                self.scenario.spectral_resolution is not None
+            ), "Must provide a scenario.spectral_resolution if settings.return_spectrum is True"
+            assert self.settings.any_wavelength_dependence, (
                 "One or both of wavelength_resolved_flux and "
                 "wavelength_resolved_transmission must be True "
-                "if return_spectrum is True"
+                "if settings.return_spectrum is True"
             )
         # Create the wavelength grid and bandwidth
-        if self.any_wavelength_dependence:
+        if self.settings.any_wavelength_dependence:
             self.logger.info("Creating wavelength grid")
             (
                 self.spectral_wavelength_grid,
                 self.spectral_bandwidths,
-            ) = util.gen_wavelength_grid(self.bandpass, self.spectral_resolution)
+            ) = util.gen_wavelength_grid(
+                self.scenario.bandpass, self.scenario.spectral_resolution
+            )
         else:
-            self.full_bandwidth = self.bandpass.waveset[-1] - self.bandpass.waveset[0]
+            self.full_bandwidth = (
+                self.scenario.bandpass.waveset[-1] - self.scenario.bandpass.waveset[0]
+            )
 
         # Create the transmission array (or single value)
-        if self.wavelength_resolved_transmission:
-            self.spectral_transmission = self.bandpass(self.spectral_wavelength_grid)
+        if self.settings.wavelength_resolved_transmission:
+            self.spectral_transmission = self.scenario.bandpass(
+                self.spectral_wavelength_grid
+            )
         else:
-            self.central_transmission = self.bandpass(self.central_wavelength)
+            self.central_transmission = self.scenario.bandpass(
+                self.scenario.central_wavelength
+            )
 
         # Solve for illuminated area
         self.illuminated_area = (
-            np.pi * self.diameter**2 / 4.0 * (1.0 - self.coronagraph.frac_obscured)
+            np.pi
+            * self.scenario.diameter**2
+            / 4.0
+            * (1.0 - self.coronagraph.frac_obscured)
         )
 
     def create_count_rates(self):
@@ -145,7 +111,7 @@ class Observation:
         """
         self.logger.info("Creating count rates")
 
-        if self.any_wavelength_dependence:
+        if self.settings.any_wavelength_dependence:
             nwave = len(self.spectral_wavelength_grid)
         else:
             nwave = 1
@@ -156,36 +122,36 @@ class Observation:
         self.total_count_rate = np.zeros(tuple(shape)) * u.ph / u.s
 
         base_count_rate_arr = np.zeros_like(self.total_count_rate.value) * u.ph / u.s
-        if self.include_star:
+        if self.settings.include_star:
             self.logger.info("Creating star count rate")
             self.star_count_rate = self.generic_count_rate_logic(
                 self.gen_star_count_rate,
                 base_count_rate_arr,
-                time_invariant=self.time_invariant_star,
+                time_invariant=self.settings.time_invariant_star,
             )
             self.total_count_rate += self.star_count_rate
         else:
             self.logger.info("Not including star")
 
-        if self.include_planets:
+        if self.settings.include_planets:
             self.logger.info("Creating planets count rate")
             self.planet_count_rate = self.generic_count_rate_logic(
                 self.gen_planet_count_rate,
                 base_count_rate_arr,
-                time_invariant=self.time_invariant_planets,
+                time_invariant=self.settings.time_invariant_planets,
             )
             self.total_count_rate += self.planet_count_rate
         else:
             self.logger.info("Not including planets")
 
-        if self.include_disk:
+        if self.settings.include_disk:
             if not self.coronagraph.has_psf_datacube:
                 self.coronagraph.get_disk_psfs()
             self.logger.info("Creating disk count rate")
             self.disk_count_rate = self.generic_count_rate_logic(
                 self.gen_disk_count_rate,
                 base_count_rate_arr,
-                time_invariant=self.time_invariant_disk,
+                time_invariant=self.settings.time_invariant_disk,
             )
             self.total_count_rate += self.disk_count_rate
         else:
@@ -217,30 +183,31 @@ class Observation:
 
         # Set up whether we need to tile to other wavelengths
         tile_lam = (
-            self.wavelength_resolved_transmission and not self.wavelength_resolved_flux
+            self.settings.wavelength_resolved_transmission
+            and not self.settings.wavelength_resolved_flux
         )
 
         # Set up wavelength and bandwidth arrays
-        if self.wavelength_resolved_flux:
+        if self.settings.wavelength_resolved_flux:
             lams = self.spectral_wavelength_grid
             bws = self.spectral_bandwidths
         else:
-            lams = [self.central_wavelength]
-            if self.wavelength_resolved_transmission:
+            lams = [self.scenario.central_wavelength]
+            if self.settings.wavelength_resolved_transmission:
                 # bandwidth at the central wavelength
                 bws = np.repeat(self.spectral_bandwidths[nlam // 2], nlam)
             else:
                 bws = [self.full_bandwidth]
 
         # Create transmission array
-        if self.wavelength_resolved_transmission:
+        if self.settings.wavelength_resolved_transmission:
             transmissions = self.spectral_transmission
         else:
             # This is a single value, so we can just repeat it
             transmissions = np.repeat(self.central_transmission, nlam)
 
         if time_invariant:
-            frame_times = [self.start_time]
+            frame_times = [self.scenario.start_time]
         else:
             frame_times = self.frame_start_times
 
@@ -262,9 +229,13 @@ class Observation:
                 if tile_lam:
                     # Apply transmission to separate the counts by wavelength
                     # (nlam, npixels, npixels)
-                    object_count_rate[frame_ind, :] = (
-                        transmissions[:, None, None] * base_count_rate
-                    )
+                    try:
+                        object_count_rate[frame_ind, :] = (
+                            transmissions[:, None, None] * base_count_rate
+                        )
+                    except:
+                        breakpoint()
+
                 else:
                     # Apply transmission to the current lam count rate
                     # (npix, npix)
@@ -285,7 +256,7 @@ class Observation:
         """
         # Compute star count rate in lambda/D
         stellar_diam_lod = self.system.star.angular_diameter.to(
-            lod, lod_eq(wavelength, self.diameter)
+            lod, lod_eq(wavelength, self.scenario.diameter)
         )
 
         # Get the intensity map I(x,y) at the stellar diameters
@@ -316,7 +287,7 @@ class Observation:
         orbit_dataset = self.system.propagate(time, **prop_kwargs)
         xystar = np.array([self.coronagraph.npixels / 2] * 2) * u.pix
         pixscale = (self.coronagraph.pixel_scale * u.pix).to(
-            u.arcsec, lod_eq(wavelength, self.diameter)
+            u.arcsec, lod_eq(wavelength, self.scenario.diameter)
         ) / u.pix
         orbit_dataset = misc.add_units(
             orbit_dataset,
@@ -360,7 +331,9 @@ class Observation:
 
         # for i, planet in enumerate(tqdm(self.system.planets, desc="Adding planets")):
         if coro_type == "1d":
-            planet_lod_alphas = planet_alphas.to(lod, lod_eq(wavelength, self.diameter))
+            planet_lod_alphas = planet_alphas.to(
+                lod, lod_eq(wavelength, self.scenario.diameter)
+            )
 
             # The planet psfs at each pixel
             planet_psfs = self.coronagraph.offax_psf_interp(planet_lod_alphas)
@@ -383,7 +356,7 @@ class Observation:
             # TODO NOT IMPLEMENTED YET
             planet_lod_alphas = np.stack(
                 [
-                    planet_alphas[i, :].to(lod, lod_eq(wave, self.diameter))
+                    planet_alphas[i, :].to(lod, lod_eq(wave, self.scenario.diameter))
                     for wave in self.obs_wavelengths
                 ]
             )
@@ -453,7 +426,7 @@ class Observation:
         # pixel scale
         zoom_factor = (
             (1 * u.pixel * self.system.star.pixel_scale.to(u.rad / u.pixel)).to(
-                lod, lod_eq(wavelength, self.diameter)
+                lod, lod_eq(wavelength, self.scenario.diameter)
             )
             / self.coronagraph.pixel_scale
         ).value
@@ -514,32 +487,34 @@ class Observation:
 
         # Create the arrays to store the frame counts for each source
         # if we're returning them
-        if self.return_sources:
+        if self.settings.return_sources:
             frame_counts = np.zeros(coro_image_shape)
-            if self.include_star:
+            if self.settings.include_star:
                 expected_star_photons_per_frame = (
-                    (self.star_count_rate * self.frame_time).decompose().value
+                    (self.star_count_rate * self.scenario.frame_time).decompose().value
                 )
                 star_frame_counts = np.random.poisson(expected_star_photons_per_frame)
                 frame_counts += star_frame_counts
-            if self.include_planets:
+            if self.settings.include_planets:
                 expected_planet_photons_per_frame = (
-                    (self.planet_count_rate * self.frame_time).decompose().value
+                    (self.planet_count_rate * self.scenario.frame_time)
+                    .decompose()
+                    .value
                 )
                 planet_frame_counts = np.random.poisson(
                     expected_planet_photons_per_frame
                 )
                 frame_counts += planet_frame_counts
-            if self.include_disk:
+            if self.settings.include_disk:
                 expected_disk_photons_per_frame = (
-                    (self.disk_count_rate * self.frame_time).decompose().value
+                    (self.disk_count_rate * self.scenario.frame_time).decompose().value
                 )
                 disk_frame_counts = np.random.poisson(expected_disk_photons_per_frame)
                 frame_counts += disk_frame_counts
         else:
             # Calculate the expected number of photons per frame
             expected_photons_per_frame = (
-                (self.total_count_rate * self.frame_time).decompose().value
+                (self.total_count_rate * self.scenario.frame_time).decompose().value
             )
             frame_counts = np.random.poisson(expected_photons_per_frame)
 
@@ -550,25 +525,25 @@ class Observation:
         obs_ds = xr.Dataset(coords=coords_dict)
         obs_ds = self.add_source_to_dataset(frame_counts, "img", obs_ds, *args)
 
-        if self.return_sources:
-            if self.include_star:
+        if self.settings.return_sources:
+            if self.settings.include_star:
                 obs_ds = self.add_source_to_dataset(
                     star_frame_counts, "star", obs_ds, *args
                 )
-            if self.include_planets:
+            if self.settings.include_planets:
                 obs_ds = self.add_source_to_dataset(
                     planet_frame_counts, "planet", obs_ds, *args
                 )
-            if self.include_disk:
+            if self.settings.include_disk:
                 obs_ds = self.add_source_to_dataset(
                     disk_frame_counts, "disk", obs_ds, *args
                 )
-        if not self.return_spectrum:
+        if not self.settings.return_spectrum:
             # Sum over the wavelength axis if we're not returning the spectrum
             # but we did calculate it
             obs_ds = obs_ds.sum(dim="spectral_wavelength(nm)")
 
-        if not self.return_frames:
+        if not self.settings.return_frames:
             # Sum over the time axis if we're not returning the frames
             obs_ds = obs_ds.sum(dim="time")
 
@@ -600,7 +575,7 @@ class Observation:
         ds = xr.merge([ds, coro_da])
 
         # Detector data
-        if self.detector_shape is not None:
+        if self.scenario.detector_shape is not None:
             counts_det = self.convert_coro_to_detector(coro_counts)
             det_da = xr.DataArray(counts_det, coords=det_coords, dims=det_dims)
             det_da.name = f"{source_name}(det)"
@@ -618,7 +593,7 @@ class Observation:
                 The shape of the coronagraph count/image pixel array
         """
         coro_image_shape = [self.nframes]
-        if self.any_wavelength_dependence:
+        if self.settings.any_wavelength_dependence:
             coro_image_shape.append(len(self.spectral_wavelength_grid))
         else:
             coro_image_shape.append(1)
@@ -639,22 +614,24 @@ class Observation:
             frame_start_times (astropy Time array):
                 The start times of each frame
         """
-        if self.return_frames:
+        if self.settings.return_frames:
             partial_frame, full_frames = np.modf(
-                (self.exposure_time / self.frame_time).decompose().value
+                (self.scenario.exposure_time / self.scenario.frame_time)
+                .decompose()
+                .value
             )
             if partial_frame != 0:
                 raise ("Warning! Partial frames are not implemented yet!")
-            frame_time = self.frame_time
+            frame_time = self.scenario.frame_time
         else:
             # If we're not returning frames, we can simulate this as one frame
             # one call due to its Poisson nature
             full_frames = 1
-            frame_time = self.exposure_time
+            frame_time = self.scenario.exposure_time
         frame_start_times = Time(
             np.arange(
-                self.start_time.jd,
-                self.start_time.jd + self.exposure_time.to(u.d).value,
+                self.scenario.start_time.jd,
+                self.scenario.start_time.jd + self.scenario.exposure_time.to(u.d).value,
                 frame_time.to(u.d).value,
             ),
             format="jd",
@@ -681,10 +658,10 @@ class Observation:
         """
         coro_pixel_arr = np.arange(self.coronagraph.npixels)
 
-        if self.any_wavelength_dependence:
+        if self.settings.any_wavelength_dependence:
             wavelength_coords = self.spectral_wavelength_grid.to(u.nm).value
         else:
-            wavelength_coords = [self.central_wavelength.to(u.nm).value]
+            wavelength_coords = [self.scenario.central_wavelength.to(u.nm).value]
 
         # Coronagraph coordinates and dimensions
         coro_coords = [
@@ -696,9 +673,9 @@ class Observation:
         coro_dims = ["time", "spectral_wavelength(nm)", "xpix(coro)", "ypix(coro)"]
 
         # Detector coordinates and dimensions
-        if self.has_detector:
-            detector_xpix_arr = np.arange(self.detector_shape[0])
-            detector_ypix_arr = np.arange(self.detector_shape[1])
+        if self.scenario.has_detector:
+            detector_xpix_arr = np.arange(self.scenario.detector_shape[0])
+            detector_ypix_arr = np.arange(self.scenario.detector_shape[1])
             det_coords = coro_coords[:-2] + [detector_xpix_arr, detector_ypix_arr]
             det_dims = coro_dims[:-2] + ["xpix(det)", "ypix(det)"]
         else:
@@ -719,12 +696,12 @@ class Observation:
         coro_coords, coro_dims, det_coords, det_dims = self.coro_det_coords_and_dims()
         final_coords, final_dims = coro_coords.copy(), coro_dims.copy()
 
-        if not self.return_frames and "time" in coro_dims:
+        if not self.settings.return_frames and "time" in coro_dims:
             time_ind = np.argwhere(np.array(final_dims) == "time")[0][0]
             final_dims.remove("time")
             final_coords.pop(time_ind)
 
-        if not self.return_spectrum and "spectral_wavelength(nm)" in coro_dims:
+        if not self.settings.return_spectrum and "spectral_wavelength(nm)" in coro_dims:
             # Remove the wavelength dimension if we're not returning the spectrum
             # since it will be summed over
             wave_ind = np.argwhere(np.array(final_dims) == "spectral_wavelength(nm)")[
@@ -733,7 +710,7 @@ class Observation:
             final_dims.remove("spectral_wavelength(nm)")
             final_coords.pop(wave_ind)
 
-        if self.has_detector:
+        if self.scenario.has_detector:
             final_coords += det_coords[-2:]
             final_dims += det_dims[-2:]
 
@@ -752,17 +729,17 @@ class Observation:
                 The count/image data scaled to the detector pixels (arcsec)
         """
         # Scale the lambda/D pixels to the detector pixels
-        if self.any_wavelength_dependence:
+        if self.settings.any_wavelength_dependence:
             lam = self.spectral_wavelength_grid
         else:
-            lam = self.central_wavelength
+            lam = self.scenario.central_wavelength
         det_counts = util.get_detector_images(
             coro_counts,
             self.coronagraph.pixel_scale,
             lam,
-            self.diameter,
-            self.detector_shape,
-            self.detector_pixel_scale,
+            self.scenario.diameter,
+            self.scenario.detector_shape,
+            self.scenario.detector_pixel_scale,
         )
         return det_counts
 
@@ -785,9 +762,9 @@ class Observation:
                 names = ["Total", "Star", "Planet", "Disk"]
                 inclusion = [
                     True,
-                    self.include_star,
-                    self.include_planets,
-                    self.include_disk,
+                    self.settings.include_star,
+                    self.settings.include_planets,
+                    self.settings.include_disk,
                 ]
                 for ax, data, name, include in zip(
                     axes.flatten(), data, names, inclusion
@@ -816,7 +793,7 @@ class Observation:
                 )
                 save_path = Path(
                     self.save_dir,
-                    f"{wavelength.to(u.nm).value:.0f}"
+                    f"{wavelength.to(u.nm).value:.0f}",
                     # , "images"
                 )
                 if not save_path.exists():
@@ -862,10 +839,10 @@ class Observation:
         snrs = np.zeros_like(times.value)
         analytic_snrs = np.zeros_like(times.value)
         for i, t in enumerate(times):
-            self.exposure_time = t
+            self.scenario.exposure_time = t
             self.count_photons()
             expected_photons_per_frame = (
-                (noise_field * self.exposure_time).decompose().value
+                (noise_field * self.scenario.exposure_time).decompose().value
             )
             noise_frame = np.random.poisson(expected_photons_per_frame)
             combined_image = self.image + noise_frame

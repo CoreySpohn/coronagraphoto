@@ -4,7 +4,7 @@ from pathlib import PurePath
 import astropy.units as u
 import numpy as np
 from astropy.time import Time
-from lod_unit import lod, lod_eq
+from lod_unit import lod_eq
 from scipy.ndimage import zoom
 
 
@@ -50,16 +50,16 @@ def gen_wavelength_grid(bandpass, resolution):
 def convert_pixels(unit, obs, plane="coro"):
     if plane == "coro":
         pix_arr = np.arange(obs.coronagraph.npixels)
-        lam = obs.central_wavelength
-        diameter = obs.diameter
+        lam = obs.scenario.central_wavelength
+        diameter = obs.scenario.diameter
         pix_scale = (obs.coronagraph.pixel_scale * u.pix).to(
             u.rad, lod_eq(lam, diameter)
         ) / u.pix
         pix_shape = [obs.coronagraph.npixels] * 2
     elif plane == "det":
-        pix_arr = np.arange(obs.detector_shape[0])
-        pix_scale = obs.detector_pixel_scale
-        pix_shape = obs.detector_shape
+        pix_arr = np.arange(obs.scenario.detector_shape[0])
+        pix_scale = obs.scenario.detector_pixel_scale
+        pix_shape = obs.scenario.detector_shape
 
     xnpix, ynpix = pix_shape
     star_pixel = (xnpix / 2, ynpix / 2)

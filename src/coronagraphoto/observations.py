@@ -30,7 +30,7 @@ class Observations:
 
         """
         self.base_observation = copy.deepcopy(base_observation)
-        self.base_obs_scenario = self.base_observation.observing_scenario
+        self.base_obs_scenario = self.base_observation.scenario
         self.times = times
         self.central_wavelengths = central_wavelengths
 
@@ -145,13 +145,13 @@ class Observations:
 
             # Adjust observation scenario
             obs_scenario = copy.deepcopy(self.base_obs_scenario)
-            obs_scenario.scenario["start_time"] = time
-            obs_scenario.scenario["central_wavelength"] = wavelength
-            obs.load_observing_scenario(obs_scenario)
+            obs_scenario.start_time = time
+            obs_scenario.central_wavelength = wavelength
+            obs.load_settings(obs_scenario, obs.settings)
 
             observations.append(obs)
 
-        if self.base_observation.observing_scenario.scenario["include_disk"]:
+        if self.base_observation.settings.include_disk:
             # Create the psf datacube and then share it among the observations
             psfs = self.base_observation.coronagraph.get_disk_psfs()
             for obs in observations:
