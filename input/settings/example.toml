@@ -1,0 +1,52 @@
+# Simple observing scenario input
+[general]
+diameter = { value = 8.4, unit = 'm' }
+exposure_time = { value = 5, unit = 'hr' }
+frame_time = { value = 30, unit = 'min' }
+
+# Annoying astropy.time uses "val" and astropy.unit uses "value"
+start_time = { val = 2000, format = 'decimalyear' }
+
+[spectral_information]
+central_wavelength = { value = 500, unit = 'nm' }
+spectral_resolution = 100
+# bandpass
+
+[detector]
+# The size of the detector in pixels
+shape = [300, 300]
+# The pixel scale of the detector pixels
+pixel_scale = { value = 0.1, unit = 'arcsec' }
+
+[sources]
+# When true, the code will include the source in the simulation
+star = false
+planets = true
+disk = false
+
+[output]
+# If true, the code returns all the frames individually (keyed as "time"). If
+# false, the code sums all the frames together.
+frames = false
+# If true, the observation separates out the counted photons by
+# "spectral_wavelength(nm)". If false, the observation returns the total
+spectrum = false
+# If true, the output includes the counted photons for each source. If false,
+# the output includes the total counted photons.
+sources = true
+
+[precision]
+[precision.wavelength]
+# When true, the code will recalculate the flux of each source for each
+# wavelength in the bandpass
+flux = false
+# When true, the code will recalculate the transmission of the bandpass for
+# each wavelength
+transmission = false
+
+[precision.time_invariance]
+# When true, the code will reuse the count rate from the initial exposure for
+# all subsequent exposures (frames)
+planets = false
+star = true
+disk = true
