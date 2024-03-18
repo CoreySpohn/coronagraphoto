@@ -1,5 +1,13 @@
 from dataclasses import dataclass
-import tomllib
+
+try:
+    import tomllib
+
+    has_tomllib = True
+except ImportError:
+    import toml
+
+    has_tomllib = False
 
 
 class Settings:
@@ -40,8 +48,11 @@ class Settings:
 
     def load_settings(self, toml_file):
         # Load the TOML file
-        with open(toml_file, "rb") as file:
-            config = tomllib.load(file)
+        if has_tomllib:
+            with open(toml_file, "rb") as file:
+                config = tomllib.load(file)
+        else:
+            config = toml.load(toml_file)
 
         # Sources settings
         if "sources" in config:

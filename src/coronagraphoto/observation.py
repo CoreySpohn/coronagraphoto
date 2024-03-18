@@ -13,12 +13,8 @@ from astropy.time import Time
 from exoverses.util import misc
 from lod_unit import lod, lod_eq
 from matplotlib.colors import LogNorm, Normalize
-from photutils.aperture import (
-    ApertureStats,
-    CircularAnnulus,
-    CircularAperture,
-    aperture_photometry,
-)
+from photutils.aperture import (ApertureStats, CircularAnnulus,
+                                CircularAperture, aperture_photometry)
 from scipy.ndimage import rotate, shift, zoom
 from tqdm import tqdm
 
@@ -59,9 +55,7 @@ class Observation:
         self.settings = settings
 
         # Load observing scenario flags
-        self.nframes, self.scenario.frame_time, self.frame_start_times = (
-            self.calc_frame_info()
-        )
+        self.nframes, self.frame_start_times = self.calc_frame_info()
 
         # Check inputs
         if self.settings.return_spectrum:
@@ -229,18 +223,18 @@ class Observation:
                 if tile_lam:
                     # Apply transmission to separate the counts by wavelength
                     # (nlam, npixels, npixels)
-                    try:
-                        object_count_rate[frame_ind, :] = (
-                            transmissions[:, None, None] * base_count_rate
-                        )
-                    except:
-                        breakpoint()
+                    object_count_rate[frame_ind, :] = (
+                        transmissions[:, None, None] * base_count_rate
+                    )
 
                 else:
                     # Apply transmission to the current lam count rate
                     # (npix, npix)
                     trans_applied_rate = transmissions[lam_ind] * base_count_rate
-                    object_count_rate[frame_ind, lam_ind] = trans_applied_rate
+                    try:
+                        object_count_rate[frame_ind, lam_ind] = trans_applied_rate
+                    except:
+                        breakpoint()
 
             if time_invariant:
                 # No change between frames, so apply this to all frames
@@ -609,8 +603,6 @@ class Observation:
         Returns:
             nframes (int):
                 Number of frames
-            frame_time (astropy.units.Quantity):
-                Length of time per frame
             frame_start_times (astropy Time array):
                 The start times of each frame
         """
@@ -628,18 +620,14 @@ class Observation:
             # one call due to its Poisson nature
             full_frames = 1
             frame_time = self.scenario.exposure_time
-        frame_start_times = Time(
-            np.arange(
-                self.scenario.start_time.jd,
-                self.scenario.start_time.jd + self.scenario.exposure_time.to(u.d).value,
-                frame_time.to(u.d).value,
-            ),
-            format="jd",
-        )
+        start_jd = self.scenario.start_time.jd
+        frame_d = frame_time.to(u.d).value
+        jd_vals = [start_jd + frame_d * i for i in range(full_frames.astype(int))]
+        frame_start_times = Time(jd_vals, format="jd")
 
         # Setting up the proper shape of the array that counts the photons
         nframes = int(full_frames)
-        return nframes, frame_time, frame_start_times
+        return nframes, frame_start_times
 
     def coro_det_coords_and_dims(self):
         """

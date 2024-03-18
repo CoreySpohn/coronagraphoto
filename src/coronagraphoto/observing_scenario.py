@@ -1,7 +1,16 @@
 import astropy.units as u
 import numpy as np
 from astropy.time import Time
-import tomllib
+
+try:
+    import tomllib
+
+    has_tomllib = True
+except ImportError:
+    import toml
+
+    has_tomllib = False
+
 from synphot import SpectralElement
 
 
@@ -67,8 +76,11 @@ class ObservingScenario:
 
     def load_toml(self, toml_file):
         # Load the TOML file
-        with open(toml_file, "rb") as file:
-            config = tomllib.load(file)
+        if has_tomllib:
+            with open(toml_file, "rb") as file:
+                config = tomllib.load(file)
+        else:
+            config = toml.load(toml_file)
 
         # General settings
         if "general" in config:
