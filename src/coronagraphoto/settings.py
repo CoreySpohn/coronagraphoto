@@ -1,5 +1,3 @@
-from dataclasses import dataclass
-
 try:
     import tomllib
 

@@ -1,5 +1,4 @@
 import astropy.units as u
-import numpy as np
 from astropy.time import Time
 
 try:
@@ -10,8 +9,6 @@ except ImportError:
     import toml
 
     has_tomllib = False
-
-from synphot import SpectralElement
 
 
 class ObservingScenario:
