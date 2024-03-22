@@ -1,17 +1,10 @@
 import copy
-import sys
 from itertools import product
-from pathlib import Path
 
 import astropy.units as u
-import matplotlib as mpl
-import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
 from astropy.time import Time
-from lod_unit.lod_unit import lod, lod_eq
-from matplotlib.colors import LogNorm
-from scipy.ndimage import rotate, shift, zoom
 from tqdm import tqdm
 
 import coronagraphoto.util as util
@@ -88,8 +81,6 @@ class Observations:
         obs_ds.attrs["dist_attrs_for_images"] = dist_attr_dims
         obs_ds.attrs["image_titles"] = {}
 
-        linked_coords = []
-
         # Now loop through all scenarios again and create the observation
         for obs in tqdm(observations, desc="Simulating all observations", position=0):
             obs.create_count_rates()
@@ -117,7 +108,7 @@ class Observations:
                     val = val.value
                     attr += f"({unit})"
                     val_str = f"{val:.2f}"
-                elif type(val) == str:
+                elif isinstance(val, str):
                     val_str = val
                 else:
                     raise NotImplementedError(

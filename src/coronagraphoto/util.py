@@ -284,7 +284,7 @@ def find_distinguishing_attributes(*observations):
             replacement = u.Quantity(sorted_values)
         elif type(sorted_values[0]) == Time:
             replacement = Time(sorted_values).datetime64
-        elif type(sorted_values[0]) == str:
+        elif isinstance(sorted_values[0], str):
             replacement = sorted_values
         else:
             raise NotImplementedError("Add support for this type")
