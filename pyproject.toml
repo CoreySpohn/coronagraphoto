@@ -30,12 +30,12 @@ dependencies = [
   "xarray",
 ]
 
-[tool.hatch.version]
-source = "vcs"
-
 [project.urls]
 Homepage = "https://github.com/CoreySpohn/coronagraphoto"
 Issues = "https://github.com/CoreySpohn/coronagraphoto/issues"
+
+[tool.hatch.version]
+source = "vcs"
 
 [tool.hatch.metadata.hooks.fancy-pypi-readme]
 content-type = "text/markdown"
