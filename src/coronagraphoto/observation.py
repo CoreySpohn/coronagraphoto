@@ -6,15 +6,13 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numba as nb
 import numpy as np
-import pandas as pd
 import xarray as xr
 from astropy.stats import SigmaClip
 from astropy.time import Time
 from exoverses.util import misc
 from lod_unit import lod, lod_eq
-from matplotlib.colors import LogNorm, Normalize
-from photutils.aperture import (ApertureStats, CircularAnnulus,
-                                CircularAperture, aperture_photometry)
+from matplotlib.colors import LogNorm
+from photutils.aperture import ApertureStats, CircularAnnulus, CircularAperture
 from scipy.ndimage import rotate, shift, zoom
 from tqdm import tqdm
 
@@ -231,10 +229,7 @@ class Observation:
                     # Apply transmission to the current lam count rate
                     # (npix, npix)
                     trans_applied_rate = transmissions[lam_ind] * base_count_rate
-                    try:
-                        object_count_rate[frame_ind, lam_ind] = trans_applied_rate
-                    except:
-                        breakpoint()
+                    object_count_rate[frame_ind, lam_ind] = trans_applied_rate
 
             if time_invariant:
                 # No change between frames, so apply this to all frames
@@ -346,68 +341,68 @@ class Observation:
                 )
 
             planet_count_rate = (rotated_psfs.T @ planet_photon_flux).T
-        elif coro_type == "1dno0":
-            # TODO NOT IMPLEMENTED YET
-            planet_lod_alphas = np.stack(
-                [
-                    planet_alphas[i, :].to(lod, lod_eq(wave, self.scenario.diameter))
-                    for wave in self.obs_wavelengths
-                ]
-            )
-            temp = np.sqrt(
-                planet_lod_alphas**2 - self.coronagraph.offax_psf_offset_y[0] ** 2
-            )
-            seps = (
-                np.dot(plan_seps[i][:, None] * mas2rad, wave_inv[None]) * self.diam
-            )  # lambda/D
-            angs = np.arcsin(self.coronagraph.offax_psf_offset_y[0] / planet_lod_alphas)
-            rotated_psfs = self.coronagraph.offax_psf_interp(temp)
-            for j in range(self.scene.Ntime):
-                for k in range(self.scene.Nwave):
-                    temp[j, k] = np.exp(
-                        rotate(
-                            np.log(temp[j, k]),
-                            plan_angs[i, j] - 90.0 * u.deg + angs[j, k],
-                            axes=(0, 1),
-                            reshape=False,
-                            mode="nearest",
-                            order=5,
-                        )
-                    )  # interpolate in log-space to avoid negative values
-                temp[j] = np.multiply(
-                    temp[j].T, self.scene.fplanet[i, j] * self.oneJ_count_rate
-                ).T  # ph/s
-        elif coro_type == "2dq":
-            # TODO NOT IMPLEMENTED YET
-            temp = (
-                np.dot(plan_offs[i][:, :, None] * mas2rad, wave_inv[None]) * self.diam
-            )  # lambda/D
-            temp = np.swapaxes(temp, 1, 2)  # lambda/D
-            temp = temp[:, :, ::-1]  # lambda/D
-            offs = temp.copy()  # lambda/D
-            # temp = np.exp(self.ln_offax_psf_interp(np.abs(temp)))
-            temp = self.offax_psf_interp(np.abs(temp))
-            mask = offs[:, :, 0] < 0.0
-            temp[mask] = temp[mask, ::-1, :]
-            mask = offs[:, :, 1] < 0.0
-            temp[mask] = temp[mask, :, ::-1]
-            for j in range(self.scene.Ntime):
-                temp[j] = np.multiply(
-                    temp[j].T, self.scene.fplanet[i, j] * self.oneJ_count_rate
-                ).T  # ph/s
-        else:
-            # TODO NOT IMPLEMENTED YET
-            temp = (
-                np.dot(plan_offs[i][:, :, None] * mas2rad, wave_inv[None]) * self.diam
-            )  # lambda/D
-            temp = np.swapaxes(temp, 1, 2)  # lambda/D
-            temp = temp[:, :, ::-1]  # lambda/D
-            # temp = np.exp(self.ln_offax_psf_interp(temp))
-            temp = self.offax_psf_interp(temp)
-            for j in range(self.scene.Ntime):
-                temp[j] = np.multiply(
-                    temp[j].T, self.scene.fplanet[i, j] * self.oneJ_count_rate
-                ).T  # ph/s
+        # elif coro_type == "1dno0":
+        #     #TODO NOT IMPLEMENTED YET
+        #     planet_lod_alphas = np.stack(
+        #         [
+        #             planet_alphas[i, :].to(lod, lod_eq(wave, self.scenario.diameter))
+        #             for wave in self.obs_wavelengths
+        #         ]
+        #     )
+        #     temp = np.sqrt(
+        #         planet_lod_alphas**2 - self.coronagraph.offax_psf_offset_y[0] ** 2
+        #     )
+        #     seps = (
+        #         np.dot(plan_seps[i][:, None] * mas2rad, wave_inv[None]) * self.diam
+        #     )  # lambda/D
+        #     angs = np.arcsin(self.coronagraph.offax_psf_offset_y[0] / planet_lod_alphas)
+        #     rotated_psfs = self.coronagraph.offax_psf_interp(temp)
+        #     for j in range(self.scene.Ntime):
+        #         for k in range(self.scene.Nwave):
+        #             temp[j, k] = np.exp(
+        #                 rotate(
+        #                     np.log(temp[j, k]),
+        #                     plan_angs[i, j] - 90.0 * u.deg + angs[j, k],
+        #                     axes=(0, 1),
+        #                     reshape=False,
+        #                     mode="nearest",
+        #                     order=5,
+        #                 )
+        #             )  # interpolate in log-space to avoid negative values
+        #         temp[j] = np.multiply(
+        #             temp[j].T, self.scene.fplanet[i, j] * self.oneJ_count_rate
+        #         ).T  # ph/s
+        # elif coro_type == "2dq":
+        #     # TODO NOT IMPLEMENTED YET
+        #     temp = (
+        #         np.dot(plan_offs[i][:, :, None] * mas2rad, wave_inv[None]) * self.diam
+        #     )  # lambda/D
+        #     temp = np.swapaxes(temp, 1, 2)  # lambda/D
+        #     temp = temp[:, :, ::-1]  # lambda/D
+        #     offs = temp.copy()  # lambda/D
+        #     # temp = np.exp(self.ln_offax_psf_interp(np.abs(temp)))
+        #     temp = self.offax_psf_interp(np.abs(temp))
+        #     mask = offs[:, :, 0] < 0.0
+        #     temp[mask] = temp[mask, ::-1, :]
+        #     mask = offs[:, :, 1] < 0.0
+        #     temp[mask] = temp[mask, :, ::-1]
+        #     for j in range(self.scene.Ntime):
+        #         temp[j] = np.multiply(
+        #             temp[j].T, self.scene.fplanet[i, j] * self.oneJ_count_rate
+        #         ).T  # ph/s
+        # else:
+        #     # TODO NOT IMPLEMENTED YET
+        #     temp = (
+        #         np.dot(plan_offs[i][:, :, None] * mas2rad, wave_inv[None]) * self.diam
+        #     )  # lambda/D
+        #     temp = np.swapaxes(temp, 1, 2)  # lambda/D
+        #     temp = temp[:, :, ::-1]  # lambda/D
+        #     # temp = np.exp(self.ln_offax_psf_interp(temp))
+        #     temp = self.offax_psf_interp(temp)
+        #     for j in range(self.scene.Ntime):
+        #         temp[j] = np.multiply(
+        #             temp[j].T, self.scene.fplanet[i, j] * self.oneJ_count_rate
+        #         ).T  # ph/s
         return planet_count_rate
         # self.planet_count_rate += planet_image
         # self.total_count_rate += self.planet_count_rate
