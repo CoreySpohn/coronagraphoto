@@ -57,9 +57,10 @@ class Observation:
 
         # Check inputs
         if self.settings.return_spectrum:
-            assert (
-                self.scenario.spectral_resolution is not None
-            ), "Must provide a scenario.spectral_resolution if settings.return_spectrum is True"
+            assert self.scenario.spectral_resolution is not None, (
+                "Must provide a scenario.spectral_resolution if "
+                "settings.return_spectrum is True"
+            )
             assert self.settings.any_wavelength_dependence, (
                 "One or both of wavelength_resolved_flux and "
                 "wavelength_resolved_transmission must be True "
@@ -355,7 +356,8 @@ class Observation:
         #     seps = (
         #         np.dot(plan_seps[i][:, None] * mas2rad, wave_inv[None]) * self.diam
         #     )  # lambda/D
-        #     angs = np.arcsin(self.coronagraph.offax_psf_offset_y[0] / planet_lod_alphas)
+        #     angs
+        #     = np.arcsin(self.coronagraph.offax_psf_offset_y[0] / planet_lod_alphas)
         #     rotated_psfs = self.coronagraph.offax_psf_interp(temp)
         #     for j in range(self.scene.Ntime):
         #         for k in range(self.scene.Nwave):

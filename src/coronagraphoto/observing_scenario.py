@@ -46,8 +46,10 @@ class ObservingScenario:
         # Load bandpass
         if self.bandpass is None:
             raise ValueError("Must provide a bandpass model currently")
-            # self.bandpass_model = self.observing_scenario.scenario.get("bandpass_model")
-            # self.frac_bandwidth = self.observing_scenario.scenario.get("frac_bandwidth")
+            # self.bandpass_model =
+            # self.observing_scenario.scenario.get("bandpass_model")
+            # self.frac_bandwidth =
+            # self.observing_scenario.scenario.get("frac_bandwidth")
         # Check if detector settings are complete
         assert (self.detector_shape is not None) == (
             self.detector_pixel_scale is not None
