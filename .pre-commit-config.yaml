@@ -5,7 +5,6 @@ repos:
       - id: trailing-whitespace
       - id: name-tests-test
       - id: end-of-file-fixer
-      - id: no-commit-to-branch
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.3.4
     hooks:
