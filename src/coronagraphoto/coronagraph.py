@@ -303,12 +303,10 @@ class Coronagraph:
             (aperture_pos / self.pixel_scale).value + (imgs.shape[0] - 1) / 2
         ).astype(int)
         subarr = imgs[
-            aperture_pos_pix[1]
-            - aperture_radius_pix : aperture_pos_pix[1]
+            aperture_pos_pix[1] - aperture_radius_pix : aperture_pos_pix[1]
             + aperture_radius_pix
             + 1,
-            aperture_pos_pix[0]
-            - aperture_radius_pix : aperture_pos_pix[0]
+            aperture_pos_pix[0] - aperture_radius_pix : aperture_pos_pix[0]
             + aperture_radius_pix
             + 1,
         ]
