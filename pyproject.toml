@@ -29,6 +29,16 @@ dependencies = [
   "tqdm",
   "xarray",
 ]
+[project.optional-dependencies]
+dev = ["mypy", "ruff", "pre-comi"]
+docs = [
+  "sphinx",
+  "myst-parser",
+  "sphinx-book-theme",
+  "sphinx-autoapi",
+  "sphinx_autodoc_typehints",
+]
+test = ["nox", "pytest", "hypothesis", "pytest-cov"]
 
 [project.urls]
 Homepage = "https://github.com/CoreySpohn/coronagraphoto"
@@ -37,8 +47,20 @@ Issues = "https://github.com/CoreySpohn/coronagraphoto/issues"
 [tool.hatch.version]
 source = "vcs"
 
+[tool.hatch.build.hooks.vcs]
+version-file = "src/coronagraphoto/_version.py"
+
 [tool.hatch.metadata.hooks.fancy-pypi-readme]
 content-type = "text/markdown"
 
 [[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
 path = "README.md"
+
+[tool.ruff]
+select = ["D", "I"]
+
+[tool.ruff.pydocstyle]
+convention = "google"
+
+[tool.mypy]
+overrides = [{ module = "toml.*", ignore_missing_imports = true }]

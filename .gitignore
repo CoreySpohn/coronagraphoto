@@ -161,3 +161,4 @@ cython_debug/
 
 input/
 !input/settings/example.toml
+*_version.py
