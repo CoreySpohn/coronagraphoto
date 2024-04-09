@@ -1,0 +1,11 @@
+{
+  "creators": [
+    {
+      "orcid": "0000-0002-3138-0240",
+      "affiliation": "NASA Goddard Space Flight Center, Greenbelt, MD",
+      "name": "Spohn, Corey"
+    }
+  ],
+  "license": "MIT",
+  "title": "CoreySpohn/coronagraphoto: A Python package for simulating coronagraph images"
+}
