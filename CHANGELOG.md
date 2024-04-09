@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/CoreySpohn/coronagraphoto/compare/v1.0.0...v1.0.1) (2024-04-09)
+
+
+### Bug Fixes
+
+* **main:** Adding zenodo information ([26837e6](https://github.com/CoreySpohn/coronagraphoto/commit/26837e6b894d0380d0dd529506da1cd35d1ccc1d))
+
 ## 1.0.0 (2024-03-22)
 
 
