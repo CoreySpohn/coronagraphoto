@@ -1,11 +1,11 @@
 try:
     import tomllib
 
-    has_tomllib = True
+    HAS_TOMLLIB = True
 except ImportError:
     import toml
 
-    has_tomllib = False
+    HAS_TOMLLIB = False
 
 
 class Settings:
@@ -46,7 +46,7 @@ class Settings:
 
     def load_settings(self, toml_file):
         # Load the TOML file
-        if has_tomllib:
+        if HAS_TOMLLIB:
             with open(toml_file, "rb") as file:
                 config = tomllib.load(file)
         else:

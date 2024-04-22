@@ -1,18 +1,36 @@
+"""This is an object to hold all the observing scenario information."""
+
 import astropy.units as u
 from astropy.time import Time
 
 try:
     import tomllib
 
-    has_tomllib = True
+    HAS_TOMLLIB = True
 except ImportError:
     import toml
 
-    has_tomllib = False
+    HAS_TOMLLIB = False
 
 
 class ObservingScenario:
+    """ObservingScenario holds information required to run an observation.
+
+    ObservingScenario has a set of default parameters that can be overwritten, either by
+    providing a TOML file with the desired parameters or by providing a dictionary with the
+    custom scenario information. The custom_scenario values will overwrite anything provided
+    in the TOML file.
+    """
+
     def __init__(self, toml_file=None, custom_scenario=None):
+        """Initializes the ObservingScenario object.
+
+        Args:
+            toml_file (str, optional):
+                Path to a TOML file with the observing scenario parameters.
+            custom_scenario (dict, optional):
+                Dictionary with custom observing scenario parameters.
+        """
         # Default scenario values
         self.diameter = 1 * u.m
         self.central_wavelength = 500 * u.nm
@@ -46,10 +64,7 @@ class ObservingScenario:
         # Load bandpass
         if self.bandpass is None:
             raise ValueError("Must provide a bandpass model currently")
-            # self.bandpass_model =
-            # self.observing_scenario.scenario.get("bandpass_model")
-            # self.frac_bandwidth =
-            # self.observing_scenario.scenario.get("frac_bandwidth")
+
         # Check if detector settings are complete
         assert (self.detector_shape is not None) == (
             self.detector_pixel_scale is not None
@@ -57,6 +72,7 @@ class ObservingScenario:
         self.has_detector = self.detector_shape is not None
 
     def __repr__(self):
+        """Returns a string representation of the observing scenario parameters."""
         attrs = vars(self)
         parts = ["ObservingScenario:"]
         for key, value in attrs.items():
@@ -74,8 +90,9 @@ class ObservingScenario:
         return "\n".join(parts)
 
     def load_toml(self, toml_file):
+        """Loads a TOML file and overwrites default parameters with the contents of the file."""
         # Load the TOML file
-        if has_tomllib:
+        if HAS_TOMLLIB:
             with open(toml_file, "rb") as file:
                 config = tomllib.load(file)
         else:

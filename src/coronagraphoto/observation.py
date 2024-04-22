@@ -17,14 +17,14 @@ from scipy.ndimage import rotate, shift, zoom
 from tqdm import tqdm
 
 from coronagraphoto import util
-from coronagraphoto.logger import setup_logger
+
+from .logger import logger
 
 
 class Observation:
-    def __init__(
-        self, coronagraph, system, observing_scenario, settings, logging_level="INFO"
-    ):
+    def __init__(self, coronagraph, system, observing_scenario, settings):
         """Class to store the parameters of an observation.
+
         Args:
             coronagraph (Coronagraph object):
                 Coronagraph object containing the coronagraph parameters
@@ -40,7 +40,6 @@ class Observation:
         self.coronagraph_name = coronagraph.name
         self.system = system
         self.system_name = system.star.name
-        self.logger = setup_logger(logging_level)
 
         self.load_settings(observing_scenario, settings)
 
@@ -68,7 +67,7 @@ class Observation:
             )
         # Create the wavelength grid and bandwidth
         if self.settings.any_wavelength_dependence:
-            self.logger.info("Creating wavelength grid")
+            logger.info("Creating wavelength grid")
             (
                 self.spectral_wavelength_grid,
                 self.spectral_bandwidths,
@@ -99,10 +98,8 @@ class Observation:
         )
 
     def create_count_rates(self):
-        """
-        Create the images at the wavelengths and times
-        """
-        self.logger.info("Creating count rates")
+        """Create the images at the wavelengths and times."""
+        logger.info("Creating count rates")
 
         if self.settings.any_wavelength_dependence:
             nwave = len(self.spectral_wavelength_grid)
@@ -116,7 +113,7 @@ class Observation:
 
         base_count_rate_arr = np.zeros_like(self.total_count_rate.value) * u.ph / u.s
         if self.settings.include_star:
-            self.logger.info("Creating star count rate")
+            logger.info("Creating star count rate")
             self.star_count_rate = self.generic_count_rate_logic(
                 self.gen_star_count_rate,
                 base_count_rate_arr,
@@ -124,10 +121,10 @@ class Observation:
             )
             self.total_count_rate += self.star_count_rate
         else:
-            self.logger.info("Not including star")
+            logger.info("Not including star")
 
         if self.settings.include_planets:
-            self.logger.info("Creating planets count rate")
+            logger.info("Creating planets count rate")
             self.planet_count_rate = self.generic_count_rate_logic(
                 self.gen_planet_count_rate,
                 base_count_rate_arr,
@@ -135,12 +132,12 @@ class Observation:
             )
             self.total_count_rate += self.planet_count_rate
         else:
-            self.logger.info("Not including planets")
+            logger.info("Not including planets")
 
         if self.settings.include_disk:
             if not self.coronagraph.has_psf_datacube:
                 self.coronagraph.get_disk_psfs()
-            self.logger.info("Creating disk count rate")
+            logger.info("Creating disk count rate")
             self.disk_count_rate = self.generic_count_rate_logic(
                 self.gen_disk_count_rate,
                 base_count_rate_arr,
@@ -148,7 +145,7 @@ class Observation:
             )
             self.total_count_rate += self.disk_count_rate
         else:
-            self.logger.info("Not including disk")
+            logger.info("Not including disk")
 
     def generic_count_rate_logic(
         self, count_rate_function, object_count_rate, *args, time_invariant=False
@@ -472,7 +469,7 @@ class Observation:
         Split the exposure time into individual frames, then simulate the
         collection of photons as a Poisson process
         """
-        self.logger.info("Creating images")
+        logger.info("Creating images")
 
         coro_image_shape = self.get_coro_image_shape()
 
@@ -794,9 +791,7 @@ class Observation:
                 plt.close(fig)
 
     def snr_check(self, times, noise_factor=0.5):
-        """
-        Check the SNR of the images
-        """
+        """Check the SNR of the images."""
         # Set up count rates for the Poisson noise as a fraction of the max
         noise_count_rate = np.max(self.total_count_rate) * noise_factor
         noise_field = np.ones_like(self.total_count_rate.value) * noise_count_rate
