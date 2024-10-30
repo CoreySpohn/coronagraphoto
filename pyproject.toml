@@ -30,7 +30,7 @@ dependencies = [
   "xarray",
 ]
 [project.optional-dependencies]
-dev = ["mypy", "ruff", "pre-comi"]
+dev = ["ruff", "pre-commit"]
 docs = [
   "sphinx",
   "myst-parser",
@@ -56,11 +56,8 @@ content-type = "text/markdown"
 [[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
 path = "README.md"
 
-[tool.ruff]
+[tool.ruff.lint]
 select = ["D", "I"]
 
-[tool.ruff.pydocstyle]
+[tool.ruff.lint.pydocstyle]
 convention = "google"
-
-[tool.mypy]
-overrides = [{ module = "toml.*", ignore_missing_imports = true }]
