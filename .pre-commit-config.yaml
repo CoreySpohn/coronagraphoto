@@ -6,7 +6,7 @@ repos:
       - id: name-tests-test
       - id: end-of-file-fixer
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.4
+    rev: v0.9.7
     hooks:
       # Run the linter.
       - id: ruff
@@ -19,6 +19,6 @@ repos:
         stages: [commit-msg]
         args: []
   -   repo: https://github.com/pre-commit/mirrors-mypy
-      rev: 'v1.14.0'
+      rev: 'v1.15.0'
       hooks:
       -   id: mypy
