@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/CoreySpohn/coronagraphoto/compare/v1.0.1...v1.1.0) (2025-06-02)
+
+
+### Features
+
+* Transition to using yippy ([19e7024](https://github.com/CoreySpohn/coronagraphoto/commit/19e702459388051868c60841e9ee8278b87f8ab9))
+
 ## [1.0.1](https://github.com/CoreySpohn/coronagraphoto/compare/v1.0.0...v1.0.1) (2024-04-09)
 
 
