@@ -163,3 +163,4 @@ input/
 !input/settings/example.toml
 *_version.py
 .DS_Store
+scripts/
