@@ -313,7 +313,9 @@ class Observation:
         planet_angles = np.arctan2(
             planet_xy_separations[:, 1], planet_xy_separations[:, 0]
         )
-        planet_alphas_lod = planet_alphas.to(u.lod, equiv.lod(wavelength, self.scenario.diameter))
+        planet_alphas_lod = planet_alphas.to(
+            u.lod, equiv.lod(wavelength, self.scenario.diameter)
+        )
 
         # Compute planet flux.
         planet_flux_density = np.zeros(len(self.system.planets)) * u.Jy
