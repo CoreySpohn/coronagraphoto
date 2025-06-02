@@ -13,6 +13,7 @@ import coronagraphoto.util as util
 class Observations:
     def __init__(self, base_observation, times, central_wavelengths):
         """Class to generate multiple observations.
+
         Args:
             base_observation (Observation object):
                 Observation object with default parameters.
@@ -29,7 +30,6 @@ class Observations:
 
     def run(self, observations=None):
         """Make observations at all times and wavelengths."""
-
         if observations is None:
             # Create the observations if none are provided
             observations = self.create_observations()
@@ -144,9 +144,9 @@ class Observations:
 
         if self.base_observation.settings.include_disk:
             # Create the psf datacube and then share it among the observations
-            psfs = self.base_observation.coronagraph.get_disk_psfs()
-            for obs in observations:
-                obs.psf_datacube = psfs
-                obs.has_psf_datacube = True
+            self.base_observation.coronagraph.create_psf_datacube()
+            # for obs in observations:
+            #     obs.psf_datacube = psfs
+            #     obs.has_psf_datacube = True
 
         return observations

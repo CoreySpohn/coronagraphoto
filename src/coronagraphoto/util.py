@@ -9,8 +9,7 @@ from scipy.ndimage import zoom
 
 
 def gen_wavelength_grid(bandpass, resolution):
-    """
-    Generates wavelengths that sample a Synphot bandpass at a given resolution.
+    """Generates wavelengths that sample a Synphot bandpass at a given resolution.
 
     This function calculates wavelengths within the specified bandpass range
     such that each wavelength interval corresponds to a constant spectral resolution.
@@ -24,6 +23,7 @@ def gen_wavelength_grid(bandpass, resolution):
             indicates the wavelengths necessary to sample the bandpass.
         resolution (float):
             The desired constant spectral resolution (R).
+
     Returns:
         wavelengths (astropy.units.quantity.Quantity):
             An array of wavelengths sampled across the bandpass at the
@@ -73,8 +73,7 @@ def convert_pixels(unit, obs, plane="coro"):
 
 
 def resample_single_image(image, lod_scale, wavelength, diam, det_shape, det_scale):
-    """
-    Resample a single image from lambda/D units to arcseconds based on the
+    """Resample a single image from lambda/D units to arcseconds based on the
     detector's shape and pixel scale.
 
     Args:
@@ -145,8 +144,7 @@ def resample_single_image(image, lod_scale, wavelength, diam, det_shape, det_sca
 
 
 def get_detector_images(lod_arr, lod_scale, lam, D, det_shape, det_scale):
-    """
-    Resample multiple frames in lambda/D units to arcseconds based on the
+    """Resample multiple frames in lambda/D units to arcseconds based on the
     detector's shape and pixel scale. Handles both single and multiple
     wavelength frames.
 
@@ -208,8 +206,7 @@ def get_detector_images(lod_arr, lod_scale, lam, D, det_shape, det_scale):
 
 
 def find_distinguishing_attributes(*observations):
-    """
-    Finds and returns the attributes that distinguish each given Observation
+    """Finds and returns the attributes that distinguish each given Observation
     instance from the others.
 
     This function compares each Observation instance against all others and
@@ -232,6 +229,7 @@ def find_distinguishing_attributes(*observations):
         "system",
         "coronagraph",
         "observing_scenario",
+        "scenario",
         "bandpass",
         "star_count_rate",
         "planet_count_rate",
@@ -294,9 +292,7 @@ def find_distinguishing_attributes(*observations):
 
 
 def is_unique_combination(obs, attr_combination, all_observations):
-    """
-    Check if a combination of attributes is unique for an observation.
-    """
+    """Check if a combination of attributes is unique for an observation."""
     for other_obs in all_observations:
         if other_obs != obs and all(
             getattr(other_obs, attr, None) == getattr(obs, attr, None)
