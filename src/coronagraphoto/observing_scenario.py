@@ -36,7 +36,9 @@ class ObservingScenario:
         self.central_wavelength = 500 * u.nm
         self.start_time = Time(2000, format="decimalyear")
         self.exposure_time = 1 * u.d
+        self.exposure_time_s = self.exposure_time.to_value(u.s)
         self.frame_time = 1 * u.hr
+        self.frame_time_s = self.frame_time.to_value(u.s)
         self.bandpass = None
         # self.bandpass = SpectralElement(
         #     "Gaussian1D",
