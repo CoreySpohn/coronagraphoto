@@ -665,7 +665,7 @@ class Observation:
 
                 logger.warning(
                     "\n****************************************************"
-                    f"\nMISSING INFORMATION FOR {100* frac_missing_pix:.2f}% OF THE PIXELS IN THE DISK IMAGE."
+                    f"\nMISSING INFORMATION FOR {100 * frac_missing_pix:.2f}% OF THE PIXELS IN THE DISK IMAGE."
                     f"\nThe ExoVista disk is smaller than coronagraph model at lambda={wavelength.to_value(u.nm):.0f} nm, "
                     f"and D={self.scenario.diameter.to_value(u.m):.0f} m by {nn} pixels on each side. "
                     f"\nThe current solution is padding the disk with {nn} pixels on each side and filling the values "
