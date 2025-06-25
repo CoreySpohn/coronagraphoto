@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.1.0](https://github.com/CoreySpohn/coronagraphoto/compare/v1.0.1...v1.1.0) (2025-06-25)
+
+
+### Features
+
+* Add zoom_conserve_flux function for image resampling ([2bbfe15](https://github.com/CoreySpohn/coronagraphoto/commit/2bbfe1535da6bda3262fb9ae6c1cd5e51eb96302))
+* Enhance logging with color-coded output ([374045e](https://github.com/CoreySpohn/coronagraphoto/commit/374045e7201dae5e354f4c4aa7c4d7270f9761a3))
+* Expand Observation class with detailed simulation capabilities ([fec4e55](https://github.com/CoreySpohn/coronagraphoto/commit/fec4e5586e17701fe051cb34a6b74956b1af48d1))
+* Transition to using yippy ([19e7024](https://github.com/CoreySpohn/coronagraphoto/commit/19e702459388051868c60841e9ee8278b87f8ab9))
+
 ## [1.0.1](https://github.com/CoreySpohn/coronagraphoto/compare/v1.0.0...v1.0.1) (2024-04-09)
 
 
