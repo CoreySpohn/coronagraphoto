@@ -5,7 +5,7 @@ import astropy.units as u
 import numpy as np
 from astropy.time import Time
 from lod_unit import lod_eq
-from scipy.ndimage import zoom
+from scipy.ndimage import shift, zoom
 
 
 def gen_wavelength_grid(bandpass, resolution):
@@ -300,3 +300,31 @@ def is_unique_combination(obs, attr_combination, all_observations):
         ):
             return False
     return True
+
+
+def zoom_conserve_flux(image, zoom_factor):
+    """Image zoom that (approximately) preserves the total flux.
+
+    Scipy based bicubic resample that renormalises after using zoom so the
+    total flux is approximately identical before and after. Due to interpolation
+    errors, the total flux is not exactly the same and this struggles at very low
+    zoom factors (making down-sampling a challenge).
+
+    Args:
+        image (np.ndarray):
+            Real-valued array with the image information.
+        zoom_factor (float):
+            Linear zoom factor (<1 down-samples, >1 up-samples).
+
+    Returns:
+        np.ndarray:
+            Resampled image with the total flux preserved.
+    """
+    # Bicubic resample with zero padding outside the data
+    out = zoom(image, zoom_factor, order=3, mode="constant", cval=0.0, prefilter=True)
+
+    # Renormalization factor to preserve the total flux given how the zoom
+    # function works
+    norm_factor = 1 / zoom_factor**2
+
+    return out * norm_factor
