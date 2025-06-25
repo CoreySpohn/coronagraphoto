@@ -1,3 +1,27 @@
+"""Utility functions for coronagraph observation simulations.
+
+This module provides utility functions for coronagraph observation simulations,
+including wavelength grid generation, pixel coordinate conversion, image
+resampling, and attribute comparison utilities.
+
+The module contains functions for:
+- Spectral grid generation with constant resolution
+- Pixel coordinate conversion between different planes (coronagraph/detector)
+- Image resampling with flux conservation
+- Multi-dimensional image processing for detector conversion
+- Observation attribute comparison and uniqueness detection
+
+Key Features:
+- Wavelength grid generation with spectral resolution control
+- Coordinate system conversion between lambda/D and detector pixels
+- Flux-conserving image resampling and zooming
+- Efficient multi-frame image processing
+- Robust attribute comparison for observation datasets
+
+The module uses Astropy for unit handling, NumPy for array operations,
+and SciPy for image processing functions.
+"""
+
 from itertools import combinations
 from pathlib import PurePath
 
@@ -5,11 +29,11 @@ import astropy.units as u
 import numpy as np
 from astropy.time import Time
 from lod_unit import lod_eq
-from scipy.ndimage import zoom
+from scipy.ndimage import shift, zoom
 
 
 def gen_wavelength_grid(bandpass, resolution):
-    """Generates wavelengths that sample a Synphot bandpass at a given resolution.
+    """Generate wavelengths that sample a Synphot bandpass at a given resolution.
 
     This function calculates wavelengths within the specified bandpass range
     such that each wavelength interval corresponds to a constant spectral resolution.
@@ -48,6 +72,39 @@ def gen_wavelength_grid(bandpass, resolution):
 
 
 def convert_pixels(unit, obs, plane="coro"):
+    """Convert pixel coordinates to physical units for coronagraph or detector planes.
+
+    This function converts pixel coordinates to physical units (typically angular
+    units) for either the coronagraph plane (lambda/D units) or detector plane
+    (arcseconds). The conversion accounts for the pixel scale and centers the
+    coordinate system on the star position.
+
+    Args:
+        unit (astropy.units.Unit):
+            The target unit for the coordinate conversion. Must have physical
+            type "angle" (e.g., u.arcsec, u.mas, u.rad).
+        obs (Observation):
+            Observation object containing coronagraph and scenario information.
+        plane (str, optional):
+            The plane to convert coordinates for. Options are:
+            - "coro": Coronagraph plane (lambda/D units)
+            - "det": Detector plane (arcseconds)
+            Default is "coro".
+
+    Returns:
+        xunit_arr (astropy.units.quantity.Quantity):
+            Array of x-coordinates in the specified unit, centered on the star.
+        yunit_arr (astropy.units.quantity.Quantity):
+            Array of y-coordinates in the specified unit, centered on the star.
+
+    Raises:
+        NotImplementedError:
+            If the target unit does not have physical type "angle".
+
+    Note:
+        The coordinate system is centered on the star position, which is
+        assumed to be at the center of the pixel array.
+    """
     if plane == "coro":
         pix_arr = np.arange(obs.coronagraph.npixels)
         lam = obs.scenario.central_wavelength
@@ -73,25 +130,41 @@ def convert_pixels(unit, obs, plane="coro"):
 
 
 def resample_single_image(image, lod_scale, wavelength, diam, det_shape, det_scale):
-    """Resample a single image from lambda/D units to arcseconds based on the
-    detector's shape and pixel scale.
+    """Resample a single image from lambda/D units to detector pixel scale.
+
+    This function resamples a single image from coronagraph pixel scale (lambda/D)
+    to detector pixel scale (arcseconds) using bicubic interpolation. The function
+    handles both up-sampling and down-sampling cases, with proper cropping or
+    padding to match the target detector shape.
+
+    The resampling process:
+    1. Converts lambda/D scale to arcseconds using the wavelength and telescope diameter
+    2. Calculates the zoom factor needed for the conversion
+    3. Applies bicubic interpolation to resample the image
+    4. Crops or pads the result to match the detector shape
 
     Args:
         image (numpy.ndarray):
-            The single image to be resampled.
+            The single image to be resampled in coronagraph pixels.
         lod_scale (astropy.units.quantity.Quantity):
-            The scale of the image given. Must be lod/u.pix.
+            The pixel scale of the input image in lambda/D per pixel.
         wavelength (astropy.units.quantity.Quantity):
-            The wavelength of the image.
+            The wavelength of the observation.
         diam (astropy.units.quantity.Quantity):
-            The diameter of the telescope.
+            The telescope diameter.
         det_shape (tuple):
-            The shape of the detector in pixels.
+            The target detector shape in pixels (height, width).
         det_scale (astropy.units.quantity.Quantity):
-            The pixel scale of the detector. Must be u.arcsec/u.pix.
+            The target detector pixel scale in arcseconds per pixel.
 
     Returns:
-        numpy.ndarray: The resampled single image.
+        numpy.ndarray:
+            The resampled image with shape matching det_shape.
+
+    Note:
+        The function uses bicubic interpolation (order=5) for high-quality
+        resampling. For very small zoom factors (down-sampling), interpolation
+        artifacts may occur.
     """
     # Convert the scale from lod per pixel to arcseconds per pixel
     lod_scale_in_arcsec = (lod_scale * u.pix).to(
@@ -144,32 +217,49 @@ def resample_single_image(image, lod_scale, wavelength, diam, det_shape, det_sca
 
 
 def get_detector_images(lod_arr, lod_scale, lam, D, det_shape, det_scale):
-    """Resample multiple frames in lambda/D units to arcseconds based on the
-    detector's shape and pixel scale. Handles both single and multiple
-    wavelength frames.
+    """Resample multiple frames from lambda/D units to detector pixel scale.
+
+    This function handles resampling of multiple image frames from coronagraph
+    pixel scale (lambda/D) to detector pixel scale (arcseconds). It supports
+    both single-wavelength and multi-wavelength observations, automatically
+    detecting the input array shape and processing accordingly.
+
+    The function processes each frame individually using resample_single_image,
+    handling both 3D arrays (nframes, nxpix, nypix) for single-wavelength
+    observations and 4D arrays (nframes, nlambda, nxpix, nypix) for
+    multi-wavelength observations.
 
     Args:
         lod_arr (numpy.ndarray):
-            The array of images to be resampled. Shape can be either
-            (nframes, nxpix, nypix) or (nframes, nlambda, nxpix, nypix).
+            The array of images to be resampled. Shape can be either:
+            - (nframes, nxpix, nypix) for single wavelength per frame
+            - (nframes, nlambda, nxpix, nypix) for multiple wavelengths per frame
         lod_scale (astropy.units.quantity.Quantity):
-            The scale of the images given. Must be lod/u.pix.
+            The pixel scale of the input images in lambda/D per pixel.
         lam (astropy.units.quantity.Quantity):
-            The wavelength(s) of the images. Can be a scalar or an array with
-            length nlambda.
+            The wavelength(s) of the images. Can be a scalar for single-wavelength
+            observations or an array with length nlambda for multi-wavelength.
         D (astropy.units.quantity.Quantity):
-            The diameter of the telescope.
+            The telescope diameter.
         det_shape (tuple):
-            The shape of the detector in pixels (height, width).
+            The target detector shape in pixels (height, width).
         det_scale (astropy.units.quantity.Quantity):
-            The pixel scale of the detector. Must be u.arcsec/u.pix.
+            The target detector pixel scale in arcseconds per pixel.
 
     Returns:
-        final_image (numpy.ndarray):
-            The array of resampled images. Shape will be
-            (nframes, det_shape[0], det_shape[1]) for single wavelength per frame or
-            (nframes, nlambda, det_shape[0], det_shape[1]) for multiple wavelengths
-            per frame.
+        numpy.ndarray:
+            The array of resampled images. Shape will be:
+            - (nframes, det_shape[0], det_shape[1]) for single wavelength
+            - (nframes, nlambda, det_shape[0], det_shape[1]) for multiple wavelengths
+
+    Raises:
+        ValueError:
+            If the length of lam array doesn't match nlambda in lod_arr for
+            multi-wavelength observations.
+
+    Note:
+        For multi-wavelength observations, each wavelength is processed with
+        its corresponding wavelength value from the lam array.
     """
     nframes = lod_arr.shape[0]
     has_wavelength_dim = len(lod_arr.shape) == 4
@@ -206,23 +296,40 @@ def get_detector_images(lod_arr, lod_scale, lam, D, det_shape, det_scale):
 
 
 def find_distinguishing_attributes(*observations):
-    """Finds and returns the attributes that distinguish each given Observation
-    instance from the others.
+    """Find attributes that distinguish each Observation instance from others.
 
-    This function compares each Observation instance against all others and
-    identifies the unique attributes that set each instance apart. An attribute
-    is considered unique for an instance if it differs from the same attribute
-    in all other instances.
+    This function compares multiple Observation instances and identifies the
+    unique attributes that set each instance apart from the others. It uses
+    a whitelist approach to ignore common attributes that don't distinguish
+    between observations and evaluates combinations of attributes to find
+    the minimal set needed for uniqueness.
+
+    The function performs the following steps:
+    1. Compares each observation against all others to find differing attributes
+    2. Evaluates combinations of differing attributes to find unique combinations
+    3. Returns the distinguishing attributes for each observation along with
+       the complete set of attribute names and their possible values
 
     Args:
         *observations:
-            An arbitrary number of Observation instances.
+            An arbitrary number of Observation instances to compare.
 
     Returns:
-        distinguishing_attrs (dict):
-            A dictionary where each key is an Observation instance and the
-            value is a dictionary of attributes that uniquely identify this
-            instance among the provided instances.
+        tuple:
+            A tuple containing three elements:
+            - distinguishing_attrs (dict):
+                Dictionary mapping each Observation to its distinguishing attributes
+            - attr_names (list):
+                List of all attribute names that distinguish observations
+            - attr_values (dict):
+                Dictionary mapping attribute names to their possible values across
+                all observations
+
+    Note:
+        The function uses a whitelist to ignore common attributes like system,
+        coronagraph, and computed properties that don't distinguish between
+        observations. It also handles special types like astropy.units.Quantity
+        and astropy.time.Time appropriately.
     """
     # Whitelist of attributes to ignore
     whitelist = [
@@ -292,7 +399,31 @@ def find_distinguishing_attributes(*observations):
 
 
 def is_unique_combination(obs, attr_combination, all_observations):
-    """Check if a combination of attributes is unique for an observation."""
+    """Check if a combination of attributes is unique for an observation.
+
+    This helper function determines whether a specific combination of attributes
+    uniquely identifies an observation among all provided observations. It
+    compares the attribute values of the target observation against all other
+    observations to ensure no other observation has the same combination of
+    attribute values.
+
+    Args:
+        obs (Observation):
+            The observation to check for uniqueness.
+        attr_combination (tuple):
+            Tuple of attribute names to check for uniqueness.
+        all_observations (list):
+            List of all observations to compare against.
+
+    Returns:
+        bool:
+            True if the combination of attributes is unique for the observation,
+            False otherwise.
+
+    Note:
+        The function uses getattr with a default value of None to handle cases
+        where an observation might not have a particular attribute.
+    """
     for other_obs in all_observations:
         if other_obs != obs and all(
             getattr(other_obs, attr, None) == getattr(obs, attr, None)
@@ -300,3 +431,42 @@ def is_unique_combination(obs, attr_combination, all_observations):
         ):
             return False
     return True
+
+
+def zoom_conserve_flux(image, zoom_factor):
+    """Image zoom that approximately preserves the total flux.
+
+    This function performs bicubic resampling of an image while attempting to
+    preserve the total flux. It uses scipy's zoom function with bicubic
+    interpolation and then applies a normalization factor to compensate for
+    the flux changes introduced by the interpolation.
+
+    The normalization factor is calculated as 1/zoom_factor² to account for
+    the area scaling introduced by the zoom operation. However, due to
+    interpolation errors, the total flux is not exactly preserved, especially
+    for very small zoom factors (down-sampling).
+
+    Args:
+        image (numpy.ndarray):
+            Real-valued array containing the image information.
+        zoom_factor (float):
+            Linear zoom factor. Values < 1 down-sample the image, values > 1
+            up-sample the image.
+
+    Returns:
+        numpy.ndarray:
+            Resampled image with approximately preserved total flux.
+
+    Note:
+        The function uses bicubic interpolation (order=3) with zero padding
+        outside the data boundaries. For very small zoom factors, interpolation
+        artifacts may significantly affect flux conservation.
+    """
+    # Bicubic resample with zero padding outside the data
+    out = zoom(image, zoom_factor, order=3, mode="constant", cval=0.0, prefilter=True)
+
+    # Renormalization factor to preserve the total flux given how the zoom
+    # function works
+    norm_factor = 1 / zoom_factor**2
+
+    return out * norm_factor

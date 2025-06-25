@@ -1,7 +1,6 @@
 """Package for simulating coronagraphic observations."""
 
 __all__ = [
-    "Coronagraph",
     "logger",
     "Observation",
     "Observations",
@@ -11,7 +10,6 @@ __all__ = [
 ]
 
 from . import util
-from .coronagraph import Coronagraph
 from .logger import logger
 from .observation import Observation
 from .observations import Observations
