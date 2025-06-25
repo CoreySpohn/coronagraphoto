@@ -1,22 +1,48 @@
+"""Coronagraph observation simulation module.
+
+This module provides the core functionality for simulating coronagraph observations
+of exoplanetary systems. It handles the complete observation pipeline from count
+rate generation through photon noise simulation to final dataset creation.
+
+The main class, Observation, coordinates the simulation of various astrophysical
+sources (host stars, exoplanets, circumstellar disks) as they would appear through
+a coronagraph instrument. It accounts for:
+
+- Wavelength-dependent and time-dependent source properties
+- Coronagraph transmission and PSF effects
+- Orbital dynamics for planetary motion
+- Poisson photon noise simulation
+- Multiple output formats (frames vs. integrated, spectra vs. broadband)
+
+Key Features:
+- Support for both time-invariant and time-varying simulations
+- Wavelength-resolved or broadband observations
+- Individual source tracking or combined imaging
+- Coronagraph and detector pixel scale handling
+- Comprehensive validation and error checking
+
+The module uses JAX for efficient numerical computations, Astropy for astronomical
+units and coordinate handling, and xarray for structured dataset output.
+"""
+
 import copy
 from pathlib import Path
 
 import astropy.units as u
 import astropy.units.equivalencies as equiv
-import matplotlib as mpl
-import matplotlib.pyplot as plt
-
 import jax
 import jax.numpy as jnp
+import lod_unit  # noqa: F401
+import matplotlib as mpl
+import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
 from astropy.stats import SigmaClip
 from astropy.time import Time
 from exoverses.util import misc
-import lod_unit  # noqa: F401
 from matplotlib.colors import LogNorm
 from photutils.aperture import ApertureStats, CircularAnnulus, CircularAperture
-from scipy.ndimage import rotate, shift, zoom
+from scipy.ndimage import gaussian_filter, rotate, shift, zoom
 from tqdm import tqdm
 
 from coronagraphoto import util
@@ -25,19 +51,71 @@ from .logger import logger
 
 
 class Observation:
+    """Simulate coronagraph observations of exoplanetary systems.
+
+    This class orchestrates the complete simulation pipeline for coronagraph
+    observations, from initial configuration through count rate generation to
+    final photon-noise limited dataset creation. It coordinates multiple
+    astrophysical sources and instrument effects to produce realistic
+    observation simulations.
+
+    The simulation workflow follows these main steps:
+    1. Configuration and validation (load_settings)
+    2. Count rate generation for each source (create_count_rates)
+    3. Photon noise simulation (count_photons)
+    4. Dataset formatting with proper coordinates and dimensions
+
+    Key Capabilities:
+    - Multi-source simulations (star, planets, circumstellar disk)
+    - Time-dependent orbital dynamics for planets
+    - Wavelength-resolved or broadband observations
+    - Coronagraph PSF and transmission modeling
+    - Poisson photon noise simulation
+    - Flexible output formats (individual sources, frames, spectra)
+    - Automatic coordinate system handling (coronagraph and detector pixels)
+
+    Attributes:
+        coronagraph (Coronagraph):
+            Coronagraph instrument model with PSF and transmission data.
+        system (ExovistaSystem):
+            Stellar system containing star, planets, and disk components.
+        scenario (ObservingScenario):
+            Observation parameters including timing, wavelengths, and detector setup.
+        settings (Settings):
+            Simulation configuration flags and output options.
+        nframes (int):
+            Number of observation frames.
+        frame_start_times (astropy.time.Time):
+            Start times for each observation frame.
+        spectral_wavelength_grid (astropy.units.Quantity):
+            Wavelength grid for spectral simulations (if wavelength-dependent).
+        illuminated_area (astropy.units.Quantity):
+            Effective collecting area of the telescope.
+        total_count_rate (astropy.units.Quantity):
+            Combined count rate from all included sources.
+    """
+
     def __init__(self, coronagraph, system, observing_scenario, settings):
-        """Class to store the parameters of an observation.
+        """Initialize an Observation simulation.
+
+        Sets up the observation by storing input objects, configuring simulation
+        settings, and creating the results directory structure. The initialization
+        automatically calls load_settings to validate inputs and configure the
+        observation parameters.
 
         Args:
-            coronagraph (Coronagraph object):
-                Coronagraph object containing the coronagraph parameters
-            system (ExovistaSystem object):
-                ExovistaSystem object containing the system parameters
-            observing_scenario (ObservingScenario object):
-                Object containing the observing scenario parameters
-            settings (Settings object):
-                Object containing the settings parameters
-
+            coronagraph (Coronagraph):
+                Coronagraph instrument model containing PSF data, transmission
+                properties, and pixel scale information.
+            system (ExovistaSystem):
+                Stellar system model containing star, planet, and disk components
+                with their physical and orbital properties.
+            observing_scenario (ObservingScenario):
+                Observation configuration including exposure time, wavelength
+                bandpass, detector setup, and timing parameters.
+            settings (Settings):
+                Simulation settings controlling source inclusion, wavelength
+                dependence, output formats, and time dependence options.
         """
         self.coronagraph = coronagraph
         self.coronagraph_name = coronagraph.name
@@ -50,9 +128,32 @@ class Observation:
         self.save_dir = Path(
             "results", system.file.stem, coronagraph.yip_path.parts[-1]
         )
+        self.spec_flux_density_unit = u.photon / (u.m**2 * u.s * u.nm)
+        self.rad_per_pix_unit = u.rad / u.pix
+        self.photon_per_sec_unit = u.ph / u.s
 
     def load_settings(self, observing_scenario, settings):
-        # self.observing_scenario = observing_scenario
+        """Load and validate observation settings and configure the observation.
+
+        This method performs the initial setup for the observation by:
+        1. Storing the observing scenario and settings objects
+        2. Calculating frame information (number and timing)
+        3. Validating input consistency for spectral settings
+        4. Creating wavelength grids and bandwidths (if wavelength-dependent)
+        5. Setting up transmission arrays (wavelength-dependent or single value)
+        6. Computing the effective illuminated area of the telescope
+
+        The method validates that spectral resolution is provided when returning
+        spectra, and ensures wavelength dependence settings are consistent.
+
+        Args:
+            observing_scenario (ObservingScenario):
+                Object containing observation parameters including bandpass,
+                exposure time, detector configuration, and timing information.
+            settings (Settings):
+                Object containing simulation settings including source inclusion
+                flags, wavelength dependence options, and output format choices.
+        """
         self.scenario = observing_scenario
         self.settings = settings
 
@@ -255,7 +356,32 @@ class Observation:
     def gen_star_count_rate(self, wavelength, time, bandwidth):
         """Generate the star count rate in photons per second.
 
-        Note: This is  WITHOUT any transmission effects.
+        This method computes the stellar count rate by:
+        1. Converting the star's angular diameter to lambda/D units
+        2. Retrieving the stellar intensity map from the coronagraph model
+        3. Calculating the star's spectral flux density at the given wavelength and time
+        4. Converting flux density to photon count rate units
+        5. Multiplying the intensity map by the photon flux to get spatial count rates
+
+        The resulting count rate represents the star's contribution before any
+        coronagraph transmission effects are applied.
+
+        Args:
+            wavelength (astropy.units.Quantity):
+                Observation wavelength.
+            time (astropy.time.Time):
+                Observation time (for potential stellar variability).
+            bandwidth (astropy.units.Quantity):
+                Spectral bandwidth for flux integration.
+
+        Returns:
+            numpy.ndarray:
+                Star count rate image in units of photons per second, with shape
+                (npixels, npixels) matching the coronagraph model dimensions.
+
+        Note:
+            This count rate is calculated WITHOUT any coronagraph transmission
+            effects. Transmission is applied later in the processing pipeline.
         """
         # Compute star count rate in lambda/D
         stellar_diam_lod = self.system.star.angular_diameter.to(
@@ -267,7 +393,7 @@ class Observation:
 
         # Calculate the star flux density
         star_flux_density = self.system.star.spec_flux_density(wavelength, time).to(
-            u.photon / (u.m**2 * u.s * u.nm),
+            self.spec_flux_density_unit,
             equivalencies=u.spectral_density(wavelength),
         )
 
@@ -279,7 +405,40 @@ class Observation:
         return count_rate
 
     def gen_planet_count_rate(self, wavelength, time, bandwidth):
-        """Add planets to the system."""
+        """Generate the planet count rate in photons per second.
+
+        This method computes the planet count rate by:
+        1. Propagating planetary orbits to the observation time using n-body dynamics
+        2. Converting orbital positions to pixel coordinates in the coronagraph frame
+        3. Calculating separations and position angles relative to the star
+        4. Computing spectral flux density for each planet at the given wavelength
+        5. Converting flux to photon count rates
+        6. Applying the appropriate off-axis PSF for each planet's position
+        7. Summing contributions from all planets in the system
+
+        NOTE: For 1D coronagraph models, planets beyond the maximum offset
+        range are excluded from the calculation (flux set to zero) because it
+        results in a significantly clipped PSF.
+
+        Args:
+            wavelength (astropy.units.Quantity):
+                Observation wavelength.
+            time (astropy.time.Time):
+                Observation time for orbital propagation.
+            bandwidth (astropy.units.Quantity):
+                Spectral bandwidth for flux integration.
+
+        Returns:
+            astropy.units.Quantity:
+                Planet count rate image in units of photons per second, with shape
+                (npixels, npixels) matching the coronagraph model dimensions.
+                Contains the combined contribution from all planets in the system.
+
+        Note:
+            Orbital propagation uses n-body dynamics in heliocentric sky frame.
+            Off-axis PSFs are interpolated based on each planet's separation and
+            position angle relative to the star.
+        """
         # Compute planet separations and position angles.
         prop_kwargs = {
             "prop": "nbody",
@@ -329,7 +488,7 @@ class Observation:
 
         planet_photon_flux = (
             planet_flux_density.to(
-                u.photon / (u.m**2 * u.s * u.nm),
+                self.spec_flux_density_unit,
                 equivalencies=u.spectral_density(wavelength),
             )
             * self.illuminated_area
@@ -341,12 +500,6 @@ class Observation:
             np.zeros((self.coronagraph.npixels, self.coronagraph.npixels))
             * planet_photon_flux.unit
         )
-        # pix_scale = self.coronagraph.pixel_scale
-        # pix_scale_arcsec = (pix_scale.value * lod).to(
-        #     u.arcsec, lod_eq(wavelength, self.scenario.diameter)
-        # ) / u.pix
-        # xy_pix = planet_xy_separations / pix_scale_arcsec
-        # print(xy_pix)
         for i, (x, y) in enumerate(planet_xy_separations):
             psf = self.coronagraph.offax(x, y, lam=wavelength, D=self.scenario.diameter)
             planet_count_rate += planet_photon_flux[i] * psf
@@ -354,13 +507,43 @@ class Observation:
         return planet_count_rate
 
     def gen_disk_count_rate(self, wavelength, time, bandwidth):
+        """Generate the disk count rate in photons per second.
+
+        This method processes the disk flux density from the system model and converts
+        it to a count rate image by:
+        1. Retrieving disk spectral flux density at the given wavelength and time
+        2. Converting flux density to photon count rate units
+        3. Scaling the disk image to match coronagraph pixel scale (lambda/D)
+        4. Centering and cropping the disk to coronagraph dimensions
+        5. Convolving with the coronagraph PSF datacube to account for instrument response
+
+        The scaling process uses logarithmic interpolation to preserve flux conservation
+        and avoid negative values during a scipy.ndimage.zoom operation.
+
+        Args:
+            wavelength (astropy.units.Quantity):
+                Observation wavelength.
+            time (astropy.time.Time):
+                Observation time (in case there are time-dependent disk properties).
+            bandwidth (astropy.units.Quantity):
+                Spectral bandwidth for flux integration.
+
+        Returns:
+            astropy.units.Quantity:
+                Disk count rate image in units of photons per second, with shape
+                (npixels, npixels) matching the coronagraph model dimensions.
+
+        Note:
+            This method requires that the coronagraph has a PSF datacube created
+            (coronagraph.has_psf_datacube should be True).
+        """
         disk_image = self.system.disk.spec_flux_density(wavelength, time)
 
         # This is the factor to scale the disk image, from exovista, to the
         # coronagraph model size since they do not necessarily have the same
         # pixel scale
         zoom_factor = (
-            (1 * u.pixel * self.system.star.pixel_scale.to(u.rad / u.pixel)).to(
+            (u.pixel * self.system.star.pixel_scale.to(self.rad_per_pix_unit)).to(
                 u.lod, equiv.lod(wavelength, self.scenario.diameter)
             )
             / self.coronagraph.pixel_scale
@@ -368,58 +551,171 @@ class Observation:
         # This is the photons per second
         disk_image_photons = (
             disk_image.to(
-                u.photon / (u.m**2 * u.s * u.nm),
+                self.spec_flux_density_unit,
                 equivalencies=u.spectral_density(wavelength),
             )
             * self.illuminated_area
             * bandwidth
         ).value
-        scaled_disk = np.exp(
-            zoom(
-                np.log(disk_image_photons),
-                zoom_factor,
-                mode="nearest",
-                order=5,
-            )
-        )
+        scaled_disk = util.zoom_conserve_flux(disk_image_photons, zoom_factor)
 
         # Center disk so that (img_pixels-1)/2 is center.
         disk_pixels_is_even = scaled_disk.shape[0] % 2 == 0
         coro_pixels_is_even = self.coronagraph.npixels % 2 == 0
+        pad_value = scaled_disk.min()
         if disk_pixels_is_even != coro_pixels_is_even:
-            scaled_disk = np.pad(scaled_disk, ((0, 1), (0, 1)), mode="edge")
+            scaled_disk = np.pad(
+                scaled_disk,
+                ((0, 1), (0, 1)),
+                mode="edge",
+            )
             # interpolate in log-space to avoid negative values
             scaled_disk = np.exp(shift(np.log(scaled_disk), (0.5, 0.5), order=5))
             scaled_disk = scaled_disk[1:-1, 1:-1]
 
         # Crop disk to coronagraph model size.
-        if scaled_disk.shape[0] > self.coronagraph.npixels:
+        if scaled_disk.shape[0] == self.coronagraph.npixels:
+            pass
+        elif scaled_disk.shape[0] > self.coronagraph.npixels:
+            # Crop the disk down to the coronagraph model size
             nn = (scaled_disk.shape[0] - self.coronagraph.npixels) // 2
             scaled_disk = scaled_disk[nn:-nn, nn:-nn]
         else:
+            # Pad the disk up to the coronagraph model size
             nn = (self.coronagraph.npixels - scaled_disk.shape[0]) // 2
-            scaled_disk = np.pad(scaled_disk, ((nn, nn), (nn, nn)), mode="edge")
+            # Calculate the number of missing pixels in the image
+            disk_pix = scaled_disk.shape[0] ** 2
+            coro_pix = self.coronagraph.npixels**2
+            missing_pix = coro_pix - disk_pix
+            frac_missing_pix = missing_pix / coro_pix
 
-        # count_rate = np.einsum("ij,ijkl->kl", scaled_disk, psfs) * u.ph / u.s
+            # Compare linear_ramp vs physically motivated padding
+            min_val = np.log(scaled_disk.min() / 1e8)
+
+            # Original linear_ramp method
+            scaled_disk = np.exp(
+                np.pad(
+                    np.log(scaled_disk),
+                    ((nn, nn), (nn, nn)),
+                    mode="linear_ramp",
+                    end_values=(min_val, min_val),
+                )
+            )
+
+            if frac_missing_pix > 0.01:
+                # Some useful debug information for fixing this issue
+                # Get the size of the arrays in lambda/D
+                coro_lam_d_pix = self.coronagraph.pixel_scale.value
+                exo_lam_d_pix = zoom_factor * self.coronagraph.pixel_scale.value
+                # Calculate the number of pixels required in ExoVista to match the coronagraph model's size
+                # at the given wavelength and diameter
+                required_exo_pix = (
+                    coro_lam_d_pix / exo_lam_d_pix * self.coronagraph.npixels
+                )
+                # Calculate the pixel scale (in mas) required in ExoVista to match the coronagraph model's size
+                # at the given wavelength and diameter
+                lam_d_width = coro_lam_d_pix * self.coronagraph.npixels * u.lod
+                exo_npix = disk_image.shape[0]
+                exo_pix_scale_lam_d = lam_d_width / exo_npix
+                exo_pix_scale_mas = exo_pix_scale_lam_d.to(
+                    u.mas, equiv.lod(wavelength, self.scenario.diameter)
+                )
+
+                # Calculate intermediate combinations for user convenience
+                current_pix_scale_mas = self.system.disk.pixel_scale.to_value(
+                    u.mas / u.pix
+                )
+
+                # Calculate the required field of view
+                required_field_of_view_mas = exo_pix_scale_mas.value * exo_npix
+
+                # Create table of options
+                table_header = "\n\nExoVista Settings options to avoid this issue:"
+                table_header += "\n  pixscale (arcsec) | npix | Description"
+                table_header += "\n  ------------------|------|------------------"
+
+                # Convert mas to arcsec for ExoVista input format
+                current_pix_scale_arcsec = current_pix_scale_mas / 1000.0
+                exo_pix_scale_arcsec = exo_pix_scale_mas.value / 1000.0
+
+                # Current configuration
+                current_field_of_view_mas = current_pix_scale_mas * exo_npix
+                table_rows = f"\n  {current_pix_scale_arcsec:>17.5f} | {exo_npix:>4} | Current (insufficient)"
+
+                # Optimal solutions
+                table_rows += f"\n  {exo_pix_scale_arcsec:>17.5f} | {exo_npix:>4} | Just increase pixscale"
+                table_rows += f"\n  {current_pix_scale_arcsec:>17.5f} | {required_exo_pix:>4.0f} | Just increase npix"
+
+                # Factor-based combinations - maintain required field of view
+                factors = [1.5, 2.0, 3.0]
+                for factor in factors:
+                    # Option 1: Increase npix by factor from current, calculate required pixel scale
+                    new_npix = int(exo_npix * factor)
+                    new_pix_scale_mas = required_field_of_view_mas / new_npix
+                    new_pix_scale_arcsec = new_pix_scale_mas / 1000.0
+                    table_rows += f"\n  {new_pix_scale_arcsec:>17.5f} | {new_npix:>4} | {factor}x npix from current ({exo_npix})"
+
+                    # Option 2: Increase pixel scale by factor from current, calculate required npix
+                    new_pix_scale_2_mas = current_pix_scale_mas * factor
+                    new_pix_scale_2_arcsec = new_pix_scale_2_mas / 1000.0
+                    new_npix_2 = int(required_field_of_view_mas / new_pix_scale_2_mas)
+                    table_rows += f"\n  {new_pix_scale_2_arcsec:>17.5f} | {new_npix_2:>4} | {factor}x pixscale from current ({current_pix_scale_arcsec:.5f})"
+
+                combo_text = table_header + table_rows
+
+                logger.warning(
+                    "\n****************************************************"
+                    f"\nMISSING INFORMATION FOR {100* frac_missing_pix:.2f}% OF THE PIXELS IN THE DISK IMAGE."
+                    f"\nThe ExoVista disk is smaller than coronagraph model at lambda={wavelength.to_value(u.nm):.0f} nm, "
+                    f"and D={self.scenario.diameter.to_value(u.m):.0f} m by {nn} pixels on each side. "
+                    f"\nThe current solution is padding the disk with {nn} pixels on each side and filling the values "
+                    "with an exponential decay of the edge values. "
+                    "\nI highly recommend increasing the pixel scale (pixscale) or number of pixels (npix) in "
+                    "ExoVista to avoid this kind of naive interpolation."
+                    f"{combo_text}"
+                    "\n****************************************************"
+                )
+
         scaled_disk = np.ascontiguousarray(scaled_disk)
+
+        # Convolve with the PSF datacube
         count_rate = (
-            compute_disk_image(scaled_disk, self.coronagraph.psf_datacube) * u.ph / u.s
+            compute_disk_image(scaled_disk, self.coronagraph.psf_datacube)
+            << self.photon_per_sec_unit
         )
-        # test_count_rate = np.zeros_like(count_rate.value)
-        # for i in range(self.coronagraph.npixels):
-        #     for j in range(self.coronagraph.npixels):
-        #         test_count_rate += (
-        #             scaled_disk[i, j] * self.coronagraph.psf_datacube[i, j]
-        #         )
-        # assert np.allclose(count_rate.value, test_count_rate)
-        # count_rate_tensordot = jnp.tensordot(
-        #     scaled_disk, self.coronagraph.psf_datacube, axes=((0, 1), (0, 1))
-        # )
         return count_rate
 
     def count_photons(self):
-        """Split the exposure time into individual frames, then simulate the
-        collection of photons as a Poisson process
+        """Simulate photon collection as a Poisson process and create observation dataset.
+
+        This method converts count rates into actual photon counts by sampling from
+        Poisson distributions. It handles different simulation modes based on settings:
+
+        - If settings.return_sources is True, each source (star, planets, disk) is
+          simulated separately and added to create the total image
+        - If False, the total count rate is used directly for efficiency
+
+        The method creates an xarray Dataset containing the simulated observations
+        with appropriate coordinates and dimensions. Conditional processing is applied
+        based on settings for spectrum and frame return options.
+
+        Returns:
+            xarray.Dataset:
+                Dataset containing the simulated photon counts with the following
+                possible data variables:
+
+                - 'img(coro)': Total image counts in coronagraph pixels
+                - 'img(det)': Total image counts in detector pixels (if detector defined)
+                - 'star(coro)', 'planet(coro)', 'disk(coro)': Individual source counts
+                  in coronagraph pixels (if settings.return_sources is True)
+                - 'star(det)', 'planet(det)', 'disk(det)': Individual source counts
+                  in detector pixels (if settings.return_sources is True and detector defined)
+
+                Dimensions depend on settings:
+                - 'time': Present if settings.return_frames is True
+                - 'spectral_wavelength(nm)': Present if settings.return_spectrum is True
+                - 'xpix(coro)', 'ypix(coro)': Coronagraph pixel coordinates
+                - 'xpix(det)', 'ypix(det)': Detector pixel coordinates (if applicable)
         """
         logger.info("Creating images")
 
@@ -431,15 +727,15 @@ class Observation:
             frame_counts = np.zeros(coro_image_shape)
             if self.settings.include_star:
                 expected_star_photons_per_frame = (
-                    (self.star_count_rate * self.scenario.frame_time).decompose().value
+                    self.star_count_rate.to_value(self.photon_per_sec_unit)
+                    * self.scenario.frame_time_s
                 )
                 star_frame_counts = np.random.poisson(expected_star_photons_per_frame)
                 frame_counts += star_frame_counts
             if self.settings.include_planets:
                 expected_planet_photons_per_frame = (
-                    (self.planet_count_rate * self.scenario.frame_time)
-                    .decompose()
-                    .value
+                    self.planet_count_rate.to_value(self.photon_per_sec_unit)
+                    * self.scenario.frame_time_s
                 )
                 planet_frame_counts = np.random.poisson(
                     expected_planet_photons_per_frame
@@ -447,14 +743,16 @@ class Observation:
                 frame_counts += planet_frame_counts
             if self.settings.include_disk:
                 expected_disk_photons_per_frame = (
-                    (self.disk_count_rate * self.scenario.frame_time).decompose().value
+                    self.disk_count_rate.to_value(self.photon_per_sec_unit)
+                    * self.scenario.frame_time_s
                 )
                 disk_frame_counts = np.random.poisson(expected_disk_photons_per_frame)
                 frame_counts += disk_frame_counts
         else:
             # Calculate the expected number of photons per frame
             expected_photons_per_frame = (
-                (self.total_count_rate * self.scenario.frame_time).decompose().value
+                self.total_count_rate.to_value(self.photon_per_sec_unit)
+                * self.scenario.frame_time_s
             )
             frame_counts = np.random.poisson(expected_photons_per_frame)
 
@@ -492,21 +790,33 @@ class Observation:
     def add_source_to_dataset(
         self, coro_counts, source_name, ds, coro_coords, coro_dims, det_coords, det_dims
     ):
-        """Create and add source DataArrays for both coronagraph and detector to
-        the dataset.
+        """Create and add source DataArrays for coronagraph and detector.
+
+        This method creates xarray DataArrays for the given source counts at both
+        coronagraph and detector scales, then merges them into the provided dataset.
+        If detector coordinates are provided, detector data will also be created
+        by converting coronagraph counts to detector pixel scale.
 
         Args:
-            ds (xarray.Dataset):
-                The dataset to which the source data will be added.
-            frame_counts (numpy.ndarray):
-                Frame counts for the source.
+            coro_counts (numpy.ndarray):
+                Count data for the source in coronagraph pixels.
             source_name (str):
                 Name of the source ('img', 'star', 'planet', 'disk').
-
+            ds (xarray.Dataset):
+                The dataset to which the source data will be added.
+            coro_coords (list of numpy.ndarray):
+                List of coordinate arrays for coronagraph data dimensions.
+            coro_dims (list of str):
+                List of dimension names for coronagraph data.
+            det_coords (list of numpy.ndarray or None):
+                List of coordinate arrays for detector data dimensions.
+            det_dims (list of str or None):
+                List of dimension names for detector data.
 
         Returns:
             xarray.Dataset:
-                The updated dataset with the new source data.
+                The updated dataset with the new source data added as DataArrays
+                named '{source_name}(coro)' and optionally '{source_name}(det)'.
         """
         # Coronagraph data
         coro_da = xr.DataArray(coro_counts, coords=coro_coords, dims=coro_dims)
@@ -523,12 +833,21 @@ class Observation:
         return ds
 
     def get_coro_image_shape(self):
-        """Get the shape of the coronagraph count/image pixel array. Depends
-        on whether we're calculating the wavelength dependence or not.
+        """Get the shape of the coronagraph count/image pixel array.
+
+        The shape depends on the observation settings and includes dimensions for:
+        - Time frames (from nframes)
+        - Spectral wavelengths (1 if no wavelength dependence, otherwise the
+          number of wavelength grid points)
+        - Spatial dimensions (coronagraph npixels x npixels)
+
+        The resulting shape is always 4-dimensional: (nframes, nwavelengths,
+        npixels, npixels).
 
         Returns:
-            coro_image_shape (tuple of ints):
-                The shape of the coronagraph count/image pixel array
+            tuple of int:
+                The shape of the coronagraph count/image pixel array in the format
+                (nframes, nwavelengths, npixels, npixels).
         """
         coro_image_shape = [self.nframes]
         if self.settings.any_wavelength_dependence:
@@ -540,20 +859,31 @@ class Observation:
         return tuple(coro_image_shape)
 
     def calc_frame_info(self):
-        """Calculate the number of frames and the length of each individual frame
-        in the exposure
+        """Calculate the number of frames and the start times for each frame.
+
+        This method determines how to split the total exposure time into individual
+        frames based on the observation settings. If settings.return_frames is True,
+        the exposure is divided into multiple frames of duration scenario.frame_time.
+        If False, the entire exposure is treated as a single frame for computational
+        efficiency (valid due to Poisson statistics).
+
+        Note:
+            Partial frames are not currently supported - the exposure time must be
+            evenly divisible by the frame time.
 
         Returns:
-            nframes (int):
-                Number of frames
-            frame_start_times (astropy Time array):
-                The start times of each frame
+            tuple:
+                A tuple containing:
+
+                - nframes (int):
+                    Number of frames in the exposure.
+                - frame_start_times (astropy.time.Time):
+                    Array of start times for each frame, based on the scenario
+                    start time and frame duration.
         """
         if self.settings.return_frames:
             partial_frame, full_frames = np.modf(
-                (self.scenario.exposure_time / self.scenario.frame_time)
-                .decompose()
-                .value
+                self.scenario.exposure_time_s / self.scenario.frame_time_s
             )
             if partial_frame != 0:
                 raise ("Warning! Partial frames are not implemented yet!")
@@ -564,7 +894,7 @@ class Observation:
             full_frames = 1
             frame_time = self.scenario.exposure_time
         start_jd = self.scenario.start_time.jd
-        frame_d = frame_time.to(u.d).value
+        frame_d = frame_time.to_value(u.d)
         jd_vals = [start_jd + frame_d * i for i in range(full_frames.astype(int))]
         frame_start_times = Time(jd_vals, format="jd")
 
@@ -842,3 +1172,31 @@ def compute_disk_image(disk, psfs):
             are the x and y offsets of the point source in the PSF.
     """
     return jnp.einsum("ij,ijxy->xy", disk, psfs)
+
+
+@jax.jit
+def compute_disk_image_debug(disk, psfs):
+    """Alternative implementation for debugging coordinate issues.
+
+    This version explicitly shows what should happen:
+    For each disk pixel (i,j) with flux value disk[i,j],
+    add the contribution disk[i,j] * psfs[i,j,:,:] to the final image.
+    """
+    # Initialize result image
+    result = jnp.zeros_like(psfs[0, 0])
+
+    # For each source position in the disk
+    npix = disk.shape[0]
+    for i in range(npix):
+        for j in range(npix):
+            # Add the PSF contribution from this source position
+            # psfs[i,j,:,:] should be the PSF for a point source at position (i,j)
+            result += disk[i, j] * psfs[i, j, :, :]
+
+    return result
+
+
+@jax.jit
+def compute_disk_image_alternative(disk, psfs):
+    """Alternative using tensordot - might be more numerically stable."""
+    return jnp.tensordot(disk, psfs, axes=([0, 1], [0, 1]))
