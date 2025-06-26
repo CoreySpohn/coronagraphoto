@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.2.0](https://github.com/CoreySpohn/coronagraphoto/compare/v1.1.0...v1.2.0) (2025-06-26)
+
+
+### Features
+
+* Add PostProcessing and ProcessingConfig classes for simple post-processing workflows ([41b5615](https://github.com/CoreySpohn/coronagraphoto/commit/41b5615ec7b59796fbf4f9501ef73e1847635763))
+* Implement CompositeObservation class for creating composite images from multiple observations into a single RGB image ([68be0bd](https://github.com/CoreySpohn/coronagraphoto/commit/68be0bd25aa2ec6b421b36171909d76229009804))
+
+
+### Bug Fixes
+
+* Corrected type casting for full_frames in Observation class ([b525119](https://github.com/CoreySpohn/coronagraphoto/commit/b525119cc3936a19dc3b952749ee9869074e785d))
+* Fix frame_time_s and exposure_time_s to not always be default values ([0fd8ceb](https://github.com/CoreySpohn/coronagraphoto/commit/0fd8cebfe64ff9f192c640f8faf6e57e7d5bdf91))
+
 ## [1.1.0](https://github.com/CoreySpohn/coronagraphoto/compare/v1.0.1...v1.1.0) (2025-06-25)
 
 
