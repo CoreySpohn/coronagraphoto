@@ -8,7 +8,7 @@ try:
 
     HAS_TOMLLIB = True
 except ImportError:
-    import toml
+    import toml  # type: ignore
 
     HAS_TOMLLIB = False
 
@@ -36,9 +36,7 @@ class ObservingScenario:
         self.central_wavelength = 500 * u.nm
         self.start_time = Time(2000, format="decimalyear")
         self.exposure_time = 1 * u.d
-        self.exposure_time_s = self.exposure_time.to_value(u.s)
         self.frame_time = 1 * u.hr
-        self.frame_time_s = self.frame_time.to_value(u.s)
         self.bandpass = None
         # self.bandpass = SpectralElement(
         #     "Gaussian1D",
@@ -72,6 +70,12 @@ class ObservingScenario:
             self.detector_pixel_scale is not None
         ), "Must provide both detector_shape and detector_pixel_scale or neither"
         self.has_detector = self.detector_shape is not None
+        if self.has_detector:
+            # Ensure the detector shape is a tuple of ints
+            self.detector_shape = tuple(int(x) for x in self.detector_shape)
+
+        self.frame_time_s = self.frame_time.to_value(u.s)
+        self.exposure_time_s = self.exposure_time.to_value(u.s)
 
     def __repr__(self):
         """Returns a string representation of the observing scenario parameters."""

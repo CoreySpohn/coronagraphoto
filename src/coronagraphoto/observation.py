@@ -895,7 +895,7 @@ class Observation:
             frame_time = self.scenario.exposure_time
         start_jd = self.scenario.start_time.jd
         frame_d = frame_time.to_value(u.d)
-        jd_vals = [start_jd + frame_d * i for i in range(full_frames.astype(int))]
+        jd_vals = [start_jd + frame_d * i for i in range(int(full_frames))]
         frame_start_times = Time(jd_vals, format="jd")
 
         # Setting up the proper shape of the array that counts the photons
