@@ -1,4 +1,6 @@
-"""This module contains the CompositeObservation class, which manages a collection of
+"""Creates a composite image from a list of observations.
+
+This module contains the CompositeObservation class, which manages a collection of
 Observation objects. This is useful for creating composite images, such as RGB
 images from observations with different bandpasses.
 """
