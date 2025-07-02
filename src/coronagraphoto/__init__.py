@@ -1,6 +1,7 @@
 """Package for simulating coronagraphic observations."""
 
 from .composite import CompositeObservation
+from .detector import Detector
 from .logger import logger
 from .observation import Observation
 from .observations import Observations
@@ -18,4 +19,5 @@ __all__ = [
     "PostProcessing",
     "ProcessingConfig",
     "CompositeObservation",
+    "Detector",
 ]

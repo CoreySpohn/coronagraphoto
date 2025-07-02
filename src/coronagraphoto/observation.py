@@ -112,7 +112,7 @@ class Observation:
                 with their physical and orbital properties.
             observing_scenario (ObservingScenario):
                 Observation configuration including exposure time, wavelength
-                bandpass, detector setup, and timing parameters.
+                bandpass, detector setup, and timing information.
             settings (Settings):
                 Simulation settings controlling source inclusion, wavelength
                 dependence, output formats, and time dependence options.
@@ -679,158 +679,129 @@ class Observation:
         scaled_disk = np.ascontiguousarray(scaled_disk)
 
         # Convolve with the PSF datacube
-        count_rate = (
-            compute_disk_image(scaled_disk, self.coronagraph.psf_datacube)
-            << self.photon_per_sec_unit
-        )
-        return count_rate
+        count_rate = compute_disk_image(scaled_disk, self.coronagraph.psf_datacube)
+        return count_rate << self.photon_per_sec_unit
 
     def count_photons(self):
-        """Simulate photon collection as a Poisson process and create observation dataset.
+        """Simulate photon collection and create the final observation dataset.
 
-        This method converts count rates into actual photon counts by sampling from
-        Poisson distributions. It handles different simulation modes based on settings:
+        This method generates the final simulated data product. It creates two sets
+        of images: one representing the ideal, continuous count rate on the
+        coronagraph's native grid, and another representing the final, noisy
+        electron counts on the detector grid.
 
-        - If settings.return_sources is True, each source (star, planets, disk) is
-          simulated separately and added to create the total image
-        - If False, the total count rate is used directly for efficiency
+        The process is as follows:
+        1.  **Ideal Coronagraph Image (as Count Rate):**
+            - The count rates for each source (star, planets, disk) are stored
+              directly in the output dataset with a `(coro)` suffix. These are
+              continuous, floating-point arrays in units of photons/sec.
 
-        The method creates an xarray Dataset containing the simulated observations
-        with appropriate coordinates and dimensions. Conditional processing is applied
-        based on settings for spectrum and frame return options.
+        2.  **Detector Image (as Electron Counts):**
+            - If a detector is present, the count *rates* for each source are
+              first resampled to the detector's pixel grid.
+            - The expected number of *incident photons* per frame is calculated.
+            - A Poisson process generates the integer number of incident photons.
+            - The detector's quantum efficiency is applied to convert incident
+              photons to photo-electrons using a binomial draw.
+            - Noise from the detector's noise model is generated and added.
+            - The final detector image and its components are stored in the
+              dataset with a `(det)` suffix in units of electrons.
+
+        This approach ensures a physically accurate model where photon counting
+        and QE effects occur only at the detector.
 
         Returns:
             xarray.Dataset:
-                Dataset containing the simulated photon counts with the following
-                possible data variables:
-
-                - 'img(coro)': Total image counts in coronagraph pixels
-                - 'img(det)': Total image counts in detector pixels (if detector defined)
-                - 'star(coro)', 'planet(coro)', 'disk(coro)': Individual source counts
-                  in coronagraph pixels (if settings.return_sources is True)
-                - 'star(det)', 'planet(det)', 'disk(det)': Individual source counts
-                  in detector pixels (if settings.return_sources is True and detector defined)
-
-                Dimensions depend on settings:
-                - 'time': Present if settings.return_frames is True
-                - 'spectral_wavelength(nm)': Present if settings.return_spectrum is True
-                - 'xpix(coro)', 'ypix(coro)': Coronagraph pixel coordinates
-                - 'xpix(det)', 'ypix(det)': Detector pixel coordinates (if applicable)
+                A dataset containing the simulated observation. It may include:
+                - `scene_rate(coro)`: Ideal total count rate on the coronagraph grid.
+                - `star_rate(coro)`, `planet_rate(coro)`, `disk_rate(coro)`:
+                  Ideal individual source count rates.
+                - `image(det)`: Final, noisy image in electrons on the detector grid.
+                - `scene(det)`, `dark_current(det)`, etc.: Components of the
+                  detector image in electrons.
         """
-        logger.info("Creating images")
+        logger.info("Generating coronagraph count rates and detector electron images.")
 
-        coro_image_shape = self.get_coro_image_shape()
-
-        # Create the arrays to store the frame counts for each source
-        # if we're returning them
-        if self.settings.return_sources:
-            frame_counts = np.zeros(coro_image_shape)
-            if self.settings.include_star:
-                expected_star_photons_per_frame = (
-                    self.star_count_rate.to_value(self.photon_per_sec_unit)
-                    * self.scenario.frame_time_s
-                )
-                star_frame_counts = np.random.poisson(expected_star_photons_per_frame)
-                frame_counts += star_frame_counts
-            if self.settings.include_planets:
-                expected_planet_photons_per_frame = (
-                    self.planet_count_rate.to_value(self.photon_per_sec_unit)
-                    * self.scenario.frame_time_s
-                )
-                planet_frame_counts = np.random.poisson(
-                    expected_planet_photons_per_frame
-                )
-                frame_counts += planet_frame_counts
-            if self.settings.include_disk:
-                expected_disk_photons_per_frame = (
-                    self.disk_count_rate.to_value(self.photon_per_sec_unit)
-                    * self.scenario.frame_time_s
-                )
-                disk_frame_counts = np.random.poisson(expected_disk_photons_per_frame)
-                frame_counts += disk_frame_counts
-        else:
-            # Calculate the expected number of photons per frame
-            expected_photons_per_frame = (
-                self.total_count_rate.to_value(self.photon_per_sec_unit)
-                * self.scenario.frame_time_s
-            )
-            frame_counts = np.random.poisson(expected_photons_per_frame)
-
+        # Get shapes and coordinate information
         coro_coords, coro_dims, det_coords, det_dims = self.coro_det_coords_and_dims()
-        args = (coro_coords, coro_dims, det_coords, det_dims)
 
-        coords_dict = {dim: coro_coords[i] for i, dim in enumerate(coro_dims)}
-        obs_ds = xr.Dataset(coords=coords_dict)
-        obs_ds = self.add_source_to_dataset(frame_counts, "img", obs_ds, *args)
+        # Initialize the primary xarray Dataset
+        obs_ds = xr.Dataset(
+            coords={dim: coro_coords[i] for i, dim in enumerate(coro_dims)}
+        )
 
+        # Create a dictionary of the coronagraph-plane count rates
+        scene_rates_coro = {
+            "star": self.star_count_rate if self.settings.include_star else None,
+            "planet": self.planet_count_rate if self.settings.include_planets else None,
+            "disk": self.disk_count_rate if self.settings.include_disk else None,
+        }
+
+        # Add coronagraph-plane rates to the dataset
         if self.settings.return_sources:
             if self.settings.include_star:
-                obs_ds = self.add_source_to_dataset(
-                    star_frame_counts, "star", obs_ds, *args
+                obs_ds = self._add_coro_rate_to_dataset(
+                    scene_rates_coro["star"],
+                    "star_rate",
+                    obs_ds,
+                    coro_coords,
+                    coro_dims,
                 )
             if self.settings.include_planets:
-                obs_ds = self.add_source_to_dataset(
-                    planet_frame_counts, "planet", obs_ds, *args
+                obs_ds = self._add_coro_rate_to_dataset(
+                    scene_rates_coro["planet"],
+                    "planet_rate",
+                    obs_ds,
+                    coro_coords,
+                    coro_dims,
                 )
             if self.settings.include_disk:
-                obs_ds = self.add_source_to_dataset(
-                    disk_frame_counts, "disk", obs_ds, *args
+                obs_ds = self._add_coro_rate_to_dataset(
+                    scene_rates_coro["disk"],
+                    "disk_rate",
+                    obs_ds,
+                    coro_coords,
+                    coro_dims,
                 )
+
+        obs_ds = self._add_coro_rate_to_dataset(
+            self.total_count_rate, "scene_rate", obs_ds, coro_coords, coro_dims
+        )
+
+        # --- Detector Image Simulation ---
+        if self.scenario.has_detector:
+            # Delegate all detector effects to the detector object
+            obs_ds = self.scenario.detector.add_detector_effects(
+                obs_ds,
+                scene_rates_coro,
+                self.coronagraph,
+                self.scenario,
+                self.settings,
+                det_coords,
+                det_dims,
+            )
+
         if not self.settings.return_spectrum:
-            # Sum over the wavelength axis if we're not returning the spectrum
-            # but we did calculate it
             obs_ds = obs_ds.sum(dim="spectral_wavelength(nm)")
 
         if not self.settings.return_frames:
-            # Sum over the time axis if we're not returning the frames
             obs_ds = obs_ds.sum(dim="time")
 
         return obs_ds
 
-    def add_source_to_dataset(
-        self, coro_counts, source_name, ds, coro_coords, coro_dims, det_coords, det_dims
-    ):
-        """Create and add source DataArrays for coronagraph and detector.
+    def _add_coro_rate_to_dataset(self, data, name, ds, coords, dims):
+        """Add a coronagraph-scale count rate DataArray to the dataset."""
+        da = xr.DataArray(data.value, coords=coords, dims=dims)
+        da.attrs["units"] = str(data.unit)
+        da.name = f"{name}(coro)"
+        return xr.merge([ds, da])
 
-        This method creates xarray DataArrays for the given source counts at both
-        coronagraph and detector scales, then merges them into the provided dataset.
-        If detector coordinates are provided, detector data will also be created
-        by converting coronagraph counts to detector pixel scale.
-
-        Args:
-            coro_counts (numpy.ndarray):
-                Count data for the source in coronagraph pixels.
-            source_name (str):
-                Name of the source ('img', 'star', 'planet', 'disk').
-            ds (xarray.Dataset):
-                The dataset to which the source data will be added.
-            coro_coords (list of numpy.ndarray):
-                List of coordinate arrays for coronagraph data dimensions.
-            coro_dims (list of str):
-                List of dimension names for coronagraph data.
-            det_coords (list of numpy.ndarray or None):
-                List of coordinate arrays for detector data dimensions.
-            det_dims (list of str or None):
-                List of dimension names for detector data.
-
-        Returns:
-            xarray.Dataset:
-                The updated dataset with the new source data added as DataArrays
-                named '{source_name}(coro)' and optionally '{source_name}(det)'.
-        """
-        # Coronagraph data
-        coro_da = xr.DataArray(coro_counts, coords=coro_coords, dims=coro_dims)
-        coro_da.name = f"{source_name}(coro)"
-        ds = xr.merge([ds, coro_da])
-
-        # Detector data
-        if self.scenario.detector_shape is not None:
-            counts_det = self.convert_coro_to_detector(coro_counts)
-            det_da = xr.DataArray(counts_det, coords=det_coords, dims=det_dims)
-            det_da.name = f"{source_name}(det)"
-            ds = xr.merge([ds, det_da])
-
-        return ds
+    def _add_det_electrons_to_dataset(self, data, name, ds, coords, dims):
+        """Add a detector-scale electron count DataArray to the dataset."""
+        da = xr.DataArray(data, coords=coords, dims=dims)
+        da.attrs["units"] = "electron"
+        da.name = f"{name}(det)"
+        return xr.merge([ds, da])
 
     def get_coro_image_shape(self):
         """Get the shape of the coronagraph count/image pixel array.
@@ -857,6 +828,26 @@ class Observation:
 
         coro_image_shape.extend([self.coronagraph.npixels, self.coronagraph.npixels])
         return tuple(coro_image_shape)
+
+    def get_det_image_shape(self):
+        """Get the shape of the detector image pixel array.
+
+        The shape is determined by the number of frames, wavelengths, and the
+        detector's spatial dimensions.
+
+        Returns:
+            tuple of int:
+                The shape of the detector image array in the format
+                (nframes, nwavelengths, det_x_pixels, det_y_pixels).
+        """
+        det_image_shape = [self.nframes]
+        if self.settings.any_wavelength_dependence:
+            det_image_shape.append(len(self.spectral_wavelength_grid))
+        else:
+            det_image_shape.append(1)
+
+        det_image_shape.extend(self.scenario.detector.shape)
+        return tuple(det_image_shape)
 
     def calc_frame_info(self):
         """Calculate the number of frames and the start times for each frame.
@@ -933,8 +924,8 @@ class Observation:
 
         # Detector coordinates and dimensions
         if self.scenario.has_detector:
-            detector_xpix_arr = np.arange(self.scenario.detector_shape[0])
-            detector_ypix_arr = np.arange(self.scenario.detector_shape[1])
+            detector_xpix_arr = np.arange(self.scenario.detector.shape[0])
+            detector_ypix_arr = np.arange(self.scenario.detector.shape[1])
             det_coords = coro_coords[:-2] + [detector_xpix_arr, detector_ypix_arr]
             det_dims = coro_dims[:-2] + ["xpix(det)", "ypix(det)"]
         else:
@@ -974,39 +965,13 @@ class Observation:
 
         return final_coords, final_dims
 
-    def convert_coro_to_detector(self, coro_counts):
-        """Convert coronagraph pixel data to the detector pixels.
-
-        Args:
-            coro_counts (numpy.ndarray):
-                The count/image data in coronagraph pixels (lam/D)
-
-        Returns:
-            det_counts (numpy.ndarray):
-                The count/image data scaled to the detector pixels (arcsec)
-        """
-        # Scale the lambda/D pixels to the detector pixels
-        if self.settings.any_wavelength_dependence:
-            lam = self.spectral_wavelength_grid
-        else:
-            lam = self.scenario.central_wavelength
-        det_counts = util.get_detector_images(
-            coro_counts,
-            self.coronagraph.pixel_scale,
-            lam,
-            self.scenario.diameter,
-            self.scenario.detector_shape,
-            self.scenario.detector_pixel_scale,
-        )
-        return det_counts
-
     def plot_count_rates(self):
         """Plot the images at each wavelength and time."""
         min_val = np.min(self.total_count_rate.value * 1e-5)
         max_val = np.max(self.total_count_rate.value)
         norm = LogNorm(vmin=min_val, vmax=max_val)
-        for i, time in enumerate(self.times):
-            for j, wavelength in enumerate(self.obs_wavelengths):
+        for i, time in enumerate(self.frame_start_times):
+            for j, wavelength in enumerate(self.spectral_wavelength_grid):
                 fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(8, 8))
                 data = [
                     self.total_count_rate[i, j],
@@ -1063,102 +1028,6 @@ class Observation:
                 )
                 plt.close(fig)
 
-    def snr_check(self, times, noise_factor=0.5):
-        """Check the SNR of the images."""
-        # Set up count rates for the Poisson noise as a fraction of the max
-        noise_count_rate = np.max(self.total_count_rate) * noise_factor
-        noise_field = np.ones_like(self.total_count_rate.value) * noise_count_rate
-
-        # Get the brightest pixel
-        bright_planet_loc = np.unravel_index(
-            np.argmax(self.total_count_rate), self.total_count_rate.shape
-        )[::-1]
-
-        # Set up a circular aperture at the bright planet location
-        aperture = CircularAperture(bright_planet_loc, r=4)
-
-        # Create an aperture mask
-        mask = aperture.to_mask(method="exact")
-
-        # aperture count rate
-        aperture_count_rate = np.sum(mask.multiply(self.total_count_rate))
-        background_count_rate = np.sum(mask.multiply(noise_field))
-        cp = aperture_count_rate
-        cb = background_count_rate
-
-        def analytic_snr(t):
-            return (cp * t / np.sqrt(cp * t + cb * t)).decompose().value
-
-        snrs = np.zeros_like(times.value)
-        analytic_snrs = np.zeros_like(times.value)
-        for i, t in enumerate(times):
-            self.scenario.exposure_time = t
-            self.count_photons()
-            expected_photons_per_frame = (
-                (noise_field * self.scenario.exposure_time).decompose().value
-            )
-            noise_frame = np.random.poisson(expected_photons_per_frame)
-            combined_image = self.image + noise_frame
-
-            # Get the aperture stats
-            aperture_stats = ApertureStats(combined_image, aperture, sigma_clip=None)
-
-            # Create an annulus aperture to compute the mean background level
-            annulus = CircularAnnulus(bright_planet_loc, r_in=8, r_out=15)
-
-            # Background statistics
-            sigma_clip = SigmaClip(sigma=3.0, maxiters=5)
-            bkg_stats = ApertureStats(combined_image, annulus, sigma_clip=sigma_clip)
-
-            # Get the background count in the circular aperture
-            bkg_total = bkg_stats.median * aperture.area
-
-            # Subtract the background count from the aperture count
-            bkg_subtracted_count = aperture_stats.sum - bkg_total
-
-            snrs[i] = bkg_subtracted_count / np.sqrt(aperture_stats.sum)
-            analytic_snrs[i] = analytic_snr(t)
-
-        fig, ax = plt.subplots()
-        cmap = mpl.cm.get_cmap("viridis")
-        ax.plot(times, analytic_snrs, label="Analytic SNR", color=cmap(0.2))
-        ax.scatter(times, snrs, label="Simulated SNR", color=cmap(0.7), zorder=10, s=10)
-        ax.set_xlabel("Exposure time (hr)")
-        ax.set_ylabel("SNR")
-        ax.legend(loc="best")
-        ax.set_title("Comparison of simulated and analytic SNR")
-        fig.savefig("results/snr_check.png", bbox_inches="tight", dpi=300)
-        plt.show()
-
-        # fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(8, 4))
-        # max_count = np.max(self.image)
-        # axes[0].imshow(
-        #     self.image, origin="lower", norm=Normalize(vmin=0, vmax=max_count)
-        # )
-        # p = axes[1].imshow(
-        #     combined_image, origin="lower", norm=Normalize(vmin=0, vmax=max_count)
-        # )
-        # axes[0].set_title("No noise")
-        # axes[1].set_title("With noise and aperture")
-        # aperture.plot(color="white", ax=axes[1])
-        # annulus.plot(color="red", ax=axes[1])
-        # fig.subplots_adjust(right=0.8)
-        # cax = fig.add_axes([0.85, 0.15, 0.02, 0.7])
-        # fig.colorbar(p, cax=cax, label="Photon count")
-        # fig.savefig("results/snr_check.png", bbox_inches="tight", dpi=300)
-        # fig.colorbar(p, ax=axes[1], label="Photon count")
-
-        # bkg_count = bkg_stats.median * aperture.area
-
-        # mean_background = aperstats.mean
-        # phot_table = aperture_photometry(combined_image, aperture)
-
-        # aper_stats_bkgsub = ApertureStats(
-        #     combined_image, aperture, local_bkg=bkg_stats.median
-        # )
-
-        # stats = ApertureStats(combined_image, aperture)
-
 
 @jax.jit
 def compute_disk_image(disk, psfs):
@@ -1194,9 +1063,3 @@ def compute_disk_image_debug(disk, psfs):
             result += disk[i, j] * psfs[i, j, :, :]
 
     return result
-
-
-@jax.jit
-def compute_disk_image_alternative(disk, psfs):
-    """Alternative using tensordot - might be more numerically stable."""
-    return jnp.tensordot(disk, psfs, axes=([0, 1], [0, 1]))
