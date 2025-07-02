@@ -12,6 +12,8 @@ except ImportError:
 
     HAS_TOMLLIB = False
 
+from coronagraphoto.detector import Detector
+
 
 class ObservingScenario:
     """ObservingScenario holds information required to run an observation.
@@ -44,8 +46,7 @@ class ObservingScenario:
         #     stddev=0.2 * self.central_wavelength / np.sqrt(2 * np.pi),
         # )
         self.spectral_resolution = 100
-        self.detector_shape = None
-        self.detector_pixel_scale = None
+        self.detector = None
 
         # Load the TOML file (if provided)
         if toml_file:
@@ -66,13 +67,7 @@ class ObservingScenario:
             raise ValueError("Must provide a bandpass model currently")
 
         # Check if detector settings are complete
-        assert (self.detector_shape is not None) == (
-            self.detector_pixel_scale is not None
-        ), "Must provide both detector_shape and detector_pixel_scale or neither"
-        self.has_detector = self.detector_shape is not None
-        if self.has_detector:
-            # Ensure the detector shape is a tuple of ints
-            self.detector_shape = tuple(int(x) for x in self.detector_shape)
+        self.has_detector = self.detector is not None
 
         self.frame_time_s = self.frame_time.to_value(u.s)
         self.exposure_time_s = self.exposure_time.to_value(u.s)
@@ -132,8 +127,26 @@ class ObservingScenario:
 
         # Detector settings
         if "detector" in config:
-            detector = config["detector"]
-            if det_shape := detector.get("shape"):
-                self.detector_shape = det_shape
-            if det_pixel_scale := detector.get("pixel_scale"):
-                self.detector_pixel_scale = u.Quantity(**det_pixel_scale) / u.pix
+            detector_config = config["detector"]
+            # Create a dictionary of arguments for the Detector class
+            detector_args = {}
+            if shape := detector_config.get("shape"):
+                detector_args["shape"] = shape
+            if pixel_scale := detector_config.get("pixel_scale"):
+                detector_args["pixel_scale"] = u.Quantity(**pixel_scale) / u.pix
+            if quantum_efficiency := detector_config.get("quantum_efficiency"):
+                detector_args["quantum_efficiency"] = quantum_efficiency
+            if dark_current_rate := detector_config.get("dark_current_rate"):
+                detector_args["dark_current_rate"] = u.Quantity(**dark_current_rate)
+            if read_noise := detector_config.get("read_noise"):
+                detector_args["read_noise"] = u.Quantity(**read_noise)
+            if cic_rate := detector_config.get("cic_rate"):
+                detector_args["cic_rate"] = u.Quantity(**cic_rate)
+
+            # Check if all necessary detector arguments are present
+            if "shape" in detector_args and "pixel_scale" in detector_args:
+                self.detector = Detector(**detector_args)
+            elif detector_args:
+                raise ValueError(
+                    "Detector config must include at least shape and pixel_scale."
+                )

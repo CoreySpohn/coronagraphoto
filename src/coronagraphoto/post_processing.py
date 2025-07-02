@@ -36,28 +36,69 @@ class PostProcessing:
             xarray.Dataset:
                 The dataset with the post-processing applied.
         """
-        # Process coronagraph-plane images
-        coro_vars = ["star(coro)", "disk(coro)", "planet(coro)"]
-        if all(var in dataset for var in coro_vars):
-            dataset["processed_image(coro)"] = (
-                dataset["star(coro)"] / self.config.star_post_processing_factor
-                + dataset["disk(coro)"] / self.config.disk_post_processing_factor
-                + dataset["planet(coro)"]
-            )
-        else:
-            raise ValueError(
-                "Input dataset for PostProcessing must contain star(coro), "
-                "disk(coro), and planet(coro). Ensure Observation "
-                "was run with return_sources=True."
-            )
+        # Define the components of the processed image
+        processed_components = []
+        coro_plane = False
+        det_plane = False
 
-        # Process detector-plane images if they exist
+        # Check for coronagraph-plane data (count rates)
+        coro_vars = ["star_rate(coro)", "disk_rate(coro)", "planet_rate(coro)"]
+        if all(var in dataset for var in coro_vars):
+            coro_plane = True
+            star_processed_coro = (
+                dataset["star_rate(coro)"] / self.config.star_post_processing_factor
+            )
+            disk_processed_coro = (
+                dataset["disk_rate(coro)"] / self.config.disk_post_processing_factor
+            )
+            processed_components_coro = [
+                star_processed_coro,
+                disk_processed_coro,
+                dataset["planet_rate(coro)"],
+            ]
+
+        # Check for detector-plane data (electron counts)
         det_vars = ["star(det)", "disk(det)", "planet(det)"]
         if all(var in dataset for var in det_vars):
-            dataset["processed_image(det)"] = (
+            det_plane = True
+            star_processed_det = (
                 dataset["star(det)"] / self.config.star_post_processing_factor
-                + dataset["disk(det)"] / self.config.disk_post_processing_factor
-                + dataset["planet(det)"]
+            )
+            disk_processed_det = (
+                dataset["disk(det)"] / self.config.disk_post_processing_factor
+            )
+            processed_components_det = [
+                star_processed_det,
+                disk_processed_det,
+                dataset["planet(det)"],
+            ]
+
+        # Add noise components if they exist
+        noise_vars_coro = ["dark_current(coro)", "read_noise(coro)", "cic(coro)"]
+        noise_vars_det = ["dark_current(det)", "read_noise(det)", "cic(det)"]
+
+        if any(var in dataset for var in noise_vars_coro) and coro_plane:
+            for var in noise_vars_coro:
+                if var in dataset:
+                    processed_components_coro.append(dataset[var])
+
+        if any(var in dataset for var in noise_vars_det) and det_plane:
+            for var in noise_vars_det:
+                if var in dataset:
+                    processed_components_det.append(dataset[var])
+
+        # Create the processed images by summing components
+        if coro_plane:
+            dataset["processed_image_rate(coro)"] = sum(processed_components_coro)
+
+        if det_plane:
+            dataset["processed_image(det)"] = sum(processed_components_det)
+
+        if not coro_plane and not det_plane:
+            raise ValueError(
+                "Input dataset for PostProcessing must contain star, disk, and "
+                "planet data in at least one plane (coro or det). "
+                "Ensure Observation was run with return_sources=True."
             )
 
         return dataset

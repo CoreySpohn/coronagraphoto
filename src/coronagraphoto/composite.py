@@ -60,13 +60,13 @@ class CompositeObservation:
             self.datasets.append(dataset)
         return self.datasets
 
-    def get_composite_image(self, image_key="img(det)"):
+    def get_composite_image(self, image_key="image(det)"):
         """Stacks the images from all observations into a single datacube.
 
         Args:
             image_key (str):
                 The key for the image in the dataset dictionary.
-                Defaults to "img(det)". Can also be "processed_image(det)".
+                Defaults to "image(det)". Can also be "processed_image(det)".
 
         Returns:
             np.ndarray:
