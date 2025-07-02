@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/CoreySpohn/coronagraphoto/compare/v1.2.0...v1.3.0) (2025-07-02)
+
+
+### Features
+
+* Introduce Detector class for modeling detector behavior in coronagraph simulations ([0f6b9f1](https://github.com/CoreySpohn/coronagraphoto/commit/0f6b9f1e6d40217f9d4bd771a2d3f0b6536cd26f))
+
 ## [1.2.0](https://github.com/CoreySpohn/coronagraphoto/compare/v1.1.0...v1.2.0) (2025-06-26)
 
 
