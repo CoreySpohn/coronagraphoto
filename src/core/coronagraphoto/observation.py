@@ -41,8 +41,20 @@ class Target:
         Returns:
             IntermediateData instance with the loaded scene
         """
-        # For now, delegate to the IntermediateData class method
-        return IntermediateData.from_scene_file(self.scene_path)
+        # Use the ExoVista integration
+        from .light_paths import load_scene_from_exovista
+        from .data_models import PropagationContext
+        
+        # Create a default context for scene loading
+        context = PropagationContext(
+            time=Time.now(),
+            wavelength=550 * u.nm,
+            bandpass_slice=1.0 * u.nm,
+            time_step=1.0 * u.s,
+            rng_key=42
+        )
+        
+        return load_scene_from_exovista(self.scene_path, context)
     
     def __repr__(self) -> str:
         return f"Target(name='{self.name}', scene_path='{self.scene_path}')"

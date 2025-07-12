@@ -6,7 +6,7 @@ through configurable light paths. It implements the core functional execution
 engine that processes observations through pure functions.
 """
 
-from typing import Dict, List, Callable, Any, Optional
+from typing import Dict, List, Callable, Any, Optional, Union
 import numpy as np
 import astropy.units as u
 from astropy.time import Time
@@ -19,6 +19,8 @@ from .observation import Observation, ObservationSequence
 # Type definitions for light path components
 LightPathFunction = Callable[..., IntermediateData]  # More flexible function signature
 LightPath = List[LightPathFunction]
+# Also accept callable objects like PathPipeline
+LightPathCallable = Callable[[IntermediateData, PropagationContext], IntermediateData]
 
 
 class Observatory:
@@ -30,13 +32,13 @@ class Observatory:
     approach where the simulation is a sequence of pure functions.
     """
     
-    def __init__(self, light_paths: Dict[str, LightPath]):
+    def __init__(self, light_paths: Dict[str, Union[LightPath, LightPathCallable]]):
         """
         Initialize the Observatory with available light paths.
         
         Args:
             light_paths: 
-                Dictionary mapping path names to lists of light path functions
+                Dictionary mapping path names to light path functions or callable objects
         """
         self.light_paths = light_paths
         self._validate_light_paths()
@@ -49,10 +51,16 @@ class Observatory:
         for path_name, path_functions in self.light_paths.items():
             if not isinstance(path_name, str):
                 raise TypeError(f"Light path name must be string, got {type(path_name)}")
-            if not isinstance(path_functions, list):
-                raise TypeError(f"Light path '{path_name}' must be a list of functions")
-            if not path_functions:
-                raise ValueError(f"Light path '{path_name}' cannot be empty")
+            
+            # Handle both list and callable types
+            if isinstance(path_functions, list):
+                if not path_functions:
+                    raise ValueError(f"Light path '{path_name}' cannot be empty")
+            elif callable(path_functions):
+                # Callable objects like PathPipeline are valid
+                pass
+            else:
+                raise TypeError(f"Light path '{path_name}' must be a list of functions or callable object")
     
     def run(self, observation_sequence: ObservationSequence, seed: Optional[int] = None) -> xr.Dataset:
         """
@@ -144,7 +152,7 @@ class Observatory:
         # Combine results into a single dataset for this observation
         return self._combine_grid_results(results, time_grid, wavelength_grid)
     
-    def _execute_light_path(self, data: IntermediateData, light_path: LightPath, context: PropagationContext) -> IntermediateData:
+    def _execute_light_path(self, data: IntermediateData, light_path: Union[LightPath, LightPathCallable], context: PropagationContext) -> IntermediateData:
         """
         Execute a single light path for a given propagation context.
         
@@ -152,21 +160,26 @@ class Observatory:
             data: 
                 Initial data to propagate
             light_path: 
-                List of functions to execute in sequence
+                List of functions or callable object to execute
             context: 
                 Propagation context for this execution
                 
         Returns:
             Final data after propagation through the light path
         """
-        current_data = data
-        
-        for step_func in light_path:
-            # Each function in the light path should be a partial function
-            # with parameters already bound, so we just need to pass data and context
-            current_data = step_func(current_data, context)
-        
-        return current_data
+        if callable(light_path) and not isinstance(light_path, list):
+            # Handle callable objects like PathPipeline
+            return light_path(data, context)
+        else:
+            # Handle list of functions
+            current_data = data
+            
+            for step_func in light_path:
+                # Each function in the light path should be a partial function
+                # with parameters already bound, so we just need to pass data and context
+                current_data = step_func(current_data, context)
+            
+            return current_data
     
     def _plan_time_grid(self, observation: Observation) -> List[Time]:
         """

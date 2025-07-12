@@ -287,8 +287,11 @@ class CoronagraphParams:
     throughput: float = 0.1
     contrast: float = 1e-10
     coronagraph_model: Any = None  # yippy.Coronagraph object
+    coronagraph_dir: Optional[str] = None  # Path to coronagraph directory
     pixel_scale: Optional[u.Quantity] = None  # lambda/D per pixel
     npixels: Optional[int] = None  # number of pixels along one axis
+    use_jax: bool = True  # Whether to use JAX for yippy
+    cpu_cores: int = 1  # Number of CPU cores for yippy
     
     def __post_init__(self):
         """Validate parameters."""
@@ -300,6 +303,28 @@ class CoronagraphParams:
             raise ValueError("Throughput must be between 0 and 1")
         if self.contrast <= 0:
             raise ValueError("Contrast must be positive")
+    
+    def get_coronagraph_model(self):
+        """
+        Get or create the yippy Coronagraph object.
+        
+        Returns:
+            yippy.Coronagraph object
+        """
+        if self.coronagraph_model is None and self.coronagraph_dir is not None:
+            try:
+                from yippy import Coronagraph
+                self.coronagraph_model = Coronagraph(
+                    self.coronagraph_dir,
+                    use_jax=self.use_jax,
+                    cpu_cores=self.cpu_cores
+                )
+            except ImportError:
+                raise ImportError("yippy package not available. Install yippy to use coronagraph models.")
+            except Exception as e:
+                raise RuntimeError(f"Failed to load coronagraph from {self.coronagraph_dir}: {e}")
+        
+        return self.coronagraph_model
 
 
 @dataclass
@@ -589,19 +614,46 @@ def apply_star_coronagraph(star_flux, params: CoronagraphParams, context: Propag
     3. Multiply intensity map by photon flux
     """
     try:
-        # This would require integration with the actual coronagraph object
-        # For now, apply simple suppression based on contrast parameter
-        suppressed_flux = star_flux * params.contrast
+        # Get the yippy coronagraph model
+        coronagraph_model = params.get_coronagraph_model()
         
-        # In full implementation, this would:
-        # - Get stellar diameter in lambda/D: 
-        #   stellar_diam_lod = star.angular_diameter.to(u.lod, equiv.lod(wavelength, diameter))
-        # - Get intensity map: stellar_intens = coronagraph.stellar_intens(stellar_diam_lod).T
-        # - Multiply: count_rate = np.multiply(stellar_intens, flux_term).T
+        if coronagraph_model is not None:
+            # Use the actual yippy coronagraph model
+            # This follows the pattern from sim_star_cor.py
+            
+            # For now, use a simple stellar diameter (this would come from the star properties)
+            stellar_diameter_lod = 0.01  # lambda/D units, typical for nearby stars
+            
+            # Get the stellar intensity map from the coronagraph
+            try:
+                stellar_intens = coronagraph_model.stellar_intens(stellar_diameter_lod)
+                
+                # Apply the coronagraph suppression
+                # The intensity map gives the suppression factor at each pixel
+                if hasattr(stellar_intens, 'T'):
+                    stellar_intens = stellar_intens.T
+                
+                # Convert star flux to the appropriate format for multiplication
+                if hasattr(star_flux, 'value'):
+                    flux_value = star_flux.value
+                else:
+                    flux_value = float(star_flux)
+                
+                # Multiply flux by intensity map
+                suppressed_flux_map = stellar_intens * flux_value
+                
+                return suppressed_flux_map
+                
+            except Exception as e:
+                print(f"Warning: Could not use yippy coronagraph stellar_intens: {e}")
+                # Fall back to simple contrast suppression
+                return star_flux * params.contrast
+        else:
+            # No coronagraph model available, use simple suppression
+            return star_flux * params.contrast
         
-        return suppressed_flux
-        
-    except Exception:
+    except Exception as e:
+        print(f"Warning: Error in coronagraph application: {e}")
         # Fallback to simple contrast suppression
         return star_flux * params.contrast
 
@@ -799,9 +851,141 @@ def _simple_resample(data, target_shape):
     return zoom(data, zoom_factors, order=1)
 
 
+def load_scene_from_exovista(scene_path: str, context: PropagationContext) -> IntermediateData:
+    """
+    Load a scene from an ExoVista file into IntermediateData format.
+    
+    Args:
+        scene_path: 
+            Path to the ExoVista scene file (e.g., "input/scenes/more_pix.fits")
+        context: 
+            Propagation context containing time and wavelength information
+            
+    Returns:
+        IntermediateData loaded from the ExoVista scene file
+    """
+    try:
+        from exoverses.exovista.system import ExovistaSystem
+    except ImportError:
+        raise ImportError("ExoVista package not available. Install exoverses to load scene files.")
+    
+    try:
+        # Load the ExoVista system
+        system = ExovistaSystem(scene_path)
+        
+        # Extract components and build IntermediateData
+        dataset_dict = {}
+        coords = {}
+        attrs = {
+            'scene_file': scene_path,
+            'loaded_at': context.time.iso if context.time else 'unknown',
+            'exovista_system_name': getattr(system, 'name', 'unknown')
+        }
+        
+        # Extract star data
+        if hasattr(system, 'star') and system.star is not None:
+            try:
+                star_flux = system.star.spec_flux_density(context.wavelength, context.time)
+                # Convert to simple scalar for now (no wavelength dependence)
+                star_flux_value = star_flux.to(u.Jy).value if hasattr(star_flux, 'to') else float(star_flux)
+                
+                dataset_dict['star_flux'] = xr.DataArray(
+                    star_flux_value,
+                    dims=[],
+                    attrs={'units': 'Jy', 'source': 'ExoVista star'}
+                )
+            except Exception as e:
+                print(f"Warning: Could not extract star flux: {e}")
+        
+        # Extract planet data
+        if hasattr(system, 'planets') and system.planets:
+            planet_fluxes = []
+            planet_coords_x = []
+            planet_coords_y = []
+            
+            for i, planet in enumerate(system.planets):
+                try:
+                    # Get planet flux
+                    planet_flux = planet.spec_flux_density(context.wavelength, context.time)
+                    planet_flux_value = planet_flux.to(u.Jy).value if hasattr(planet_flux, 'to') else float(planet_flux)
+                    planet_fluxes.append(planet_flux_value)
+                    
+                    # Get planet coordinates (simplified for now)
+                    # In practice, would need orbital propagation
+                    planet_coords_x.append(0.0)  # Placeholder
+                    planet_coords_y.append(0.0)  # Placeholder
+                    
+                except Exception as e:
+                    print(f"Warning: Could not extract planet {i} data: {e}")
+                    planet_fluxes.append(0.0)
+                    planet_coords_x.append(0.0)
+                    planet_coords_y.append(0.0)
+            
+            if planet_fluxes:
+                dataset_dict['planet_flux'] = xr.DataArray(
+                    planet_fluxes,
+                    dims=['planet'],
+                    coords={'planet': range(len(planet_fluxes))},
+                    attrs={'units': 'Jy', 'source': 'ExoVista planets'}
+                )
+                
+                dataset_dict['planet_coords'] = xr.DataArray(
+                    np.column_stack([planet_coords_x, planet_coords_y]),
+                    dims=['planet', 'coord'],
+                    coords={
+                        'planet': range(len(planet_fluxes)),
+                        'coord': ['x', 'y']
+                    },
+                    attrs={'units': 'arcsec', 'source': 'ExoVista planet positions'}
+                )
+        
+        # Extract disk data
+        if hasattr(system, 'disk') and system.disk is not None:
+            try:
+                disk_flux_map = system.disk.spec_flux_density(context.wavelength, context.time)
+                # Convert to numpy array if needed
+                if hasattr(disk_flux_map, 'value'):
+                    disk_flux_map = disk_flux_map.value
+                
+                # Get disk image dimensions
+                if hasattr(disk_flux_map, 'shape') and len(disk_flux_map.shape) >= 2:
+                    ny, nx = disk_flux_map.shape[-2:]
+                    coords['x'] = np.arange(nx)
+                    coords['y'] = np.arange(ny)
+                    
+                    dataset_dict['disk_flux_map'] = xr.DataArray(
+                        disk_flux_map.squeeze() if len(disk_flux_map.shape) > 2 else disk_flux_map,
+                        dims=['y', 'x'],
+                        coords={'x': coords['x'], 'y': coords['y']},
+                        attrs={'units': 'Jy/pixel', 'source': 'ExoVista disk'}
+                    )
+                else:
+                    print("Warning: Disk flux map does not have expected 2D structure")
+                    
+            except Exception as e:
+                print(f"Warning: Could not extract disk data: {e}")
+        
+        # Create the dataset
+        if not dataset_dict:
+            # Fallback if no components could be loaded
+            dataset_dict['star_flux'] = xr.DataArray(
+                1e-10,  # Very faint star
+                dims=[],
+                attrs={'units': 'Jy', 'source': 'fallback'}
+            )
+        
+        dataset = xr.Dataset(dataset_dict, coords=coords, attrs=attrs)
+        return IntermediateData(dataset)
+        
+    except Exception as e:
+        raise RuntimeError(f"Failed to load ExoVista scene from {scene_path}: {e}")
+
+
 def load_scene(target_path: str, context: PropagationContext) -> IntermediateData:
     """
     Load a scene from a file into IntermediateData format.
+    
+    This is a wrapper that delegates to the appropriate loader based on file type.
     
     Args:
         target_path: 
@@ -812,33 +996,8 @@ def load_scene(target_path: str, context: PropagationContext) -> IntermediateDat
     Returns:
         IntermediateData loaded from the scene file
     """
-    # This is a placeholder implementation
-    # In practice, this would load from ExoVista or other scene formats
-    
-    # Create a simple stellar spectrum for testing
-    wavelengths = np.linspace(400, 800, 100) * u.nm
-    
-    # Simple blackbody-like spectrum
-    flux_values = np.exp(-(wavelengths.value - 550)**2 / (2 * 50**2))
-    flux = flux_values * 1e6  # Arbitrary units
-    
-    # Create the IntermediateData
-    dataset = xr.Dataset({
-        'star_flux': xr.DataArray(
-            flux,
-            dims=['wavelength'],
-            coords={'wavelength': wavelengths.value},
-            attrs={'units': 'photons/s/nm'}
-        )
-    })
-    
-    # Add scene metadata
-    dataset.attrs.update({
-        'scene_file': target_path,
-        'loaded_at': context.time.iso if context.time else 'unknown'
-    })
-    
-    return IntermediateData(dataset)
+    # For now, assume all scene files are ExoVista format
+    return load_scene_from_exovista(target_path, context)
 
 
 # Convenience functions for backward compatibility
