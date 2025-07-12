@@ -1,9 +1,14 @@
 """
 Light path functions for coronagraphoto v2.
 
-This module contains the pure functions that implement the physics of light
-propagation through the coronagraph system. Each function is stateless and
-can be composed into light paths.
+This module provides elegant functional composition for light path physics.
+The new system allows for clean, composable path definitions through multiple
+patterns:
+
+1. Pipeline composition: Path.primary() >> Path.coronagraph() >> Path.detector()
+2. Functional composition: compose(detector, coronagraph, primary)
+3. Builder pattern: PathBuilder().add_primary().add_coronagraph().build()
+4. Decorator-based registration: @path_component automatically registers functions
 
 The physics follows the original coronagraphoto implementation, handling:
 - Coordinate transformations between different pixel scales
@@ -14,7 +19,8 @@ The physics follows the original coronagraphoto implementation, handling:
 """
 
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, Callable, Dict, List, Tuple
+from functools import wraps, partial, reduce
 import numpy as np
 import astropy.units as u
 from astropy.time import Time
@@ -37,7 +43,224 @@ except ImportError:
     HAVE_TRANSFORMS = False
 
 
-# Hardware parameter classes
+# Type definitions
+PathFunction = Callable[[IntermediateData, PropagationContext], IntermediateData]
+PathStep = Callable[[PropagationContext], PathFunction]
+
+
+# Global registry of path components
+_PATH_REGISTRY: Dict[str, PathStep] = {}
+
+
+def path_component(name: str, category: str = "generic"):
+    """
+    Decorator to register a function as a reusable path component.
+    
+    Args:
+        name: 
+            Name for the component (used in registry)
+        category: 
+            Category for organization (primary, coronagraph, detector, etc.)
+            
+    Returns:
+        Decorated function that can be used in path composition
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(params, **kwargs):
+            # Return a partially applied function ready for path composition
+            return partial(func, params=params, **kwargs)
+        
+        # Set attributes on the original function
+        func.category = category
+        func.component_name = name
+        
+        # Register the component
+        _PATH_REGISTRY[name] = wrapper
+        
+        return wrapper
+    return decorator
+
+
+def compose(*functions: PathFunction) -> PathFunction:
+    """
+    Compose multiple path functions into a single function.
+    
+    Functions are applied right-to-left (mathematical composition).
+    
+    Args:
+        *functions: 
+            Path functions to compose
+            
+    Returns:
+        Composed function
+    """
+    def composed_function(data: IntermediateData, context: PropagationContext) -> IntermediateData:
+        if not functions:
+            # Identity function for empty composition
+            return data
+        return reduce(lambda d, f: f(d, context), reversed(functions), data)
+    
+    return composed_function
+
+
+class PathPipeline:
+    """
+    A pipeline for composing path functions with >> operator.
+    
+    This allows for elegant left-to-right composition:
+    path = PathPipeline(primary) >> coronagraph >> detector
+    """
+    
+    def __init__(self, func: PathFunction):
+        """Initialize pipeline with a single function."""
+        self.func = func
+    
+    def __rshift__(self, other: Union['PathPipeline', PathFunction]) -> 'PathPipeline':
+        """
+        Compose this pipeline with another function (>> operator).
+        
+        Args:
+            other: 
+                Another pipeline or path function
+                
+        Returns:
+            New pipeline with composed functions
+        """
+        if isinstance(other, PathPipeline):
+            other_func = other.func
+        else:
+            other_func = other
+        
+        def composed(data: IntermediateData, context: PropagationContext) -> IntermediateData:
+            intermediate = self.func(data, context)
+            return other_func(intermediate, context)
+        
+        return PathPipeline(composed)
+    
+    def __call__(self, data: IntermediateData, context: PropagationContext) -> IntermediateData:
+        """Execute the pipeline."""
+        return self.func(data, context)
+
+
+class PathBuilder:
+    """
+    Builder pattern for constructing complex light paths.
+    
+    Provides a fluent interface for building paths:
+    path = PathBuilder().primary(params).coronagraph(params).build()
+    """
+    
+    def __init__(self):
+        """Initialize empty builder."""
+        self._components: List[PathFunction] = []
+    
+    def add(self, component: PathFunction) -> 'PathBuilder':
+        """
+        Add a component to the path.
+        
+        Args:
+            component: 
+                Path function to add
+                
+        Returns:
+            Self for method chaining
+        """
+        self._components.append(component)
+        return self
+    
+    def primary(self, params: 'PrimaryParams') -> 'PathBuilder':
+        """Add primary mirror component."""
+        return self.add(Path.primary(params))
+    
+    def coronagraph(self, params: 'CoronagraphParams') -> 'PathBuilder':
+        """Add coronagraph component."""
+        return self.add(Path.coronagraph(params))
+    
+    def filter(self, params: 'FilterParams') -> 'PathBuilder':
+        """Add filter component."""
+        return self.add(Path.filter(params))
+    
+    def detector(self, params: 'DetectorParams') -> 'PathBuilder':
+        """Add detector component."""
+        return self.add(Path.detector(params))
+    
+    def speckles(self, params: Any) -> 'PathBuilder':
+        """Add speckles component."""
+        return self.add(Path.speckles(params))
+    
+    def custom(self, func: PathFunction) -> 'PathBuilder':
+        """Add custom function component."""
+        return self.add(func)
+    
+    def build(self) -> PathFunction:
+        """
+        Build the final path function.
+        
+        Returns:
+            Composed path function
+        """
+        if not self._components:
+            raise ValueError("Cannot build empty path")
+        
+        return compose(*self._components)
+
+
+class Path:
+    """
+    Factory class for creating path components.
+    
+    Provides static methods for creating common path components:
+    - Path.primary(params) -> primary mirror function
+    - Path.coronagraph(params) -> coronagraph function
+    - etc.
+    """
+    
+    @staticmethod
+    def primary(params: 'PrimaryParams') -> PathFunction:
+        """Create a primary mirror path function."""
+        return _PATH_REGISTRY['primary'](params)
+    
+    @staticmethod
+    def coronagraph(params: 'CoronagraphParams') -> PathFunction:
+        """Create a coronagraph path function."""
+        return _PATH_REGISTRY['coronagraph'](params)
+    
+    @staticmethod
+    def filter(params: 'FilterParams') -> PathFunction:
+        """Create a filter path function."""
+        return _PATH_REGISTRY['filter'](params)
+    
+    @staticmethod
+    def detector(params: 'DetectorParams') -> PathFunction:
+        """Create a detector path function."""
+        return _PATH_REGISTRY['detector'](params)
+    
+    @staticmethod
+    def speckles(params: Any) -> PathFunction:
+        """Create a speckles path function."""
+        return _PATH_REGISTRY['speckles'](params)
+    
+    @staticmethod
+    def from_registry(name: str, params: Any) -> PathFunction:
+        """Create a path function from the registry."""
+        if name not in _PATH_REGISTRY:
+            raise ValueError(f"Path component '{name}' not found in registry")
+        return _PATH_REGISTRY[name](params)
+    
+    @staticmethod
+    def list_components() -> Dict[str, str]:
+        """List all available path components."""
+        result = {}
+        for name, func in _PATH_REGISTRY.items():
+            # Get the category from the original function (before wrapping)
+            original_func = func.__wrapped__ if hasattr(func, '__wrapped__') else func
+            category = getattr(original_func, 'category', 'unknown')
+            result[name] = category
+        return result
+
+
+# Hardware parameter classes (unchanged)
 @dataclass
 class PrimaryParams:
     """Parameters for the primary mirror."""
@@ -123,8 +346,9 @@ class FilterParams:
             raise ValueError("Transmission must be between 0 and 1")
 
 
-# Light path functions
-def apply_primary(data: IntermediateData, params: PrimaryParams, context: PropagationContext) -> IntermediateData:
+# Physics functions using the new pattern
+@path_component("primary", "optics")
+def apply_primary(data: IntermediateData, context: PropagationContext, params: PrimaryParams) -> IntermediateData:
     """
     Apply primary mirror effects to the light.
     
@@ -133,17 +357,16 @@ def apply_primary(data: IntermediateData, params: PrimaryParams, context: Propag
     Args:
         data: 
             Input data with source fluxes  
-        params: 
-            Primary mirror parameters
         context: 
             Propagation context
+        params: 
+            Primary mirror parameters
             
     Returns:
         Data with primary mirror effects applied
     """
     # Calculate illuminated area following original implementation
     # illuminated_area = π * diameter²/4 * (1 - frac_obscured)
-    # For now, assume no central obscuration (frac_obscured = 0)
     frac_obscured = getattr(params, 'frac_obscured', 0.0)
     illuminated_area = (
         np.pi * params.diameter**2 / 4.0 * (1.0 - frac_obscured)
@@ -170,7 +393,8 @@ def apply_primary(data: IntermediateData, params: PrimaryParams, context: Propag
     return new_data
 
 
-def apply_coronagraph(data: IntermediateData, params: CoronagraphParams, context: PropagationContext) -> IntermediateData:
+@path_component("coronagraph", "optics")
+def apply_coronagraph(data: IntermediateData, context: PropagationContext, params: CoronagraphParams) -> IntermediateData:
     """
     Apply coronagraph suppression to the light.
     
@@ -183,10 +407,10 @@ def apply_coronagraph(data: IntermediateData, params: CoronagraphParams, context
     Args:
         data: 
             Input data with source fluxes
-        params: 
-            Coronagraph parameters containing yippy coronagraph model
         context: 
             Propagation context including wavelength and diameter
+        params: 
+            Coronagraph parameters containing yippy coronagraph model
             
     Returns:
         Data with coronagraph effects applied
@@ -217,6 +441,144 @@ def apply_coronagraph(data: IntermediateData, params: CoronagraphParams, context
     return new_data
 
 
+@path_component("filter", "optics")
+def apply_filter(data: IntermediateData, context: PropagationContext, params: FilterParams) -> IntermediateData:
+    """
+    Apply optical filter transmission to the light.
+    
+    Handles both simple rectangular filters and synphot bandpass models.
+    Follows the original implementation's wavelength handling.
+    
+    Args:
+        data: 
+            Input data with source fluxes
+        context: 
+            Propagation context including wavelength and bandwidth
+        params: 
+            Filter parameters (may include synphot bandpass)
+            
+    Returns:
+        Data with filter effects applied
+    """
+    # Calculate filter transmission at the current wavelength
+    wavelength = context.wavelength
+    
+    if params.bandpass_model is not None:
+        # Use synphot bandpass model if available
+        try:
+            transmission = params.bandpass_model(wavelength).value
+        except Exception:
+            # Fallback to simple model
+            transmission = _simple_filter_transmission(wavelength, params)
+    else:
+        # Use simple rectangular filter model
+        transmission = _simple_filter_transmission(wavelength, params)
+    
+    # Apply transmission to all flux components
+    new_data = data
+    
+    if data.star_flux is not None:
+        star_flux = data.star_flux * transmission
+        new_data = new_data.update(star_flux=star_flux)
+    
+    if data.planet_flux is not None:
+        planet_flux = data.planet_flux * transmission
+        new_data = new_data.update(planet_flux=planet_flux)
+    
+    if data.disk_flux_map is not None:
+        disk_flux_map = data.disk_flux_map * transmission
+        new_data = new_data.update(disk_flux_map=disk_flux_map)
+    
+    return new_data
+
+
+@path_component("detector", "hardware")
+def apply_detector(data: IntermediateData, context: PropagationContext, params: DetectorParams) -> IntermediateData:
+    """
+    Apply detector effects including coordinate transformation and noise.
+    
+    This function follows the original detector implementation:
+    1. Resample from coronagraph (lambda/D) to detector pixel scale
+    2. Convert photon rates to incident photons (Poisson process)
+    3. Apply quantum efficiency (binomial process)
+    4. Add detector noise (dark current, read noise, CIC)
+    5. Apply saturation limits
+    
+    Args:
+        data: 
+            Input data with count rates in coronagraph coordinates
+        context: 
+            Propagation context including wavelength, diameter, and exposure time
+        params: 
+            Detector parameters including pixel scale and noise characteristics
+            
+    Returns:
+        Data with detector effects applied in detector coordinates
+    """
+    new_data = data
+    exposure_time = context.time_step.to(u.s).value
+    
+    # Set random seed for reproducibility
+    if hasattr(context, 'rng_key') and context.rng_key is not None:
+        np.random.seed(context.rng_key % (2**32))
+    
+    # Process each flux component
+    if data.star_flux is not None:
+        star_electrons = _apply_detector_to_flux(
+            data.star_flux, params, context, exposure_time
+        )
+        new_data = new_data.update(star_flux=star_electrons)
+    
+    if data.planet_flux is not None:
+        planet_electrons = _apply_detector_to_flux(
+            data.planet_flux, params, context, exposure_time
+        )
+        new_data = new_data.update(planet_flux=planet_electrons)
+    
+    if data.disk_flux_map is not None:
+        disk_electrons = _apply_detector_to_flux(
+            data.disk_flux_map, params, context, exposure_time
+        )
+        new_data = new_data.update(disk_flux_map=disk_electrons)
+    
+    return new_data
+
+
+@path_component("speckles", "noise")
+def apply_speckles(data: IntermediateData, context: PropagationContext, params: Any) -> IntermediateData:
+    """
+    Apply speckle noise to the data.
+    
+    Args:
+        data: 
+            Input data
+        context: 
+            Propagation context
+        params: 
+            Speckle parameters (placeholder)
+            
+    Returns:
+        Data with speckle effects applied
+    """
+    # This is a placeholder for speckle modeling
+    # In practice, this would add coherent speckle noise
+    
+    # For now, just add some correlated noise
+    if hasattr(context, 'rng_key') and context.rng_key is not None:
+        np.random.seed(context.rng_key % (2**32))
+    
+    # Add simple speckle-like noise to star flux
+    if data.star_flux is not None:
+        speckle_noise = np.random.normal(0, 0.01 * data.star_flux.values, 
+                                        size=data.star_flux.shape)
+        
+        noisy_star_flux = data.star_flux + speckle_noise
+        return data.update(star_flux=noisy_star_flux)
+    
+    return data
+
+
+# Helper functions (unchanged)
 def apply_star_coronagraph(star_flux, params: CoronagraphParams, context: PropagationContext):
     """
     Apply coronagraph to stellar flux using stellar intensity map.
@@ -297,56 +659,6 @@ def apply_disk_coronagraph(disk_flux_map, params: CoronagraphParams, context: Pr
         return disk_flux_map * params.throughput
 
 
-def apply_filter(data: IntermediateData, params: FilterParams, context: PropagationContext) -> IntermediateData:
-    """
-    Apply optical filter transmission to the light.
-    
-    Handles both simple rectangular filters and synphot bandpass models.
-    Follows the original implementation's wavelength handling.
-    
-    Args:
-        data: 
-            Input data with source fluxes
-        params: 
-            Filter parameters (may include synphot bandpass)
-        context: 
-            Propagation context including wavelength and bandwidth
-            
-    Returns:
-        Data with filter effects applied
-    """
-    # Calculate filter transmission at the current wavelength
-    wavelength = context.wavelength
-    
-    if params.bandpass_model is not None:
-        # Use synphot bandpass model if available
-        try:
-            transmission = params.bandpass_model(wavelength).value
-        except Exception:
-            # Fallback to simple model
-            transmission = _simple_filter_transmission(wavelength, params)
-    else:
-        # Use simple rectangular filter model
-        transmission = _simple_filter_transmission(wavelength, params)
-    
-    # Apply transmission to all flux components
-    new_data = data
-    
-    if data.star_flux is not None:
-        star_flux = data.star_flux * transmission
-        new_data = new_data.update(star_flux=star_flux)
-    
-    if data.planet_flux is not None:
-        planet_flux = data.planet_flux * transmission
-        new_data = new_data.update(planet_flux=planet_flux)
-    
-    if data.disk_flux_map is not None:
-        disk_flux_map = data.disk_flux_map * transmission
-        new_data = new_data.update(disk_flux_map=disk_flux_map)
-    
-    return new_data
-
-
 def _simple_filter_transmission(wavelength: u.Quantity, params: FilterParams) -> float:
     """Simple rectangular filter transmission model."""
     wavelength_val = wavelength.to(u.nm).value
@@ -358,57 +670,6 @@ def _simple_filter_transmission(wavelength: u.Quantity, params: FilterParams) ->
         return params.transmission
     else:
         return 0.0
-
-
-def apply_detector(data: IntermediateData, params: DetectorParams, context: PropagationContext) -> IntermediateData:
-    """
-    Apply detector effects including coordinate transformation and noise.
-    
-    This function follows the original detector implementation:
-    1. Resample from coronagraph (lambda/D) to detector pixel scale
-    2. Convert photon rates to incident photons (Poisson process)
-    3. Apply quantum efficiency (binomial process)
-    4. Add detector noise (dark current, read noise, CIC)
-    5. Apply saturation limits
-    
-    Args:
-        data: 
-            Input data with count rates in coronagraph coordinates
-        params: 
-            Detector parameters including pixel scale and noise characteristics
-        context: 
-            Propagation context including wavelength, diameter, and exposure time
-            
-    Returns:
-        Data with detector effects applied in detector coordinates
-    """
-    new_data = data
-    exposure_time = context.time_step.to(u.s).value
-    
-    # Set random seed for reproducibility
-    if hasattr(context, 'rng_key') and context.rng_key is not None:
-        np.random.seed(context.rng_key % (2**32))
-    
-    # Process each flux component
-    if data.star_flux is not None:
-        star_electrons = _apply_detector_to_flux(
-            data.star_flux, params, context, exposure_time
-        )
-        new_data = new_data.update(star_flux=star_electrons)
-    
-    if data.planet_flux is not None:
-        planet_electrons = _apply_detector_to_flux(
-            data.planet_flux, params, context, exposure_time
-        )
-        new_data = new_data.update(planet_flux=planet_electrons)
-    
-    if data.disk_flux_map is not None:
-        disk_electrons = _apply_detector_to_flux(
-            data.disk_flux_map, params, context, exposure_time
-        )
-        new_data = new_data.update(disk_flux_map=disk_electrons)
-    
-    return new_data
 
 
 def _apply_detector_to_flux(flux_data, params: DetectorParams, context: PropagationContext, exposure_time: float):
@@ -525,44 +786,17 @@ def resample_to_detector(coro_data, coro_pixel_scale: u.Quantity, det_params: De
 
 def _simple_resample(data, target_shape):
     """Simple resampling fallback using scipy zoom."""
-    from scipy.ndimage import zoom
+    try:
+        from scipy.ndimage import zoom
+    except ImportError:
+        # Fallback if scipy is not available
+        return data
     
     if len(data.shape) != 2:
         return data  # Can't handle non-2D data simply
     
     zoom_factors = (target_shape[0] / data.shape[0], target_shape[1] / data.shape[1])
     return zoom(data, zoom_factors, order=1)
-
-
-def apply_speckles(data: IntermediateData, params: Any, context: PropagationContext) -> IntermediateData:
-    """
-    Apply speckle noise to the data.
-    
-    Args:
-        data: 
-            Input data
-        params: 
-            Speckle parameters (placeholder)
-        context: 
-            Propagation context
-            
-    Returns:
-        Data with speckle effects applied
-    """
-    # This is a placeholder for speckle modeling
-    # In practice, this would add coherent speckle noise
-    
-    # For now, just add some correlated noise
-    if hasattr(context, 'rng_key') and context.rng_key is not None:
-        np.random.seed(context.rng_key % (2**32))
-    
-    # Add simple speckle-like noise to star flux
-    speckle_noise = np.random.normal(0, 0.01 * data.star_flux.values, 
-                                    size=data.star_flux.shape)
-    
-    noisy_star_flux = data.star_flux + speckle_noise
-    
-    return data.update(star_flux=noisy_star_flux)
 
 
 def load_scene(target_path: str, context: PropagationContext) -> IntermediateData:
@@ -605,3 +839,29 @@ def load_scene(target_path: str, context: PropagationContext) -> IntermediateDat
     })
     
     return IntermediateData(dataset)
+
+
+# Convenience functions for backward compatibility
+def primary_step(params: PrimaryParams) -> PathFunction:
+    """Backward compatibility function for primary step."""
+    return Path.primary(params)
+
+
+def coronagraph_step(params: CoronagraphParams) -> PathFunction:
+    """Backward compatibility function for coronagraph step."""
+    return Path.coronagraph(params)
+
+
+def filter_step(params: FilterParams) -> PathFunction:
+    """Backward compatibility function for filter step."""
+    return Path.filter(params)
+
+
+def detector_step(params: DetectorParams) -> PathFunction:
+    """Backward compatibility function for detector step."""
+    return Path.detector(params)
+
+
+def speckles_step(params: Any) -> PathFunction:
+    """Backward compatibility function for speckles step."""
+    return Path.speckles(params)
