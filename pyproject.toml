@@ -22,12 +22,13 @@ dependencies = [
   "lod_unit",
   "matplotlib",
   "numpy",
-  "numba",
   "pandas",
   "photutils",
   "synphot",
   "tqdm",
   "xarray",
+  "yippy",
+  "jax",
 ]
 [project.optional-dependencies]
 dev = ["ruff", "pre-commit"]
