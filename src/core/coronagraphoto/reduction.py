@@ -169,7 +169,10 @@ class Derotate(ReductionStep):
             reference_angle: 
                 Reference angle for derotation (defaults to 0 degrees)
         """
-        self.reference_angle = reference_angle or 0 * u.deg
+        if reference_angle is None:
+            self.reference_angle = 0 * u.deg
+        else:
+            self.reference_angle = reference_angle
     
     @property
     def name(self) -> str:

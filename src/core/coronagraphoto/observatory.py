@@ -17,7 +17,7 @@ from .observation import Observation, ObservationSequence
 
 
 # Type definitions for light path components
-LightPathFunction = Callable[[IntermediateData, Any, PropagationContext], IntermediateData]
+LightPathFunction = Callable[..., IntermediateData]  # More flexible function signature
 LightPath = List[LightPathFunction]
 
 
@@ -89,7 +89,7 @@ class Observatory:
                 'start_time': observation.start_time.iso,
                 'exposure_time': observation.exposure_time.to(u.s).value,
                 'path_name': observation.path_name,
-                'roll_angle': observation.roll_angle.to(u.deg).value if observation.roll_angle else None,
+                'roll_angle': observation.roll_angle.to(u.deg).value if observation.roll_angle is not None else None,
             })
             
             data_products.append(obs_data)
@@ -164,8 +164,7 @@ class Observatory:
         for step_func in light_path:
             # Each function in the light path should be a partial function
             # with parameters already bound, so we just need to pass data and context
-            # For now, we'll pass None as params since partial functions handle parameters
-            current_data = step_func(current_data, None, context)
+            current_data = step_func(current_data, context)
         
         return current_data
     

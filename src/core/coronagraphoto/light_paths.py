@@ -92,7 +92,9 @@ class DetectorParams:
     
     def __post_init__(self):
         """Validate parameters."""
-        if self.pixel_scale.to(u.arcsec).value <= 0:
+        # Extract the value from pixel scale (it should be arcsec/pix or similar)
+        pixel_scale_value = self.pixel_scale.value if hasattr(self.pixel_scale, 'value') else self.pixel_scale
+        if pixel_scale_value <= 0:
             raise ValueError("Pixel scale must be positive")
         if self.read_noise.to(u.electron).value < 0:
             raise ValueError("Read noise must be non-negative")

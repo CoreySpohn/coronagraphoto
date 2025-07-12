@@ -176,7 +176,7 @@ class TestObservationSequence:
         total_duration = seq.total_duration
         # Duration should be from start of first to end of last
         expected_duration = (400 + 300) * u.s
-        assert total_duration == expected_duration
+        assert abs((total_duration - expected_duration).to(u.s).value) < 1e-10
     
     def test_sequence_empty_validation(self):
         """Test that empty sequences are rejected."""
@@ -291,7 +291,7 @@ class TestObservationSequenceADI:
         )
         
         time_diff = seq[1].start_time - seq[0].start_time
-        assert time_diff.to(u.s) == self.exposure_time
+        assert abs((time_diff.to(u.s) - self.exposure_time).to(u.s).value) < 1e-10
     
     def test_adi_validation_positive_exposures(self):
         """Test that number of exposures must be positive."""

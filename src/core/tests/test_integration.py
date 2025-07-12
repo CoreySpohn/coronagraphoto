@@ -67,11 +67,24 @@ def test_end_to_end_adi_simulation():
     )
     
     # Step 2: Create light paths using partial functions
+    # Need to create wrapper functions since partial with keyword args is tricky
+    def primary_step(data, context):
+        return apply_primary(data, primary_params, context)
+    
+    def coronagraph_step(data, context):
+        return apply_coronagraph(data, coronagraph_params, context)
+        
+    def filter_step(data, context):
+        return apply_filter(data, filter_params, context)
+        
+    def detector_step(data, context):
+        return apply_detector(data, detector_params, context)
+    
     science_path = [
-        partial(apply_primary, params=primary_params),
-        partial(apply_coronagraph, params=coronagraph_params),
-        partial(apply_filter, params=filter_params),
-        partial(apply_detector, params=detector_params),
+        primary_step,
+        coronagraph_step,
+        filter_step,
+        detector_step,
     ]
     
     light_paths = {
@@ -161,18 +174,31 @@ def test_rdi_simulation():
     )
     
     # Different light paths for science and reference
+    # Use wrapper functions like in the ADI test
+    def primary_step_rdi(data, context):
+        return apply_primary(data, primary_params, context)
+    
+    def coronagraph_step_rdi(data, context):
+        return apply_coronagraph(data, coronagraph_params, context)
+        
+    def filter_step_rdi(data, context):
+        return apply_filter(data, filter_params, context)
+        
+    def detector_step_rdi(data, context):
+        return apply_detector(data, detector_params, context)
+    
     science_path = [
-        partial(apply_primary, params=primary_params),
-        partial(apply_coronagraph, params=coronagraph_params),
-        partial(apply_filter, params=filter_params),
-        partial(apply_detector, params=detector_params),
+        primary_step_rdi,
+        coronagraph_step_rdi,
+        filter_step_rdi,
+        detector_step_rdi,
     ]
     
     # Reference path without coronagraph
     reference_path = [
-        partial(apply_primary, params=primary_params),
-        partial(apply_filter, params=filter_params),
-        partial(apply_detector, params=detector_params),
+        primary_step_rdi,
+        filter_step_rdi,
+        detector_step_rdi,
     ]
     
     light_paths = {

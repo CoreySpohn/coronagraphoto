@@ -104,7 +104,20 @@ class IntermediateData:
         """
         new_dataset = self._dataset.copy()
         for name, data in kwargs.items():
-            new_dataset[name] = data
+            # Handle both xarray DataArrays and raw numpy arrays
+            if hasattr(data, 'values'):
+                # It's already an xarray DataArray, use assign
+                new_dataset = new_dataset.assign({name: data})
+            else:
+                # It's raw data, create a DataArray
+                if name in new_dataset.data_vars:
+                    # Use the same structure as the existing variable
+                    existing_da = new_dataset[name]
+                    new_da = existing_da.copy(data=data)
+                    new_dataset = new_dataset.assign({name: new_da})
+                else:
+                    # Create a new DataArray (simple 1D case for now)
+                    new_dataset = new_dataset.assign({name: xr.DataArray(data)})
         return IntermediateData(new_dataset)
     
     @classmethod
@@ -121,12 +134,25 @@ class IntermediateData:
         Returns:
             IntermediateData instance with stellar spectrum
         """
+        # Handle both astropy Quantities and plain numpy arrays
+        if hasattr(flux, 'value') and hasattr(flux, 'unit'):
+            flux_values = flux.value
+            flux_units = str(flux.unit)
+        else:
+            flux_values = flux
+            flux_units = 'dimensionless'
+            
+        if hasattr(wavelength, 'value') and hasattr(wavelength, 'unit'):
+            wavelength_values = wavelength.value
+        else:
+            wavelength_values = wavelength
+        
         dataset = xr.Dataset({
             'star_flux': xr.DataArray(
-                flux.value,
+                flux_values,
                 dims=['wavelength'],
-                coords={'wavelength': wavelength.value},
-                attrs={'units': str(flux.unit)}
+                coords={'wavelength': wavelength_values},
+                attrs={'units': flux_units}
             )
         })
         return cls(dataset)

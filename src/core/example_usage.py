@@ -69,18 +69,31 @@ def main():
     print("-" * 30)
     
     # Create light paths as sequences of pure functions
+    # Use wrapper functions for proper parameter binding
+    def primary_step(data, context):
+        return apply_primary(data, primary_params, context)
+    
+    def coronagraph_step(data, context):
+        return apply_coronagraph(data, coronagraph_params, context)
+        
+    def filter_step(data, context):
+        return apply_filter(data, filter_params, context)
+        
+    def detector_step(data, context):
+        return apply_detector(data, detector_params, context)
+    
     science_path = [
-        partial(apply_primary, params=primary_params),
-        partial(apply_coronagraph, params=coronagraph_params),
-        partial(apply_filter, params=filter_params),
-        partial(apply_detector, params=detector_params),
+        primary_step,
+        coronagraph_step,
+        filter_step,
+        detector_step,
     ]
     
     # Alternative path without coronagraph for reference observations
     reference_path = [
-        partial(apply_primary, params=primary_params),
-        partial(apply_filter, params=filter_params),
-        partial(apply_detector, params=detector_params),
+        primary_step,
+        filter_step,
+        detector_step,
     ]
     
     light_paths = {
