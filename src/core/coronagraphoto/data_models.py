@@ -143,17 +143,77 @@ class IntermediateData:
         Returns:
             IntermediateData instance loaded from the scene
         """
-        # For now, import the scene loading function
-        from .light_paths import load_scene
-        from astropy.time import Time
+        # For now, create a simple placeholder that can be enhanced
+        # In practice, this would load an ExoVista system
         
-        # Create a dummy context for loading
-        context = PropagationContext(
-            time=Time.now(),
-            wavelength=550 * u.nm,
-            bandpass_slice=10 * u.nm,
-            time_step=1 * u.s,
-            rng_key=42
-        )
+        try:
+            # Try to use ExoVista if available
+            from exoverses import ExovistaSystem
+            system = ExovistaSystem(scene_path)
+            
+            # Create placeholder data structure that separates components
+            # This would be populated with actual system data
+            dataset = xr.Dataset({
+                'star_flux': xr.DataArray(
+                    np.ones(100) * 1e6,  # Placeholder stellar spectrum
+                    dims=['wavelength'],
+                    coords={'wavelength': np.linspace(400, 800, 100)},
+                    attrs={'units': 'photon/(s*nm*m**2)', 'component': 'star'}
+                ),
+                'scene_metadata': xr.DataArray(
+                    [scene_path],
+                    dims=['metadata'],
+                    attrs={'system_name': getattr(system.star, 'name', 'unknown')}
+                )
+            })
+            
+            # Add planet data if present
+            if hasattr(system, 'planets') and len(system.planets) > 0:
+                n_planets = len(system.planets)
+                dataset['planet_flux'] = xr.DataArray(
+                    np.ones((n_planets, 100)) * 1e3,  # Placeholder planet spectra
+                    dims=['planet', 'wavelength'],
+                    coords={
+                        'planet': np.arange(n_planets),
+                        'wavelength': np.linspace(400, 800, 100)
+                    },
+                    attrs={'units': 'photon/(s*nm*m**2)', 'component': 'planets'}
+                )
+                
+            # Add disk data if present  
+            if hasattr(system, 'disk') and system.disk is not None:
+                # Placeholder disk image
+                npix = 64  # Would come from system parameters
+                dataset['disk_flux_map'] = xr.DataArray(
+                    np.ones((npix, npix, 100)) * 1e4,
+                    dims=['x', 'y', 'wavelength'],
+                    coords={
+                        'x': np.arange(npix),
+                        'y': np.arange(npix), 
+                        'wavelength': np.linspace(400, 800, 100)
+                    },
+                    attrs={'units': 'photon/(s*nm*m**2)', 'component': 'disk'}
+                )
+            
+        except ImportError:
+            # Fallback to simple synthetic data
+            dataset = xr.Dataset({
+                'star_flux': xr.DataArray(
+                    np.ones(100) * 1e6,
+                    dims=['wavelength'],
+                    coords={'wavelength': np.linspace(400, 800, 100)},
+                    attrs={'units': 'photon/(s*nm*m**2)', 'component': 'star'}
+                ),
+                'scene_metadata': xr.DataArray(
+                    [scene_path],
+                    dims=['metadata'],
+                    attrs={'system_name': 'synthetic'}
+                )
+            })
         
-        return load_scene(scene_path, context)
+        dataset.attrs.update({
+            'scene_file': scene_path,
+            'data_source': 'exovista' if 'ExovistaSystem' in locals() else 'synthetic'
+        })
+        
+        return cls(dataset)

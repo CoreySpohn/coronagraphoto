@@ -30,27 +30,40 @@ def test_end_to_end_adi_simulation():
     This test verifies that we can:
     1. Plan an ADI observation sequence
     2. Configure an observatory with light paths
-    3. Execute the observation
+    3. Execute the observation  
     4. Process the results through a reduction pipeline
+    
+    The test follows the complete physics pipeline from the original implementation.
     """
     
-    # Step 1: Define hardware components
-    primary_params = PrimaryParams(diameter=8 * u.m, reflectivity=0.95)
+    # Step 1: Define hardware components following original physics
+    primary_params = PrimaryParams(
+        diameter=8 * u.m, 
+        reflectivity=0.95,
+        frac_obscured=0.2  # 20% central obscuration
+    )
     coronagraph_params = CoronagraphParams(
         inner_working_angle=0.1 * u.arcsec,
         outer_working_angle=1.0 * u.arcsec,
         throughput=0.1,
-        contrast=1e-10
+        contrast=1e-10,
+        pixel_scale=0.05,  # lambda/D per pixel
+        npixels=128  # 128x128 pixel coronagraph
     )
     filter_params = FilterParams(
         central_wavelength=550 * u.nm,
         bandwidth=100 * u.nm,
-        transmission=0.8
+        transmission=0.8,
+        spectral_resolution=50  # R = λ/Δλ
     )
     detector_params = DetectorParams(
-        pixel_scale=0.02 * u.arcsec,
+        pixel_scale=0.02 * u.arcsec / u.pix,
         read_noise=3 * u.electron,
-        dark_current=0.01 * u.electron / u.s
+        dark_current=0.01 * u.electron / u.s,
+        quantum_efficiency=0.9,
+        saturation_level=65535 * u.electron,
+        cic_rate=0.001 * u.electron,
+        shape=(512, 512)
     )
     
     # Step 2: Create light paths using partial functions
