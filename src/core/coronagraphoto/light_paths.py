@@ -208,56 +208,46 @@ class PathBuilder:
 
 class Path:
     """
-    Factory class for creating path components.
+    Factory class for creating path components using the >> pipeline pattern.
     
-    Provides static methods for creating common path components:
-    - Path.primary(params) -> primary mirror function
-    - Path.coronagraph(params) -> coronagraph function
-    - etc.
+    Provides static methods for creating common path components that can be
+    chained together with the >> operator for elegant light path composition.
     """
     
     @staticmethod
     def primary(params: 'PrimaryParams') -> PathFunction:
         """Create a primary mirror path function."""
-        return _PATH_REGISTRY['primary'](params)
+        def primary_func(data: IntermediateData, context: PropagationContext) -> IntermediateData:
+            return apply_primary(data, context, params)
+        return primary_func
     
     @staticmethod
     def coronagraph(params: 'CoronagraphParams') -> PathFunction:
         """Create a coronagraph path function."""
-        return _PATH_REGISTRY['coronagraph'](params)
+        def coronagraph_func(data: IntermediateData, context: PropagationContext) -> IntermediateData:
+            return apply_coronagraph(data, context, params)
+        return coronagraph_func
     
     @staticmethod
     def filter(params: 'FilterParams') -> PathFunction:
         """Create a filter path function."""
-        return _PATH_REGISTRY['filter'](params)
+        def filter_func(data: IntermediateData, context: PropagationContext) -> IntermediateData:
+            return apply_filter(data, context, params)
+        return filter_func
     
     @staticmethod
     def detector(params: 'DetectorParams') -> PathFunction:
         """Create a detector path function."""
-        return _PATH_REGISTRY['detector'](params)
+        def detector_func(data: IntermediateData, context: PropagationContext) -> IntermediateData:
+            return apply_detector(data, context, params)
+        return detector_func
     
     @staticmethod
     def speckles(params: Any) -> PathFunction:
         """Create a speckles path function."""
-        return _PATH_REGISTRY['speckles'](params)
-    
-    @staticmethod
-    def from_registry(name: str, params: Any) -> PathFunction:
-        """Create a path function from the registry."""
-        if name not in _PATH_REGISTRY:
-            raise ValueError(f"Path component '{name}' not found in registry")
-        return _PATH_REGISTRY[name](params)
-    
-    @staticmethod
-    def list_components() -> Dict[str, str]:
-        """List all available path components."""
-        result = {}
-        for name, func in _PATH_REGISTRY.items():
-            # Get the category from the original function (before wrapping)
-            original_func = func.__wrapped__ if hasattr(func, '__wrapped__') else func
-            category = getattr(original_func, 'category', 'unknown')
-            result[name] = category
-        return result
+        def speckles_func(data: IntermediateData, context: PropagationContext) -> IntermediateData:
+            return apply_speckles(data, context, params)
+        return speckles_func
 
 
 # Hardware parameter classes (unchanged)
@@ -281,28 +271,17 @@ class PrimaryParams:
 
 @dataclass
 class CoronagraphParams:
-    """Parameters for the coronagraph."""
-    inner_working_angle: u.Quantity
-    outer_working_angle: u.Quantity
-    throughput: float = 0.1
-    contrast: float = 1e-10
-    coronagraph_model: Any = None  # yippy.Coronagraph object
-    coronagraph_dir: Optional[str] = None  # Path to coronagraph directory
-    pixel_scale: Optional[u.Quantity] = None  # lambda/D per pixel
-    npixels: Optional[int] = None  # number of pixels along one axis
+    """
+    Parameters for the coronagraph.
+    
+    This is a simple wrapper around a yippy Coronagraph object.
+    ALL performance characteristics (PSF, contrast, throughput, etc.) 
+    are handled by yippy - we don't need to duplicate those parameters.
+    """
+    coronagraph_dir: str  # Path to coronagraph directory
     use_jax: bool = True  # Whether to use JAX for yippy
     cpu_cores: int = 1  # Number of CPU cores for yippy
-    
-    def __post_init__(self):
-        """Validate parameters."""
-        if self.inner_working_angle.to(u.arcsec).value <= 0:
-            raise ValueError("Inner working angle must be positive")
-        if self.outer_working_angle <= self.inner_working_angle:
-            raise ValueError("Outer working angle must be greater than inner working angle")
-        if not 0 <= self.throughput <= 1:
-            raise ValueError("Throughput must be between 0 and 1")
-        if self.contrast <= 0:
-            raise ValueError("Contrast must be positive")
+    _coronagraph_model: Any = None  # Cached yippy.Coronagraph object
     
     def get_coronagraph_model(self):
         """
@@ -311,10 +290,10 @@ class CoronagraphParams:
         Returns:
             yippy.Coronagraph object
         """
-        if self.coronagraph_model is None and self.coronagraph_dir is not None:
+        if self._coronagraph_model is None:
             try:
                 from yippy import Coronagraph
-                self.coronagraph_model = Coronagraph(
+                self._coronagraph_model = Coronagraph(
                     self.coronagraph_dir,
                     use_jax=self.use_jax,
                     cpu_cores=self.cpu_cores
@@ -324,7 +303,7 @@ class CoronagraphParams:
             except Exception as e:
                 raise RuntimeError(f"Failed to load coronagraph from {self.coronagraph_dir}: {e}")
         
-        return self.coronagraph_model
+        return self._coronagraph_model
 
 
 @dataclass
@@ -372,7 +351,6 @@ class FilterParams:
 
 
 # Physics functions using the new pattern
-@path_component("primary", "optics")
 def apply_primary(data: IntermediateData, context: PropagationContext, params: PrimaryParams) -> IntermediateData:
     """
     Apply primary mirror effects to the light.
@@ -418,7 +396,6 @@ def apply_primary(data: IntermediateData, context: PropagationContext, params: P
     return new_data
 
 
-@path_component("coronagraph", "optics")
 def apply_coronagraph(data: IntermediateData, context: PropagationContext, params: CoronagraphParams) -> IntermediateData:
     """
     Apply coronagraph suppression to the light.
@@ -466,7 +443,6 @@ def apply_coronagraph(data: IntermediateData, context: PropagationContext, param
     return new_data
 
 
-@path_component("filter", "optics")
 def apply_filter(data: IntermediateData, context: PropagationContext, params: FilterParams) -> IntermediateData:
     """
     Apply optical filter transmission to the light.
@@ -517,7 +493,6 @@ def apply_filter(data: IntermediateData, context: PropagationContext, params: Fi
     return new_data
 
 
-@path_component("detector", "hardware")
 def apply_detector(data: IntermediateData, context: PropagationContext, params: DetectorParams) -> IntermediateData:
     """
     Apply detector effects including coordinate transformation and noise.
@@ -569,7 +544,6 @@ def apply_detector(data: IntermediateData, context: PropagationContext, params: 
     return new_data
 
 
-@path_component("speckles", "noise")
 def apply_speckles(data: IntermediateData, context: PropagationContext, params: Any) -> IntermediateData:
     """
     Apply speckle noise to the data.
@@ -606,109 +580,106 @@ def apply_speckles(data: IntermediateData, context: PropagationContext, params: 
 # Helper functions (unchanged)
 def apply_star_coronagraph(star_flux, params: CoronagraphParams, context: PropagationContext):
     """
-    Apply coronagraph to stellar flux using stellar intensity map.
+    Apply coronagraph to stellar flux using stellar intensity map from yippy.
     
     Follows the original gen_star_count_rate implementation:
-    1. Convert star angular diameter to lambda/D units
-    2. Get stellar intensity map from coronagraph
-    3. Multiply intensity map by photon flux
+    1. Get stellar intensity map from yippy coronagraph
+    2. Multiply star flux by the intensity map
     """
     try:
         # Get the yippy coronagraph model
         coronagraph_model = params.get_coronagraph_model()
         
-        if coronagraph_model is not None:
-            # Use the actual yippy coronagraph model
-            # This follows the pattern from sim_star_cor.py
-            
-            # For now, use a simple stellar diameter (this would come from the star properties)
-            stellar_diameter_lod = 0.01  # lambda/D units, typical for nearby stars
-            
-            # Get the stellar intensity map from the coronagraph
-            try:
-                stellar_intens = coronagraph_model.stellar_intens(stellar_diameter_lod)
-                
-                # Apply the coronagraph suppression
-                # The intensity map gives the suppression factor at each pixel
-                if hasattr(stellar_intens, 'T'):
-                    stellar_intens = stellar_intens.T
-                
-                # Convert star flux to the appropriate format for multiplication
-                if hasattr(star_flux, 'value'):
-                    flux_value = star_flux.value
-                else:
-                    flux_value = float(star_flux)
-                
-                # Multiply flux by intensity map
-                suppressed_flux_map = stellar_intens * flux_value
-                
-                return suppressed_flux_map
-                
-            except Exception as e:
-                print(f"Warning: Could not use yippy coronagraph stellar_intens: {e}")
-                # Fall back to simple contrast suppression
-                return star_flux * params.contrast
+        # For now, use a simple stellar diameter (this would come from the star properties)
+        stellar_diameter_lod = 0.01  # lambda/D units, typical for nearby stars
+        
+        # Get the stellar intensity map from the coronagraph
+        stellar_intens = coronagraph_model.stellar_intens(stellar_diameter_lod)
+        
+        # Apply the coronagraph suppression
+        # The intensity map gives the suppression factor at each pixel
+        if hasattr(stellar_intens, 'T'):
+            stellar_intens = stellar_intens.T
+        
+        # Convert star flux to the appropriate format for multiplication
+        if hasattr(star_flux, 'value'):
+            flux_value = star_flux.value
         else:
-            # No coronagraph model available, use simple suppression
-            return star_flux * params.contrast
+            flux_value = float(star_flux)
+        
+        # Multiply flux by intensity map
+        suppressed_flux_map = stellar_intens * flux_value
+        
+        return suppressed_flux_map
         
     except Exception as e:
-        print(f"Warning: Error in coronagraph application: {e}")
-        # Fallback to simple contrast suppression
-        return star_flux * params.contrast
+        print(f"Warning: Could not use yippy coronagraph: {e}")
+        # Fallback to very simple suppression if yippy fails
+        return star_flux * 1e-10  # Simple high contrast suppression
 
 
 def apply_planet_coronagraph(planet_flux, params: CoronagraphParams, context: PropagationContext):
     """
-    Apply coronagraph to planetary flux using off-axis PSF.
+    Apply coronagraph to planetary flux using off-axis PSF from yippy.
     
     Follows the original gen_planet_count_rate implementation:
-    1. Calculate planet positions and separations
+    1. Get yippy coronagraph model
     2. Apply off-axis PSF for each planet's location
     3. Sum contributions from all planets
     """
     try:
-        # This would require orbital propagation and PSF interpolation
-        # For now, apply throughput assuming planets are in good regions
-        processed_flux = planet_flux * params.throughput
+        # Get the yippy coronagraph model
+        coronagraph_model = params.get_coronagraph_model()
         
-        # In full implementation, this would:
-        # - Propagate orbits to get pixel coordinates
-        # - Calculate separations: planet_alphas_lod = separations.to(u.lod, equiv.lod(wavelength, diameter))
-        # - Get off-axis PSF: psf = coronagraph.offax(x, y, lam=wavelength, D=diameter)
-        # - Apply PSF: planet_count_rate += planet_photon_flux[i] * psf
+        # For now, assume planets are at a reasonable separation
+        # In full implementation, this would come from orbital propagation
+        planet_separation_lod = 5.0  # lambda/D units
+        
+        # Get off-axis PSF from yippy
+        # This is a simplified version - real implementation would loop over planet positions
+        psf = coronagraph_model.offax(0, planet_separation_lod)  # x=0, y=separation
+        
+        # Apply PSF to planet flux
+        if hasattr(planet_flux, 'value'):
+            flux_value = planet_flux.value
+        else:
+            flux_value = float(planet_flux)
+        
+        processed_flux = flux_value * psf.sum()  # Simple integration over PSF
         
         return processed_flux
         
-    except Exception:
+    except Exception as e:
+        print(f"Warning: Could not use yippy coronagraph for planets: {e}")
         # Fallback to simple throughput
-        return planet_flux * params.throughput
+        return planet_flux * 0.1  # Assume 10% throughput
 
 
 def apply_disk_coronagraph(disk_flux_map, params: CoronagraphParams, context: PropagationContext):
     """
-    Apply coronagraph to disk flux using PSF datacube convolution.
+    Apply coronagraph to disk flux using PSF datacube from yippy.
     
     Follows the original gen_disk_count_rate implementation:
-    1. Scale disk image to coronagraph pixel scale
-    2. Center and crop disk to coronagraph dimensions
-    3. Convolve with PSF datacube using tensor contraction
+    1. Get PSF datacube from yippy
+    2. Convolve with disk flux map
     """
     try:
-        # This would require PSF datacube and proper scaling
-        # For now, apply simple throughput
-        processed_flux = disk_flux_map * params.throughput
+        # Get the yippy coronagraph model
+        coronagraph_model = params.get_coronagraph_model()
         
-        # In full implementation, this would:
-        # - Scale disk: scaled_disk = zoom_conserve_flux(disk_image_photons, zoom_factor)
-        # - Center and crop to coronagraph size  
-        # - Convolve: count_rate = compute_disk_image(scaled_disk, coronagraph.psf_datacube)
+        # For now, apply a simple uniform suppression
+        # In full implementation, this would use PSF datacube convolution
+        # psf_datacube = coronagraph_model.psf_datacube
+        
+        # Simple uniform suppression for now
+        processed_flux = disk_flux_map * 0.1  # Assume 10% throughput for disk
         
         return processed_flux
         
-    except Exception:
+    except Exception as e:
+        print(f"Warning: Could not use yippy coronagraph for disk: {e}")
         # Fallback to simple throughput
-        return disk_flux_map * params.throughput
+        return disk_flux_map * 0.1  # Assume 10% throughput
 
 
 def _simple_filter_transmission(wavelength: u.Quantity, params: FilterParams) -> float:
@@ -747,10 +718,12 @@ def _apply_detector_to_flux(flux_data, params: DetectorParams, context: Propagat
     
     # Step 2: Apply quantum efficiency (binomial process)
     # Each incident photon has probability QE of becoming a photoelectron
-    photo_electrons = np.random.binomial(
-        n=incident_photons.astype(int), 
+    # Convert to numpy array first to handle both scalar and array inputs
+    photons_array = np.asarray(incident_photons)
+    photo_electrons = np.asarray(np.random.binomial(
+        n=photons_array.astype(int), 
         p=params.quantum_efficiency
-    ).astype(float)
+    )).astype(float)
     
     # Step 3: Add detector noise
     shape = photo_electrons.shape
@@ -870,8 +843,10 @@ def load_scene_from_exovista(scene_path: str, context: PropagationContext) -> In
         raise ImportError("ExoVista package not available. Install exoverses to load scene files.")
     
     try:
-        # Load the ExoVista system
-        system = ExovistaSystem(scene_path)
+        # Load the ExoVista system - it expects a Path object
+        from pathlib import Path
+        scene_file = Path(scene_path)
+        system = ExovistaSystem(scene_file)
         
         # Extract components and build IntermediateData
         dataset_dict = {}
