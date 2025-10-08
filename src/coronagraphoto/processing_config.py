@@ -31,6 +31,7 @@ class ProcessingConfig:
         # Default scenario values
         self.star_post_processing_factor = 1.0
         self.disk_post_processing_factor = 1.0
+        self.speckle_post_processing_factor = 1.0
 
         # Load the TOML file (if provided)
         if toml_file:
@@ -73,3 +74,6 @@ class ProcessingConfig:
 
             if disk_factor := post_processing.get("disk_post_processing_factor"):
                 self.disk_post_processing_factor = disk_factor
+
+            if speckle_factor := post_processing.get("speckle_post_processing_factor"):
+                self.speckle_post_processing_factor = speckle_factor

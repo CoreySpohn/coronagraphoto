@@ -42,7 +42,12 @@ class PostProcessing:
         det_plane = False
 
         # Check for coronagraph-plane data (count rates)
-        coro_vars = ["star_rate(coro)", "disk_rate(coro)", "planet_rate(coro)"]
+        coro_vars = [
+            "star_rate(coro)",
+            "disk_rate(coro)",
+            "planet_rate(coro)",
+            "speckle_rate(coro)",
+        ]
         if all(var in dataset for var in coro_vars):
             coro_plane = True
             star_processed_coro = (
@@ -51,14 +56,19 @@ class PostProcessing:
             disk_processed_coro = (
                 dataset["disk_rate(coro)"] / self.config.disk_post_processing_factor
             )
+            speckle_processed_coro = (
+                dataset["speckle_rate(coro)"]
+                / self.config.speckle_post_processing_factor
+            )
             processed_components_coro = [
                 star_processed_coro,
                 disk_processed_coro,
                 dataset["planet_rate(coro)"],
+                speckle_processed_coro,
             ]
 
         # Check for detector-plane data (electron counts)
-        det_vars = ["star(det)", "disk(det)", "planet(det)"]
+        det_vars = ["star(det)", "disk(det)", "planet(det)", "speckle(det)"]
         if all(var in dataset for var in det_vars):
             det_plane = True
             star_processed_det = (
@@ -67,10 +77,14 @@ class PostProcessing:
             disk_processed_det = (
                 dataset["disk(det)"] / self.config.disk_post_processing_factor
             )
+            speckle_processed_det = (
+                dataset["speckle(det)"] / self.config.speckle_post_processing_factor
+            )
             processed_components_det = [
                 star_processed_det,
                 disk_processed_det,
                 dataset["planet(det)"],
+                speckle_processed_det,
             ]
 
         # Add noise components if they exist
