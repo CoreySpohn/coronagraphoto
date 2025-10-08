@@ -95,7 +95,9 @@ class Observation:
             Combined count rate from all included sources.
     """
 
-    def __init__(self, coronagraph, system, observing_scenario, settings):
+    def __init__(
+        self, coronagraph, system, observing_scenario, settings, speckle_map=None
+    ):
         """Initialize an Observation simulation.
 
         Sets up the observation by storing input objects, configuring simulation
@@ -116,11 +118,15 @@ class Observation:
             settings (Settings):
                 Simulation settings controlling source inclusion, wavelength
                 dependence, output formats, and time dependence options.
+            speckle_map (SpeckleMap):
+                Speckle map object containing the speckle map data.
         """
         self.coronagraph = coronagraph
         self.coronagraph_name = coronagraph.name
         self.system = system
         self.system_name = system.star.name
+        self.speckle_map = speckle_map
+        self.has_speckle_map = speckle_map is not None
 
         self.load_settings(observing_scenario, settings)
 
@@ -252,6 +258,13 @@ class Observation:
             self.total_count_rate += self.disk_count_rate
         else:
             logger.info("Not including disk")
+        if self.has_speckle_map:
+            self.speckle_count_rate = self.generic_count_rate_logic(
+                self.gen_speckle_count_rate,
+                base_count_rate_arr,
+                time_invariant=True,
+            )
+            self.total_count_rate += self.speckle_count_rate
 
     def generic_count_rate_logic(
         self, count_rate_function, object_count_rate, *args, time_invariant=False
@@ -319,7 +332,12 @@ class Observation:
             frame_times = self.frame_start_times
 
         for frame_ind, frame_time in enumerate(
-            tqdm(frame_times, desc="Generating count per frame", delay=0.5)
+            tqdm(
+                frame_times,
+                desc="Generating count per frame",
+                delay=0.5,
+                disable=len(frame_times) <= 1,
+            )
         ):
             for lam_ind, (lam, bw) in enumerate(
                 tqdm(
@@ -328,6 +346,7 @@ class Observation:
                     total=len(bws),
                     delay=0.5,
                     position=1,
+                    disable=len(bws) <= 1,
                 )
             ):
                 # Calculate the count rate (npix, npix)
@@ -570,8 +589,9 @@ class Observation:
                 mode="edge",
             )
             # interpolate in log-space to avoid negative values
-            scaled_disk = np.exp(shift(np.log(scaled_disk), (0.5, 0.5), order=5))
-            scaled_disk = scaled_disk[1:-1, 1:-1]
+            safe_scaled_disk = np.maximum(scaled_disk, 1e-12)
+            _scaled_disk = np.exp(shift(np.log(safe_scaled_disk), (0.5, 0.5), order=5))
+            scaled_disk = _scaled_disk[1:-1, 1:-1]
 
         # Crop disk to coronagraph model size.
         if scaled_disk.shape[0] == self.coronagraph.npixels:
@@ -682,6 +702,49 @@ class Observation:
         count_rate = compute_disk_image(scaled_disk, self.coronagraph.psf_datacube)
         return count_rate << self.photon_per_sec_unit
 
+    def gen_speckle_count_rate(self, wavelength, time, bandwidth):
+        """Generate the speckle count rate in photons per second.
+
+        This method computes the speckle count rate by:
+        1. Retrieving the speckle map from the coronagraph model
+        2. Converting flux density to photon count rate units
+        3. Multiplying the speckle map by the photon flux to get spatial count rates
+
+        The resulting count rate represents the star's contribution before any
+        coronagraph transmission effects are applied.
+
+        Args:
+            wavelength (astropy.units.Quantity):
+                Observation wavelength.
+            time (astropy.time.Time):
+                Observation time (for potential stellar variability).
+            bandwidth (astropy.units.Quantity):
+                Spectral bandwidth for flux integration.
+
+        Returns:
+            numpy.ndarray:
+                Star count rate image in units of photons per second, with shape
+                (npixels, npixels) matching the coronagraph model dimensions.
+
+        Note:
+            This count rate is calculated WITHOUT any coronagraph transmission
+            effects. Transmission is applied later in the processing pipeline.
+        """
+        # Compute star count rate in lambda/D
+        # Calculate the star flux density
+        star_flux_density = self.system.star.spec_flux_density(wavelength, time).to(
+            self.spec_flux_density_unit,
+            equivalencies=u.spectral_density(wavelength),
+        )
+        # Get the speckle map
+        speckle_map = self.speckle_map.get_speckle_map()
+
+        # Multiply by the count rate term (A*dLambda*T)
+        flux_term = (star_flux_density * self.illuminated_area * bandwidth).decompose()
+        # Compute star count rate in each pixel
+        count_rate = np.multiply(speckle_map, flux_term).T
+        return count_rate
+
     def count_photons(self):
         """Simulate photon collection and create the final observation dataset.
 
@@ -735,6 +798,7 @@ class Observation:
             "star": self.star_count_rate if self.settings.include_star else None,
             "planet": self.planet_count_rate if self.settings.include_planets else None,
             "disk": self.disk_count_rate if self.settings.include_disk else None,
+            "speckle": self.speckle_count_rate if self.has_speckle_map else None,
         }
 
         # Add coronagraph-plane rates to the dataset
@@ -759,6 +823,14 @@ class Observation:
                 obs_ds = self._add_coro_rate_to_dataset(
                     scene_rates_coro["disk"],
                     "disk_rate",
+                    obs_ds,
+                    coro_coords,
+                    coro_dims,
+                )
+            if self.has_speckle_map:
+                obs_ds = self._add_coro_rate_to_dataset(
+                    scene_rates_coro["speckle"],
+                    "speckle_rate",
                     obs_ds,
                     coro_coords,
                     coro_dims,

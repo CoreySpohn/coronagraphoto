@@ -9,6 +9,7 @@ from .observing_scenario import ObservingScenario
 from .post_processing import PostProcessing
 from .processing_config import ProcessingConfig
 from .settings import Settings
+from .speckle_map import SpeckleMap
 
 __all__ = [
     "logger",
@@ -20,4 +21,5 @@ __all__ = [
     "ProcessingConfig",
     "CompositeObservation",
     "Detector",
+    "SpeckleMap",
 ]
