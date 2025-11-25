@@ -7,7 +7,7 @@ The simulation pipeline is built on three hierarchical levels: **Observation**, 
 ## 1. The Hierarchy
 
 ### Observation (`sim_observation`)
-An **Observation** represents a sequence of data collection events over time. It is essentially a collection of *Exposures*. 
+An **Observation** represents a sequence of data collection events over time. It is essentially a collection of *Exposures*.
 *   **Goal**: Generate a time-series of images (e.g., for orbit characterization).
 *   **Implementation**: Typically implemented by mapping (`jax.vmap` or Python loop) the `Exposure` simulation over a vector of times.
 
@@ -48,16 +48,16 @@ def sim_exposure(exposure, optical_path, scene, key):
     # Vectorize physics over the wavelength axis (axis 0)
     # Exposure.in_axes helps specify which fields vary
     calc_spectral_electrons = jax.vmap(
-        sim_band, 
+        sim_band,
         in_axes=(Exposure.in_axes(central_wavelength_nm=0, bin_width_nm=0), ...)
     )
-    
+
     # Get image for each wavelength in parallel
     spectral_images = calc_spectral_electrons(exposure, ...)
-    
+
     # Sum to get broadband image
     total_image = jnp.sum(spectral_images, axis=0)
-    
+
     # Add noise
     return total_image + detector_noise
 ```

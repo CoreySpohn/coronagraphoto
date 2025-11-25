@@ -175,8 +175,9 @@ def _map_coordinates(
 
     if len(coordinates) != input_arr.ndim:
         raise ValueError(
-            "coordinates must be a sequence of length input.ndim, but "
-            "{} != {}".format(len(coordinates), input_arr.ndim)
+            "coordinates must be a sequence of length input.ndim, but {} != {}".format(
+                len(coordinates), input_arr.ndim
+            )
         )
 
     index_fixer = _INDEX_FIXERS.get(mode)
