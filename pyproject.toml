@@ -18,16 +18,12 @@ classifiers = [
 ]
 dependencies = [
   "astropy",
-  "exoverses",
+  "equinox",
+  "interpax",
+  "jax",
   "lod_unit",
-  "matplotlib",
   "numpy",
-  "numba",
-  "pandas",
-  "photutils",
-  "synphot",
-  "tqdm",
-  "xarray",
+  "orbix",
 ]
 [project.optional-dependencies]
 dev = ["ruff", "pre-commit"]
