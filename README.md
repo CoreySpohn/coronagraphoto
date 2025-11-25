@@ -64,20 +64,20 @@ def sim_band(exposure, optical_path, scene, key):
     """Simulate a single wavelength band."""
     # Split keys for different sources
     k1, k2, k3, k4 = jax.random.split(key, 4)
-    
+
     # Unpack scalar params for this band
     args = (
         exposure.start_time_jd, exposure.exposure_time_s,
-        exposure.central_wavelength_nm, exposure.bin_width_nm, 
+        exposure.central_wavelength_nm, exposure.bin_width_nm,
     )
 
-    # Use the sim_* methods to calculate incident electrons from each 
+    # Use the sim_* methods to calculate incident electrons from each
     # astrophysical source
     star_electrons = sim_star(*args, scene.stars, optical_path, k1)
     planet_electrons = sim_planets(*args, exposure.position_angle_deg, scene.planets, optical_path, k2)
     disk_electrons = sim_disk(*args, exposure.position_angle_deg, scene.disk, optical_path, k3)
     zodi_electrons = sim_zodi(*args, scene.zodi, optical_path, k4)
-    
+
     return star_electrons + planet_electrons + disk_electrons + zodi_electrons
 
 def sim_exposure(exposure, optical_path, scene, prng_key):
@@ -86,16 +86,16 @@ def sim_exposure(exposure, optical_path, scene, prng_key):
     # We use Exposure.in_axes to specify which fields are vectors
     keys = jax.random.split(prng_key, exposure.central_wavelength_nm.shape[0])
     spectral_electrons = jax.vmap(
-        sim_band, 
+        sim_band,
         in_axes=(Exposure.in_axes(central_wavelength_nm=0, bin_width_nm=0), None, None, 0)
     )(exposure, optical_path, scene, keys)
-    
-    # Sum all spectral bins 
+
+    # Sum all spectral bins
     all_source_electrons = jnp.sum(spectral_electrons, axis=0)
 
     # Generate noise electrons
     noise_electrons = optical_path.detector.readout_noise_electrons(exposure.exposure_time_s, prng_key)
-    
+
     return all_source_electrons + noise_electrons
 
 # 2. Load the Scene (ExoVista) and Coronagraph (YIPpy)
