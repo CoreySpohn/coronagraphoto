@@ -26,6 +26,7 @@ class OpticalPath(eqx.Module):
         coronagraph,
         detector,
     ):
+        """Initialize the optical path."""
         self.primary = primary
         self.attenuating_elements = attenuating_elements
         self.coronagraph = coronagraph
