@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.0](https://github.com/CoreySpohn/coronagraphoto/compare/v1.4.0...v2.0.0) (2025-11-26)
+
+
+### Miscellaneous Chores
+
+* release 2.0.0 ([303215f](https://github.com/CoreySpohn/coronagraphoto/commit/303215f1c56f03750e16cdcd2cead1d89957aefa))
+
 ## [1.4.0](https://github.com/CoreySpohn/coronagraphoto/compare/v1.3.0...v1.4.0) (2025-10-08)
 
 
