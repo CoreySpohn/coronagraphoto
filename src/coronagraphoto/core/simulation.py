@@ -162,6 +162,74 @@ def sim_star(
     return readout_electrons
 
 
+def _convolve_quadrants(flux, psf_datacube):
+    """Convolve flux with a quarter-symmetric PSF datacube using a fold-and-sum approach.
+
+    Handles padding dynamically to ensure all quadrants match the shape of the
+    first quadrant (which defines the PSF datacube shape).
+    """
+    ny, nx = flux.shape
+
+    # Define center to match create_psf_datacube logic: (N-1)//2
+    cy, cx = (ny - 1) // 2, (nx - 1) // 2
+
+    # Q1: top-right (includes center pixel and axes) -> reference shape
+    # Shape: (ny - cy, nx - cx)
+    q1 = flux[cy:, cx:]
+    target_h, target_w = q1.shape
+
+    # Q2: top-left (excludes center column)
+    # Original Shape: (ny - cy, cx)
+    # Flip X, pad inner (left) with 1 zero (for axis),
+    # and pad outer (right) to match target width.
+    q2_raw = flux[cy:, :cx]
+    q2_flipped = q2_raw[:, ::-1]
+
+    pad_q2_right = target_w - (q2_flipped.shape[1] + 1)
+    pad_q2_right = max(0, pad_q2_right)
+
+    q2 = jnp.pad(q2_flipped, ((0, 0), (1, pad_q2_right)))
+
+    # Q3: bottom-left (excludes center row and column)
+    # Original Shape: (cy, cx)
+    # flip X and Y, pad top (inner), left (inner), and bottom/right (outer).
+    q3_raw = flux[:cy, :cx]
+    q3_flipped = q3_raw[::-1, ::-1]
+
+    pad_q3_bottom = target_h - (q3_flipped.shape[0] + 1)
+    pad_q3_right = target_w - (q3_flipped.shape[1] + 1)
+    pad_q3_bottom = max(0, pad_q3_bottom)
+    pad_q3_right = max(0, pad_q3_right)
+
+    q3 = jnp.pad(q3_flipped, ((1, pad_q3_bottom), (1, pad_q3_right)))
+
+    # Q4: bottom-right (excludes center row)
+    # Original Shape: (cy, nx - cx)
+    # flip Y, pad top (inner) and bottom (outer).
+    q4_raw = flux[:cy, cx:]
+    q4_flipped = q4_raw[::-1, :]
+
+    pad_q4_bottom = target_h - (q4_flipped.shape[0] + 1)
+    pad_q4_bottom = max(0, pad_q4_bottom)
+
+    q4 = jnp.pad(q4_flipped, ((1, pad_q4_bottom), (0, 0)))
+
+    # Stack for batched processing
+    # all q arrays should now be (target_h, target_w)
+    flux_stack = jnp.stack([q1, q2, q3, q4])
+
+    # Batched Einsum
+    partial_images = jnp.einsum("qij,ijxy->qxy", flux_stack, psf_datacube)
+
+    # Unflip and sum
+    img_q1 = partial_images[0]
+    img_q2 = jnp.fliplr(partial_images[1])
+    img_q3 = jnp.flipud(jnp.fliplr(partial_images[2]))
+    img_q4 = jnp.flipud(partial_images[3])
+
+    return img_q1 + img_q2 + img_q3 + img_q4
+
+
 def gen_disk_count_rate(
     start_time_jd,
     wavelength_nm,
@@ -200,11 +268,25 @@ def gen_disk_count_rate(
         -position_angle_deg,
     )
 
-    # Multiply by the PSF datacube to get the image rate of the disk
-    # ph/s/pixel
-    image_rate_coro = jnp.einsum(
-        "ij,ijxy->xy", flux, optical_path.coronagraph.psf_datacube
-    )
+    # Select convolution method based on PSF datacube shape
+    psf_datacube = optical_path.coronagraph.psf_datacube
+
+    # Dimensions of the PSF source grid
+    n_src_y, n_src_x = psf_datacube.shape[:2]
+
+    # Expected dimensions for quarter-grid optimization
+    # (Assuming odd dimensions for full grid, quarter grid is (N-1)/2 + 1)
+    # e.g., Full=101 -> Quarter=51
+    q_src_y = ny // 2 + 1
+    q_src_x = nx // 2 + 1
+
+    if n_src_y == ny and n_src_x == nx:
+        # Full PSF datacube
+        # ph/s/pixel
+        image_rate_coro = jnp.einsum("ij,ijxy->xy", flux, psf_datacube)
+    elif n_src_y == q_src_y and n_src_x == q_src_x:
+        # Quarter PSF datacube
+        image_rate_coro = _convolve_quadrants(flux, psf_datacube)
 
     # Map to detector
     image_rate_detector = post_coro_bin_processing(
