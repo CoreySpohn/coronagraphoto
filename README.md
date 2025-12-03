@@ -98,7 +98,7 @@ def sim_exposure(exposure, optical_path, scene, prng_key):
 
     return all_source_electrons + noise_electrons
 
-# 2. Load the Scene (ExoVista) and Coronagraph (YIPpy)
+# 2. Load the Scene (ExoVista) and Coronagraph (yippy)
 scene = load_sky_scene_from_exovista("path/to/exovista_system.fits")
 yippy_coro = YippyCoronagraph("path/to/coronagraph_data")
 coronagraph = from_yippy(yippy_coro)
