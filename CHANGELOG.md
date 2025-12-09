@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.1](https://github.com/CoreySpohn/coronagraphoto/compare/v2.1.0...v2.1.1) (2025-12-09)
+
+
+### Bug Fixes
+
+* Add yippy dependency ([48e88fe](https://github.com/CoreySpohn/coronagraphoto/commit/48e88feb08b82fd604de2967bc46c6feedf71db8))
+
 ## [2.1.0](https://github.com/CoreySpohn/coronagraphoto/compare/v2.0.0...v2.1.0) (2025-12-08)
 
 
