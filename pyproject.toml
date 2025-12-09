@@ -24,6 +24,7 @@ dependencies = [
   "lod_unit",
   "numpy",
   "orbix",
+  "yippy",
 ]
 [project.optional-dependencies]
 dev = ["ruff", "pre-commit"]
