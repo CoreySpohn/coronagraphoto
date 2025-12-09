@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.0](https://github.com/CoreySpohn/coronagraphoto/compare/v2.0.0...v2.1.0) (2025-12-08)
+
+
+### Features
+
+* Implement quarter-symmetric PSF convolution in simulation.py ([f48d5e3](https://github.com/CoreySpohn/coronagraphoto/commit/f48d5e3498ad303ce40c26200f8872f19783aa64))
+
 ## [2.0.0](https://github.com/CoreySpohn/coronagraphoto/compare/v1.4.0...v2.0.0) (2025-11-26)
 
 
