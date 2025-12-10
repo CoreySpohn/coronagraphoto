@@ -46,7 +46,7 @@ class Coronagraph(eqx.Module):
     create_psf: callable
     create_psfs: callable
     _stellar_ln_interp: interpax.CubicSpline
-    psf_datacube: Array | None
+    psf_datacube: jnp.ndarray | None
     sky_trans: Array
 
     def __init__(self, yippy_coro: YippyCoronagraph, ensure_psf_datacube: bool = False):
@@ -90,7 +90,8 @@ class Coronagraph(eqx.Module):
         # PSF datacube will be set by from_yippy if needed
         # Initialize as None - will be populated during wrapper creation if datacube exists
         if ensure_psf_datacube:
-            self.psf_datacube = yippy_coro.psf_datacube
+            self.psf_datacube = jnp.asarray(yippy_coro.psf_datacube, dtype=jnp.float32)
+            yippy_coro.psf_datacube = None
         else:
             self.psf_datacube = None
 
