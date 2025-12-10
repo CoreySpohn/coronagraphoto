@@ -8,6 +8,7 @@ for use in JIT-compiled code.
 
 import equinox as eqx
 import interpax
+import jax
 import jax.numpy as jnp
 from jaxtyping import Array
 from yippy import Coronagraph as YippyCoronagraph
@@ -90,7 +91,15 @@ class Coronagraph(eqx.Module):
         # PSF datacube will be set by from_yippy if needed
         # Initialize as None - will be populated during wrapper creation if datacube exists
         if ensure_psf_datacube:
-            self.psf_datacube = jnp.asarray(yippy_coro.psf_datacube, dtype=jnp.float32)
+            # Avoid creating a copy if already the right dtype and a JAX array
+            datacube = yippy_coro.psf_datacube
+            if isinstance(datacube, jax.Array) and datacube.dtype == jnp.float32:
+                # Already a JAX array with correct dtype - use directly
+                self.psf_datacube = datacube
+            else:
+                # Convert to JAX array with correct dtype
+                self.psf_datacube = jnp.asarray(datacube, dtype=jnp.float32)
+            # Release reference in yippy to avoid duplicate storage
             yippy_coro.psf_datacube = None
         else:
             self.psf_datacube = None
