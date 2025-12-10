@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.3](https://github.com/CoreySpohn/coronagraphoto/compare/v2.1.2...v2.1.3) (2025-12-10)
+
+
+### Bug Fixes
+
+* Hopefully improve psf_datacube initialization to avoid unnecessary copies and ensure correct dtype handling on GPU ([d4ed75e](https://github.com/CoreySpohn/coronagraphoto/commit/d4ed75eb558e2e2878705f3d51a47fe538568bb2))
+
 ## [2.1.2](https://github.com/CoreySpohn/coronagraphoto/compare/v2.1.1...v2.1.2) (2025-12-10)
 
 
