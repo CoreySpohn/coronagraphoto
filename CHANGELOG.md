@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.2](https://github.com/CoreySpohn/coronagraphoto/compare/v2.1.1...v2.1.2) (2025-12-10)
+
+
+### Bug Fixes
+
+* Update psf_datacube type to jnp.ndarray and ensure proper initialization ([fb62a43](https://github.com/CoreySpohn/coronagraphoto/commit/fb62a437c3652a748684cef67f644f4f20879fa7))
+
 ## [2.1.1](https://github.com/CoreySpohn/coronagraphoto/compare/v2.1.0...v2.1.1) (2025-12-09)
 
 
