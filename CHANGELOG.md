@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.4](https://github.com/CoreySpohn/coronagraphoto/compare/v2.1.3...v2.1.4) (2025-12-10)
+
+
+### Bug Fixes
+
+* Make planet loading logic to truncate excess planets and issue a warning ([256100f](https://github.com/CoreySpohn/coronagraphoto/commit/256100fd728ec069a87629056d810f122af77bd5))
+
 ## [2.1.3](https://github.com/CoreySpohn/coronagraphoto/compare/v2.1.2...v2.1.3) (2025-12-10)
 
 
