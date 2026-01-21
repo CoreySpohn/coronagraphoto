@@ -1,5 +1,6 @@
 """ExoVista data loader utilities using refactored source objects."""
 
+import warnings
 from typing import Optional, Sequence
 
 import interpax
@@ -193,13 +194,21 @@ def load_planets_from_exovista(
 
     n_planets_loaded = len(planet_indices)
 
-    # Pad with ghost planets if necessary
+    # Pad with ghost planets if necessary, or truncate if too many
     # Useful to keep the shape constant to avoid recompilation
     if required_planets is not None:
         if n_planets_loaded > required_planets:
-            raise ValueError(
-                f"Loaded {n_planets_loaded} planets, but required_planets is {required_planets}"
+            warnings.warn(
+                f"Loaded {n_planets_loaded} planets, but required_planets is {required_planets}. "
+                f"Truncating to first {required_planets} planets.",
+                UserWarning,
+                stacklevel=2,
             )
+            # Slice all data structures to only include first required_planets
+            for key in oe_params:
+                oe_params[key] = oe_params[key][:required_planets]
+            contrast_grids = contrast_grids[:required_planets]
+            n_planets_loaded = required_planets
 
         n_ghosts = required_planets - n_planets_loaded
         if n_ghosts > 0:

@@ -1,5 +1,40 @@
 # Changelog
 
+## [2.1.4](https://github.com/CoreySpohn/coronagraphoto/compare/v2.1.3...v2.1.4) (2025-12-10)
+
+
+### Bug Fixes
+
+* Make planet loading logic to truncate excess planets and issue a warning ([256100f](https://github.com/CoreySpohn/coronagraphoto/commit/256100fd728ec069a87629056d810f122af77bd5))
+
+## [2.1.3](https://github.com/CoreySpohn/coronagraphoto/compare/v2.1.2...v2.1.3) (2025-12-10)
+
+
+### Bug Fixes
+
+* Hopefully improve psf_datacube initialization to avoid unnecessary copies and ensure correct dtype handling on GPU ([d4ed75e](https://github.com/CoreySpohn/coronagraphoto/commit/d4ed75eb558e2e2878705f3d51a47fe538568bb2))
+
+## [2.1.2](https://github.com/CoreySpohn/coronagraphoto/compare/v2.1.1...v2.1.2) (2025-12-10)
+
+
+### Bug Fixes
+
+* Update psf_datacube type to jnp.ndarray and ensure proper initialization ([fb62a43](https://github.com/CoreySpohn/coronagraphoto/commit/fb62a437c3652a748684cef67f644f4f20879fa7))
+
+## [2.1.1](https://github.com/CoreySpohn/coronagraphoto/compare/v2.1.0...v2.1.1) (2025-12-09)
+
+
+### Bug Fixes
+
+* Add yippy dependency ([48e88fe](https://github.com/CoreySpohn/coronagraphoto/commit/48e88feb08b82fd604de2967bc46c6feedf71db8))
+
+## [2.1.0](https://github.com/CoreySpohn/coronagraphoto/compare/v2.0.0...v2.1.0) (2025-12-08)
+
+
+### Features
+
+* Implement quarter-symmetric PSF convolution in simulation.py ([f48d5e3](https://github.com/CoreySpohn/coronagraphoto/commit/f48d5e3498ad303ce40c26200f8872f19783aa64))
+
 ## [2.0.0](https://github.com/CoreySpohn/coronagraphoto/compare/v1.4.0...v2.0.0) (2025-11-26)
 
 
