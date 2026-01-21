@@ -59,7 +59,6 @@ class AbstractSource(eqx.Module):
 class StarSource(AbstractSource):
     """On-axis stellar source."""
 
-    name: str
     diameter_arcsec: float
     mass_kg: float
     dist_pc: float
@@ -72,7 +71,6 @@ class StarSource(AbstractSource):
 
     def __init__(
         self,
-        name: str,
         diameter_arcsec: float,
         mass_kg: float,
         dist_pc: float,
@@ -85,7 +83,6 @@ class StarSource(AbstractSource):
         """Initialize the StarSource.
 
         Args:
-            name: The name of the star.
             diameter_arcsec: The angular diameter of the star in arcseconds.
             mass_kg: The mass of the star in kg.
             dist_pc: The distance to the star in parsecs.
@@ -95,7 +92,6 @@ class StarSource(AbstractSource):
             times_jd: The times at which the flux density is provided, in Julian days.
             flux_density_jy: The flux density of the star in Janskys.
         """
-        self.name = name
         self.diameter_arcsec = diameter_arcsec
         self.mass_kg = mass_kg
         self.dist_pc = dist_pc
@@ -226,6 +222,20 @@ class PlanetSources(AbstractSource):
         # even if there is only one planet.
         return jnp.stack([dra, ddec]).reshape(2, self.n_planets)
 
+    def alpha_dMag(self, time_jd: float) -> jnp.ndarray:
+        """Calculate the apparent angular separation and dMag of the planets at a given time.
+
+        Args:
+            time_jd: The time in Julian days.
+
+        Returns:
+            The apparent angular separation and dMag of the planets.
+        """
+        alpha, dMag = self.orbix_planets.alpha_dMag(
+            TRIG_SOLVER, jnp.atleast_1d(time_jd)
+        )
+        return alpha, dMag
+
     def spatial_extent(self) -> tuple[float, float] | None:
         """Planets are point sources."""
         raise NotImplementedError
@@ -235,7 +245,6 @@ class PlanetSources(AbstractSource):
 class DiskSource(AbstractSource):
     """Extended disk source (debris disk, exozodiacal light, etc.)."""
 
-    name: str
     pixel_scale_arcsec: float
     star: StarSource  # Reference to the host star
     _wavelengths_nm: jnp.ndarray  # Shape: (n_wavelengths,)
@@ -244,7 +253,6 @@ class DiskSource(AbstractSource):
 
     def __init__(
         self,
-        name: str,
         pixel_scale_arcsec: float,
         star: StarSource,
         wavelengths_nm: jnp.ndarray,
@@ -253,13 +261,11 @@ class DiskSource(AbstractSource):
         """Initialize the DiskSource.
 
         Args:
-            name: The name of the disk.
             pixel_scale_arcsec: The pixel scale of the contrast cube in arcsec/pixel.
             star: The host star.
             wavelengths_nm: The wavelengths at which the contrast is provided, in nm.
             contrast_cube: The contrast of the disk relative to the star.
         """
-        self.name = name
         self.pixel_scale_arcsec = pixel_scale_arcsec
         self.star = star
         self._wavelengths_nm = wavelengths_nm
@@ -302,25 +308,21 @@ class DiskSource(AbstractSource):
 class ZodiSource(AbstractSource):
     """Uniform zodiacal light source."""
 
-    name: str
     _wavelengths_nm: jnp.ndarray
     _flux_density_phot: jnp.ndarray  # ph/s/m^2/nm/arcsec^2
     _flux_interp: interpax.Interpolator1D
 
     def __init__(
         self,
-        name: str,
         wavelengths_nm: jnp.ndarray,
         flux_density_jy_arcsec2: jnp.ndarray,
     ):
         """Initialize the ZodiSource.
 
         Args:
-            name: The name of the source.
             wavelengths_nm: The wavelengths at which the flux density is provided, in nm.
             flux_density_jy_arcsec2: The flux density of the source in Janskys/arcsec^2.
         """
-        self.name = name
         self._wavelengths_nm = wavelengths_nm
         # Convert to photons on initialization
         self._flux_density_phot = conv.jy_to_photons_per_nm_per_m2(

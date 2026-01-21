@@ -52,9 +52,6 @@ def load_star_from_exovista(fits_file: str, fits_ext: int = 4) -> StarSource:
     # Angular diameter in arcseconds
     diameter_arcsec = obj_header["ANGDIAM"] * 1e-3  # mas to arcsec
 
-    # Star name
-    name = f"HIP {obj_header.get('HIP', 'Unknown')}"
-
     # Mass in solar masses
     mass_solar = obj_header.get("MASS")
     mass_kg = conv.Msun_to_kg(mass_solar)
@@ -67,7 +64,6 @@ def load_star_from_exovista(fits_file: str, fits_ext: int = 4) -> StarSource:
     midplane_i = obj_header.get("I", 0.0)  # Inclination in degrees
 
     return StarSource(
-        name=name,
         diameter_arcsec=diameter_arcsec,
         mass_kg=mass_kg,
         dist_pc=dist_pc,
@@ -166,8 +162,10 @@ def load_planets_from_exovista(
             w=jnp.atleast_1d(jnp.deg2rad(oe_params["w"][-1])),
             M0=jnp.atleast_1d(jnp.deg2rad(oe_params["M0"][-1])),
             t0=jnp.atleast_1d(t0),
-            Mp=jnp.atleast_1d(conv.Mearth_to_kg(oe_params["mass"][-1])),
-            Rp=jnp.atleast_1d(conv.Rearth_to_m(oe_params["radius"][-1])),
+            # orbix Planets expects Mp in Earth masses and Rp in Earth radii
+            # (it converts internally to kg and AU respectively)
+            Mp=jnp.atleast_1d(oe_params["mass"][-1]),
+            Rp=jnp.atleast_1d(oe_params["radius"][-1]),
             p=jnp.atleast_1d(oe_params["p"][-1]),
         )
         mean_anomaly_coords = jnp.rad2deg(
@@ -242,8 +240,10 @@ def load_planets_from_exovista(
         w=jnp.deg2rad(jnp.array(oe_params["w"])),
         M0=jnp.deg2rad(jnp.array(oe_params["M0"])),
         t0=jnp.repeat(t0, n_total_planets),
-        Mp=conv.Mearth_to_kg(jnp.array(oe_params["mass"])),
-        Rp=conv.Rearth_to_m(jnp.array(oe_params["radius"])),
+        # orbix Planets expects Mp in Earth masses and Rp in Earth radii
+        # (it converts internally to kg and AU respectively)
+        Mp=jnp.array(oe_params["mass"]),
+        Rp=jnp.array(oe_params["radius"]),
         p=jnp.array(oe_params["p"]),
     )
 
@@ -299,7 +299,6 @@ def load_disk_from_exovista(
     pixel_scale_arcsec = conv.mas_to_arcsec(header["PXSCLMAS"])
 
     return DiskSource(
-        name="Disk",
         pixel_scale_arcsec=pixel_scale_arcsec,
         star=star,
         wavelengths_nm=wavelengths_nm,
@@ -307,19 +306,84 @@ def load_disk_from_exovista(
     )
 
 
+def get_earth_like_planet_indices(fits_file: str) -> list[int]:
+    """Identify Earth-like planets in an ExoVista FITS file.
+
+    Uses the same classification criteria as exoverses:
+    - Scaled semi-major axis: 0.95 ≤ a / sqrt(L_star) < 1.67 AU
+    - Planet radius: 0.8 / sqrt(a_scaled) ≤ R < 1.4 Earth radii
+
+    Args:
+        fits_file:
+            Path to the ExoVista FITS file.
+
+    Returns:
+        List of planet indices (0-based) that are Earth-like.
+    """
+    import numpy as np
+
+    # Get the number of planets and star luminosity
+    with open(fits_file, "rb") as f:
+        h = getheader(f, ext=0, memmap=False)
+        _, star_header = getdata(f, ext=4, header=True, memmap=False)
+
+    n_ext = h["N_EXT"]
+    n_planets_total = n_ext - 4
+    star_luminosity_lsun = star_header.get("LSTAR", 1.0)
+
+    planet_ext_start = 5
+    earth_indices = []
+
+    for i in range(n_planets_total):
+        with open(fits_file, "rb") as f:
+            _, planet_header = getdata(
+                f, ext=planet_ext_start + i, header=True, memmap=False
+            )
+
+        # Get orbital and physical parameters
+        a_au = planet_header.get("A", 1.0)  # Semi-major axis in AU
+        radius_rearth = planet_header.get("R", 1.0)  # Radius in Earth radii
+
+        # Scaled semi-major axis (reverse luminosity scaling)
+        a_scaled = a_au / np.sqrt(star_luminosity_lsun)
+
+        # Earth-like classification criteria (from exoverses)
+        lower_a = 0.95
+        upper_a = 1.67
+        lower_r = 0.8 / np.sqrt(a_scaled)
+        upper_r = 1.4
+
+        is_earth = (lower_a <= a_scaled < upper_a) and (
+            lower_r <= radius_rearth < upper_r
+        )
+
+        if is_earth:
+            earth_indices.append(i)
+
+    return earth_indices
+
+
 def load_sky_scene_from_exovista(
     fits_file: str,
     planet_indices: Optional[Sequence[int]] = None,
     required_planets: Optional[int] = None,
+    only_earths: bool = False,
 ) -> SkyScene:
     """Load complete sky scene from ExoVista FITS file.
 
     Args:
-        fits_file: Path to the ExoVista FITS file.
-        planet_indices: Optional list of planet indices to load. If None,
-            loads all planets.
-        required_planets: Optional required number of planets to load. Passed to
+        fits_file:
+            Path to the ExoVista FITS file.
+        planet_indices:
+            Optional list of planet indices to load. If None, loads all planets
+            (or only Earths if only_earths=True).
+        required_planets:
+            Optional required number of planets to load. Passed to
             load_planets_from_exovista to ensure fixed array sizes.
+        only_earths:
+            If True, automatically filter to only include Earth-like planets.
+            Uses the same classification criteria as exoverses. This parameter
+            is ignored if planet_indices is explicitly provided.
 
     Returns:
         SkyScene object containing all sources.
@@ -334,7 +398,10 @@ def load_sky_scene_from_exovista(
     n_planets_total = n_ext - 4
 
     if planet_indices is None:
-        planet_indices = range(n_planets_total)
+        if only_earths:
+            planet_indices = get_earth_like_planet_indices(fits_file)
+        else:
+            planet_indices = range(n_planets_total)
 
     # Load the star (always at extension 4)
     star = load_star_from_exovista(fits_file, fits_ext=4)
@@ -346,7 +413,6 @@ def load_sky_scene_from_exovista(
     # Broadcast to wavelengths shape
     flux_density_jy_arcsec2 = jnp.full_like(wavelengths_nm, zodi_flux_jy_arcsec2)
     zodi = ZodiSource(
-        name="Zodiacal Light",
         wavelengths_nm=wavelengths_nm,
         flux_density_jy_arcsec2=flux_density_jy_arcsec2,
     )
