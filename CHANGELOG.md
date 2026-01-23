@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.0](https://github.com/CoreySpohn/coronagraphoto/compare/v2.1.4...v2.2.0) (2026-01-23)
+
+
+### Features
+
+* Introduce RGB composite exposure and rendering utilities, remove `name` attributes from source classes, add `alpha_dMag` to `PlanetSource`, and enhance ExoVista loading with planet unit corrections and Earth-like planet identification. ([4060fec](https://github.com/CoreySpohn/coronagraphoto/commit/4060fecb3231c4b6da44e5b2926468dffe45d026))
+
 ## [2.1.4](https://github.com/CoreySpohn/coronagraphoto/compare/v2.1.3...v2.1.4) (2025-12-10)
 
 
