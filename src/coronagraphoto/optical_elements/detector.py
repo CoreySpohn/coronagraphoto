@@ -194,6 +194,14 @@ class Detector(AbstractDetector):
     # time per frame in seconds
     frame_time: float
 
+    # ETC-specific fields (with defaults for backward compatibility)
+    # time per read in seconds (used for RN²/t_read in ETC detector noise)
+    read_time: float
+    # QE degradation factor (multiplicative correction to quantum_efficiency)
+    dqe: float
+    # pixel count scaling factor for photometric aperture (per spectral bin)
+    npix_multiplier: float
+
     def __init__(
         self,
         pixel_scale: float,
@@ -203,6 +211,9 @@ class Detector(AbstractDetector):
         read_noise: float = 0.0,
         cic_rate: float = 0.0,
         frame_time: float = 1.0,
+        read_time: float = 0.05,
+        dqe: float = 0.0,
+        npix_multiplier: float = 1.0,
     ):
         """Initialize the detector."""
         self.pixel_scale = pixel_scale
@@ -212,6 +223,9 @@ class Detector(AbstractDetector):
         self.read_noise = read_noise
         self.cic_rate = cic_rate
         self.frame_time = frame_time
+        self.read_time = read_time
+        self.dqe = dqe
+        self.npix_multiplier = npix_multiplier
 
     def readout_noise_electrons(self, exposure_time: float, prng_key: PRNGKey):
         """Map incident photons onto the detector plane and then read electrons.

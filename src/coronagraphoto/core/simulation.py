@@ -326,15 +326,31 @@ def gen_zodi_count_rate(
     bin_width_nm,
     zodi,
     optical_path,
+    ecliptic_lat_deg=0.0,
+    solar_lon_deg=135.0,
 ):
     """Generate the zodiacal light count rate on the detector.
 
     Uses the coronagraph's sky transmission map (sky_trans) to modulate the
     uniform zodiacal light surface brightness.
+
+    Args:
+        start_time_jd: Start time in Julian days.
+        wavelength_nm: Wavelength in nm.
+        bin_width_nm: Spectral bin width in nm.
+        zodi: A ZodiSource object (ZodiSourceAYO, ZodiSourceLeinert, etc.).
+        optical_path: The optical path object.
+        ecliptic_lat_deg: Ecliptic latitude in degrees (used by ZodiSourceLeinert).
+        solar_lon_deg: Solar longitude in degrees (used by ZodiSourceLeinert).
+
+    Returns:
+        Detector image rate in ph/s/pixel.
     """
     # Get the source's spectral flux density at the bin center wavelength
     # ph/s/m^2/nm/arcsec^2
-    flux = zodi.spec_flux_density(wavelength_nm, start_time_jd)
+    flux = zodi.spec_flux_density(
+        wavelength_nm, start_time_jd, ecliptic_lat_deg, solar_lon_deg
+    )
 
     # ph/s/arcsec^2
     flux = pre_coro_bin_processing(flux, wavelength_nm, bin_width_nm, optical_path)
@@ -372,14 +388,33 @@ def sim_zodi(
     zodi,
     optical_path,
     prng_key,
+    ecliptic_lat_deg=0.0,
+    solar_lon_deg=135.0,
 ):
-    """Process zodiacal light through the provided optical path."""
+    """Process zodiacal light through the provided optical path.
+
+    Args:
+        start_time_jd: Start time in Julian days.
+        exposure_time_s: Exposure time in seconds.
+        wavelength_nm: Wavelength in nm.
+        bin_width_nm: Spectral bin width in nm.
+        zodi: A ZodiSource object (ZodiSourceAYO, ZodiSourceLeinert, etc.).
+        optical_path: The optical path object.
+        prng_key: JAX PRNG key for noise generation.
+        ecliptic_lat_deg: Ecliptic latitude in degrees (used by ZodiSourceLeinert).
+        solar_lon_deg: Solar longitude in degrees (used by ZodiSourceLeinert).
+
+    Returns:
+        Detector readout in electrons.
+    """
     image_rate_detector = gen_zodi_count_rate(
         start_time_jd,
         wavelength_nm,
         bin_width_nm,
         zodi,
         optical_path,
+        ecliptic_lat_deg,
+        solar_lon_deg,
     )
     readout_electrons = optical_path.detector.readout_source_electrons(
         image_rate_detector, exposure_time_s, prng_key

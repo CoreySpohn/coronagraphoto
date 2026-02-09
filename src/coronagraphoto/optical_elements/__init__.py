@@ -1,6 +1,5 @@
 """Optical elements for coronagraphoto."""
 
-from coronagraphoto.optical_elements.coronagraph import Coronagraph, from_yippy
 from coronagraphoto.optical_elements.detector import (
     AbstractDetector,
     Detector,
@@ -14,8 +13,6 @@ from coronagraphoto.optical_elements.throughput_elements import (
 )
 
 __all__ = [
-    "Coronagraph",
-    "from_yippy",
     "AbstractDetector",
     "SimpleDetector",
     "Detector",

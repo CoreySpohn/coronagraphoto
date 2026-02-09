@@ -1,47 +1,53 @@
-"""Sky scene object that holds collections of sources without control flow."""
+"""Sky scene object that wraps an exoverses.jax System with background sources."""
+
+from typing import Optional
 
 import equinox as eqx
 
-from coronagraphoto.core.sources import (
-    DiskSource,
-    PlanetSources,
-    StarSource,
-    ZodiSource,
-)
+from exoverses.jax import System
+from coronagraphoto.core.zodi_sources import AbstractZodiSource
 
 
 class SkyScene(eqx.Module):
-    """Container for all sources in a sky scene.
+    """Container for a planetary system and background sources.
 
-    This class organizes sources by their processing type rather than
-    astrophysical type to avoid control flow during simulation.
+    Wraps an ``exoverses.jax.System`` (star + planets + disk) and adds
+    observatory-dependent backgrounds like zodiacal light.
+
+    Attributes:
+        system: The astrophysical system (star, planets, disk).
+        zodi: Optional zodiacal light source.
     """
 
-    # On-axis sources (stars)
-    stars: StarSource
+    system: System
 
-    # Off-axis point sources (planets, galaxies)
-    planets: PlanetSources
+    # Zodiacal light (any ZodiSource variant: ZodiSourceAYO, ZodiSourceLeinert, etc.)
+    # Will eventually be replaced by orbix Observatory-based zodi
+    zodi: Optional[AbstractZodiSource] = None
 
-    # Extended sources (disks, exozodiacal light, etc.)
-    disk: DiskSource
+    # ── Convenience accessors for backwards compatibility ──
 
-    # Zodiacal light
-    zodi: ZodiSource
+    @property
+    def stars(self):
+        """Access the star (backwards compat with old SkyScene)."""
+        return self.system.star
 
-    def __init__(
-        self,
-        stars: StarSource | None = None,
-        planets: PlanetSources | None = None,
-        disk: DiskSource | None = None,
-        zodi: ZodiSource | None = None,
-    ):
-        """Initialize sky scene with lists of sources.
+    @property
+    def star(self):
+        """Access the star."""
+        return self.system.star
 
-        All sources expect scalar wavelength and time inputs.
-        Use jax.vmap for vectorized evaluation.
-        """
-        self.stars = stars
-        self.planets = planets
-        self.disk = disk
-        self.zodi = zodi
+    @property
+    def planets(self):
+        """Access the planets."""
+        return self.system.planet
+
+    @property
+    def planet(self):
+        """Access the planets."""
+        return self.system.planet
+
+    @property
+    def disk(self):
+        """Access the disk."""
+        return self.system.disk

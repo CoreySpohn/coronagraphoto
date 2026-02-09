@@ -3,7 +3,7 @@
 import equinox as eqx
 
 from coronagraphoto.core.optical_elements import AbstractOpticalElement
-from coronagraphoto.optical_elements.coronagraph import Coronagraph
+from yippy import EqxCoronagraph
 
 
 class OpticalPath(eqx.Module):
@@ -16,7 +16,7 @@ class OpticalPath(eqx.Module):
 
     primary: AbstractOpticalElement
     attenuating_elements: tuple[AbstractOpticalElement, ...]
-    coronagraph: Coronagraph
+    coronagraph: EqxCoronagraph
     detector: AbstractOpticalElement
 
     def __init__(

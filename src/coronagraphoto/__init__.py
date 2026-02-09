@@ -2,13 +2,17 @@
 
 from coronagraphoto import constants, conversions
 from coronagraphoto.core import (
+    AbstractSource,
+    AbstractZodiSource,
     DiskSource,
     Exposure,
     OpticalPath,
     PlanetSources,
     SkyScene,
     StarSource,
-    ZodiSource,
+    ZodiSourceAYO,
+    ZodiSourceLeinert,
+    ZodiSourcePhotonFlux,
     sim_disk,
     sim_planets,
     sim_star,
@@ -16,7 +20,6 @@ from coronagraphoto.core import (
 )
 from coronagraphoto.loaders import load_sky_scene_from_exovista
 from coronagraphoto.optical_elements import (
-    Coronagraph,
     PrimaryAperture,
     SimpleDetector,
 )
@@ -24,14 +27,17 @@ from coronagraphoto.optical_elements import (
 __all__ = [
     "constants",
     "conversions",
+    "AbstractSource",
+    "AbstractZodiSource",
     "DiskSource",
     "Exposure",
-    "ZodiSource",
+    "ZodiSourceAYO",
+    "ZodiSourceLeinert",
+    "ZodiSourcePhotonFlux",
     "OpticalPath",
     "PlanetSources",
     "SkyScene",
     "StarSource",
-    "Coronagraph",
     "PrimaryAperture",
     "SimpleDetector",
     "sim_disk",
