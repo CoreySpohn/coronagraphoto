@@ -30,12 +30,13 @@ dependencies = [
 dev = ["ruff", "pre-commit"]
 docs = [
   "sphinx",
-  "myst-parser",
+  "myst-nb",
   "sphinx-book-theme",
   "sphinx-autoapi",
   "sphinx_autodoc_typehints",
+  "ipython",
 ]
-test = ["nox", "pytest", "hypothesis", "pytest-cov"]
+test = ["nox", "pytest", "hypothesis", "pytest-cov", "pooch"]
 
 [project.urls]
 Homepage = "https://github.com/CoreySpohn/coronagraphoto"
