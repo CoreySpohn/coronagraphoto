@@ -48,7 +48,6 @@ class AbstractZodiSource(eqx.Module):
         raise NotImplementedError
 
 
-
 @final
 class ZodiSourceAYO(AbstractZodiSource):
     """Zodiacal light using AYO-compatible default settings.
@@ -303,4 +302,3 @@ class ZodiSourcePhotonFlux(AbstractZodiSource):
             Scalar flux density in ph/s/m^2/nm/arcsec^2
         """
         return self._flux_interp(wavelength)
-

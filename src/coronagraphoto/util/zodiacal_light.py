@@ -75,6 +75,7 @@ def create_zodi_spectrum(
     Returns:
         Array of surface brightness values in Jy/arcsec^2.
     """
+
     def _compute_flux_ayo(wl):
         return ayo_default_zodi_flux_jy(wl)
 

@@ -47,7 +47,6 @@ class TestZodiSourceAYO:
         # Solar spectrum peaks in visible, so fluxes should differ
         assert flux_blue != flux_red
 
-
     def test_ignores_position_parameters(self, zodi_ayo):
         """AYO model uses fixed angle assumption, should ignore position."""
         time_jd = 2460000.0
@@ -117,7 +116,6 @@ class TestZodiSourceLeinert:
         # Different positions should have different brightness
         assert flux_90 != flux_180
 
-
     def test_at_table_grid_point(self, zodi_leinert):
         """Test interpolation at exact Leinert table grid points."""
         # Table 17 has data at β=0°, λ-λ☉=90° which is a known grid point
@@ -161,7 +159,6 @@ class TestZodiSourcePhotonFlux:
 
         # Should return same value regardless of position
         assert jnp.isclose(flux1, flux2)
-
 
 
 class TestZodiSourceComparison:

@@ -154,7 +154,7 @@ class TestSpectralBinningConsistency:
         # Allow 5% difference due to wavelength dependence
         assert relative_error < 0.05, (
             f"Spectral binning error too large: wide={float(wide_bin_total):.4e}, "
-            f"narrow={float(narrow_bin_total):.4e}, error={float(relative_error)*100:.1f}%"
+            f"narrow={float(narrow_bin_total):.4e}, error={float(relative_error) * 100:.1f}%"
         )
 
 
@@ -233,9 +233,9 @@ class TestWavelengthScaling:
         # Red should be exactly 2× blue
         ratio = lod_red / lod_blue
 
-        assert jnp.isclose(
-            ratio, 2.0, rtol=1e-6
-        ), f"λ/D scaling error: ratio={float(ratio):.6f}, expected=2.0"
+        assert jnp.isclose(ratio, 2.0, rtol=1e-6), (
+            f"λ/D scaling error: ratio={float(ratio):.6f}, expected=2.0"
+        )
 
     def test_arcsec_to_lambda_d_roundtrip(self):
         """Converting arcsec → λ/D → arcsec must be identity."""
@@ -272,7 +272,7 @@ class TestRotationMatrix:
 
         assert jnp.allclose(rotated, expected, atol=1e-6), (
             f"Chirality error: point at (1,0) rotated 90° CCW went to "
-            f"({float(rotated[0,0]):.3f}, {float(rotated[1,0]):.3f}), "
+            f"({float(rotated[0, 0]):.3f}, {float(rotated[1, 0]):.3f}), "
             f"expected (0, 1)"
         )
 
@@ -377,9 +377,9 @@ class TestFluxOrderOfMagnitude:
 
         # Should be order 10⁷ ph/s/m²/nm
         # Integrated over 100nm → 10⁹ ph/s/m²
-        assert (
-            1e6 < flux_phot < 1e9
-        ), f"Stellar flux out of expected range: {float(flux_phot):.2e} ph/s/m²/nm"
+        assert 1e6 < flux_phot < 1e9, (
+            f"Stellar flux out of expected range: {float(flux_phot):.2e} ph/s/m²/nm"
+        )
 
 
 # =============================================================================
@@ -487,9 +487,9 @@ class TestDetectorStatistics:
         ratio = snr2 / snr1
 
         # Expect factor of 2 improvement (sqrt(4) = 2)
-        assert jnp.isclose(
-            ratio, 2.0, rtol=0.15
-        ), f"SNR scaling failed. 4s/1s SNR ratio = {float(ratio):.2f} (expected 2.0)"
+        assert jnp.isclose(ratio, 2.0, rtol=0.15), (
+            f"SNR scaling failed. 4s/1s SNR ratio = {float(ratio):.2f} (expected 2.0)"
+        )
 
     def test_poisson_photon_counting(self):
         """Photon arrival from a source must follow Poisson statistics.
@@ -514,15 +514,15 @@ class TestDetectorStatistics:
         var_val = jnp.var(image)
 
         # Check mean matches expected counts
-        assert jnp.isclose(
-            mean_val, expected_counts, rtol=0.02
-        ), f"Mean counts wrong: got={float(mean_val):.1f}, expected={expected_counts:.1f}"
+        assert jnp.isclose(mean_val, expected_counts, rtol=0.02), (
+            f"Mean counts wrong: got={float(mean_val):.1f}, expected={expected_counts:.1f}"
+        )
 
         # Check Poisson: Var ≈ Mean
         fano = var_val / mean_val
-        assert jnp.isclose(
-            fano, 1.0, rtol=0.1
-        ), f"Photon counts not Poissonian: Fano={float(fano):.3f}"
+        assert jnp.isclose(fano, 1.0, rtol=0.1), (
+            f"Photon counts not Poissonian: Fano={float(fano):.3f}"
+        )
 
 
 # =============================================================================
@@ -560,7 +560,7 @@ class TestAlgorithmicConservation:
         # Allow small interpolation error (1%)
         assert jnp.isclose(flux_out, flux_in, rtol=0.01), (
             f"Flux leakage in resampling: In={float(flux_in):.2f}, "
-            f"Out={float(flux_out):.2f}, ratio={float(flux_out/flux_in):.4f}"
+            f"Out={float(flux_out):.2f}, ratio={float(flux_out / flux_in):.4f}"
         )
 
     def test_resample_with_rotation_conservation(self):
@@ -589,9 +589,9 @@ class TestAlgorithmicConservation:
 
         # Rotation can lose flux at corners, allow up to 10% loss
         # (this tests that we're not catastrophically wrong)
-        assert (
-            flux_out / flux_in > 0.9
-        ), f"Excessive flux loss with rotation: ratio={float(flux_out/flux_in):.3f}"
+        assert flux_out / flux_in > 0.9, (
+            f"Excessive flux loss with rotation: ratio={float(flux_out / flux_in):.3f}"
+        )
 
     def test_convolve_quadrants_sum_preservation(self):
         """Quarter-symmetric convolution must preserve total flux when PSF sums to 1.
@@ -632,12 +632,12 @@ class TestAlgorithmicConservation:
         # Total should be approximately preserved (the quadrant folding adds 4x)
         # because each quadrant contributes its flux to the center
         # This test mainly verifies no NaN or catastrophic errors
-        assert (
-            flux_out > 0
-        ), f"Convolution produced zero or negative flux: {float(flux_out)}"
-        assert jnp.isfinite(
-            flux_out
-        ), f"Convolution produced non-finite flux: {float(flux_out)}"
+        assert flux_out > 0, (
+            f"Convolution produced zero or negative flux: {float(flux_out)}"
+        )
+        assert jnp.isfinite(flux_out), (
+            f"Convolution produced non-finite flux: {float(flux_out)}"
+        )
 
 
 # =============================================================================
@@ -680,7 +680,7 @@ class TestOrbitalMechanics:
         delta_M = M1 - M0
         assert jnp.isclose(delta_M, 2 * np.pi, rtol=1e-4), (
             f"Orbital period error: ΔM = {float(delta_M):.6f} rad, "
-            f"expected 2π = {2*np.pi:.6f} rad"
+            f"expected 2π = {2 * np.pi:.6f} rad"
         )
 
     def test_circular_orbit_constant_radius(self):
@@ -722,9 +722,9 @@ class TestOrbitalMechanics:
         sep_std = np.std(separations)
         sep_mean = np.mean(separations)
 
-        assert (
-            sep_std / sep_mean < 0.01
-        ), f"Circular orbit has varying separation: std/mean = {sep_std/sep_mean:.4f}"
+        assert sep_std / sep_mean < 0.01, (
+            f"Circular orbit has varying separation: std/mean = {sep_std / sep_mean:.4f}"
+        )
 
     def test_kepler_third_law(self):
         """Verify P² ∝ a³ (Kepler's Third Law).

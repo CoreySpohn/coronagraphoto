@@ -27,4 +27,3 @@ class AbstractSource(eqx.Module):
     def spec_flux_density(self, wavelength: float, time: float) -> float | jnp.ndarray:
         """Return spectral flux density in ph/s/m^2/nm."""
         raise NotImplementedError
-

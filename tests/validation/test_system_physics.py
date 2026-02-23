@@ -193,9 +193,9 @@ class TestEndToEndRadiometry:
         )
 
         ratio = rate_lossy / rate_perfect
-        assert jnp.isclose(
-            ratio, 0.5, rtol=0.01
-        ), f"Throughput not applied correctly: ratio={float(ratio):.4f}, expected=0.5"
+        assert jnp.isclose(ratio, 0.5, rtol=0.01), (
+            f"Throughput not applied correctly: ratio={float(ratio):.4f}, expected=0.5"
+        )
 
 
 # =============================================================================
@@ -237,9 +237,9 @@ class TestSurfaceBrightness:
         n_coro_pixels = perfect_system.coronagraph.psf_shape[0] ** 2
         expected_total = expected_rate_per_coro_pix * n_coro_pixels
 
-        assert jnp.isclose(
-            total_simulated, expected_total, rtol=0.05
-        ), f"Zodi total: {float(total_simulated):.4e}, Expected: {float(expected_total):.4e}"
+        assert jnp.isclose(total_simulated, expected_total, rtol=0.05), (
+            f"Zodi total: {float(total_simulated):.4e}, Expected: {float(expected_total):.4e}"
+        )
 
 
 # =============================================================================
@@ -354,9 +354,9 @@ class TestPlanetFidelity:
 
         # Center is at (50, 50). Planet at M0=0 should be at +X direction
         # Expected: x ≈ 60, y ≈ 50
-        assert (
-            abs(int(x) - 60) <= 2
-        ), f"Planet at wrong X position. Got x={x}, Expected ~60"
+        assert abs(int(x) - 60) <= 2, (
+            f"Planet at wrong X position. Got x={x}, Expected ~60"
+        )
         assert abs(int(y) - 50) <= 2, f"Planet shifted in Y. Got y={y}, Expected ~50"
 
 
