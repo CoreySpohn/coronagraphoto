@@ -16,7 +16,7 @@ REGISTRY = {
 
 # Create a pooch instance for coronagraphoto test data
 # Data is cached in the user's cache directory
-POKE = pooch.create(
+PIKACHU = pooch.create(
     path=pooch.os_cache("coronagraphoto"),
     base_url="https://github.com/CoreySpohn/coronalyze/raw/main/data/",
     registry=REGISTRY,
@@ -32,9 +32,9 @@ def fetch_coronagraph() -> str:
     Returns:
         Path to the coronagraph directory.
     """
-    POKE.fetch("coronagraphs.zip", processor=Unzip())
+    PIKACHU.fetch("coronagraphs.zip", processor=Unzip())
     return str(
-        POKE.abspath / "coronagraphs.zip.unzip" / "coronagraphs" / "eac1_aavc_512"
+        PIKACHU.abspath / "coronagraphs.zip.unzip" / "coronagraphs" / "eac1_aavc_512"
     )
 
 
@@ -46,8 +46,10 @@ def fetch_scene() -> str:
     Returns:
         Path to the ExoVista FITS file.
     """
-    POKE.fetch("scenes.zip", processor=Unzip())
-    return str(POKE.abspath / "scenes.zip.unzip" / "scenes" / "solar_system_mod.fits")
+    PIKACHU.fetch("scenes.zip", processor=Unzip())
+    return str(
+        PIKACHU.abspath / "scenes.zip.unzip" / "scenes" / "solar_system_mod.fits"
+    )
 
 
 def fetch_all() -> tuple[str, str]:
