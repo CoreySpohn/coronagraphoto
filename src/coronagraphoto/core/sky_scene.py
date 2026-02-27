@@ -1,7 +1,5 @@
 """Sky scene object that wraps an exoverses.jax System with background sources."""
 
-from typing import Optional
-
 import equinox as eqx
 from exoverses.jax import System
 
@@ -23,7 +21,7 @@ class SkyScene(eqx.Module):
 
     # Zodiacal light (any ZodiSource variant: ZodiSourceAYO, ZodiSourceLeinert, etc.)
     # Will eventually be replaced by orbix Observatory-based zodi
-    zodi: Optional[AbstractZodiSource] = None
+    zodi: AbstractZodiSource | None = None
 
     # ── Convenience accessors for backwards compatibility ──
 
