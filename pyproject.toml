@@ -7,7 +7,7 @@ name = "coronagraphoto"
 description = "A python library to simulate coronagraphic observations of exoplanets."
 authors = [{ name = "Corey Spohn", email = "corey.a.spohn@nasa.gov" }]
 dynamic = ['readme', 'version']
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = { file = "LICENSE" }
 classifiers = [
   "Development Status :: 3 - Alpha",
