@@ -26,6 +26,7 @@ dependencies = [
   "numpy",
   "orbix",
   "yippy",
+  "exoverses",
 ]
 [project.optional-dependencies]
 dev = ["pre-commit"]
