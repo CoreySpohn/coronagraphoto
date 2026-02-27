@@ -1,7 +1,6 @@
 """ExoVista data loader — delegates to exoverses.jax and wraps in SkyScene."""
 
 from collections.abc import Sequence
-from typing import Optional
 
 from exoverses.jax import from_exovista
 
@@ -11,8 +10,8 @@ from coronagraphoto.core.zodi_sources import ZodiSourceAYO
 
 def load_sky_scene_from_exovista(
     fits_file: str,
-    planet_indices: Optional[Sequence[int]] = None,
-    required_planets: Optional[int] = None,
+    planet_indices: Sequence[int] | None = None,
+    required_planets: int | None = None,
     only_earths: bool = False,
 ) -> SkyScene:
     """Load complete sky scene from ExoVista FITS file.
