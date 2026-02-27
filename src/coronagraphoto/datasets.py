@@ -1,21 +1,23 @@
-"""Data management utilities for coronagraphoto tests.
+"""Data management utilities for coronagraphoto.
 
-This module provides utilities for fetching example data files for testing.
-It reuses the same pooch registry as coronalyze to avoid duplication.
+This module provides utilities for fetching example data files for testing
+and documentation. It reuses the same pooch registry as coronalyze to avoid
+duplication.
+
+Example:
+    >>> from coronagraphoto.datasets import fetch_coronagraph, fetch_scene
+    >>> coro_path = fetch_coronagraph()
+    >>> scene_path = fetch_scene()
 """
 
 import pooch
 from pooch import Unzip
 
-# Create a pooch registry for data files
-# Uses the same data as coronalyze to avoid duplication
 REGISTRY = {
     "coronagraphs.zip": "md5:1537f41c20cb10170537a7d4e89f64b2",
     "scenes.zip": "md5:c777aefb65887249892093b1aba6d86a",
 }
 
-# Create a pooch instance for coronagraphoto test data
-# Data is cached in the user's cache directory
 PIKACHU = pooch.create(
     path=pooch.os_cache("coronagraphoto"),
     base_url="https://github.com/CoreySpohn/coronalyze/raw/main/data/",

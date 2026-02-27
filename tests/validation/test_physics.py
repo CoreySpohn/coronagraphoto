@@ -75,7 +75,7 @@ class TestConvolutionAccuracy:
             wavelengths_nm=wavelengths, throughputs=throughputs
         )
 
-        for wl, expected_t in zip(wavelengths, throughputs):
+        for wl, expected_t in zip(wavelengths, throughputs, strict=True):
             actual = element.get_throughput(float(wl))
             assert jnp.isclose(actual, expected_t, rtol=1e-5)
 

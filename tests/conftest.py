@@ -1,13 +1,22 @@
-"""Shared pytest fixtures for coronagraphoto tests."""
+"""Shared pytest fixtures and data utilities for coronagraphoto tests."""
 
 import jax
 import pytest
+
+from coronagraphoto.datasets import fetch_all, fetch_coronagraph, fetch_scene
+
+__all__ = ["fetch_all", "fetch_coronagraph", "fetch_scene"]
+
+
+# ---------------------------------------------------------------------------
+# Pytest fixtures
+# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 def prng_key():
     """Provide a reproducible JAX random key."""
-    return jax.random.PRNGKey(42)
+    return jax.random.PRNGKey(0)
 
 
 @pytest.fixture

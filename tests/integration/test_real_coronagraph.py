@@ -13,7 +13,7 @@ import pytest
 from lod_unit import lod
 from yippy import Coronagraph
 
-from ..datasets import fetch_coronagraph
+from coronagraphoto.datasets import fetch_coronagraph
 
 # Mark all tests as slow (network access) and integration
 pytestmark = [pytest.mark.slow, pytest.mark.integration]
