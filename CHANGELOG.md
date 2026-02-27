@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.2.1](https://github.com/CoreySpohn/coronagraphoto/compare/v2.2.0...v2.2.1) (2026-02-27)
+
+
+### Bug Fixes
+
+* Add exoverses dependency ([2ab5b1d](https://github.com/CoreySpohn/coronagraphoto/commit/2ab5b1d7503e0216d74fe592c0f9fb7b507236e4))
+* Updating the pooch management ([8810b35](https://github.com/CoreySpohn/coronagraphoto/commit/8810b358085c98bdd68bec08f0a60db76d0d72f5))
+
 ## [2.2.0](https://github.com/CoreySpohn/coronagraphoto/compare/v2.1.4...v2.2.0) (2026-01-23)
 
 
