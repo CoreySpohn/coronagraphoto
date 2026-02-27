@@ -1,9 +1,9 @@
 """Defines an optical path through a telescope."""
 
 import equinox as eqx
+from yippy import EqxCoronagraph
 
 from coronagraphoto.core.optical_elements import AbstractOpticalElement
-from yippy import EqxCoronagraph
 
 
 class OpticalPath(eqx.Module):
@@ -33,7 +33,7 @@ class OpticalPath(eqx.Module):
         self.detector = detector
 
     def calculate_combined_attenuation(self, wavelength_nm: float) -> float:
-        """Calculate the combined attenuation of the optical path at a specific wavelength."""
+        """Calculate combined attenuation at a specific wavelength."""
         combined_attenuation = 1.0
         # This loop gets unrolled when JIT compiled
         for element in self.attenuating_elements:

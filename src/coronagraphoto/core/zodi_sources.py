@@ -6,9 +6,9 @@ from typing import final
 import equinox as eqx
 import interpax
 import jax.numpy as jnp
-
-from coronagraphoto import conversions as conv
-from coronagraphoto.util.zodiacal_light import (
+from hwoutils.constants import Jy, h
+from hwoutils.conversions import jy_to_photons_per_nm_per_m2
+from orbix.observatory.zodiacal import (
     create_zodi_spectrum_jax,
     leinert_zodi_mag,
     mag_to_flux_jy,
@@ -46,7 +46,6 @@ class AbstractZodiSource(eqx.Module):
             Scalar flux density in ph/s/m^2/nm/arcsec^2
         """
         raise NotImplementedError
-
 
 
 @final
@@ -99,7 +98,7 @@ class ZodiSourceAYO(AbstractZodiSource):
         )
 
         # Convert to photons
-        self._flux_density_phot = conv.jy_to_photons_per_nm_per_m2(
+        self._flux_density_phot = jy_to_photons_per_nm_per_m2(
             flux_spectrum_jy, wavelengths_nm
         )
         self._flux_interp = interpax.Interpolator1D(
@@ -226,7 +225,7 @@ class ZodiSourceLeinert(AbstractZodiSource):
         )
 
         # Convert Jy to ph/s/m^2/nm using conversions module
-        flux_phot = flux_jy * conv.const.Jy / (wavelength * conv.const.h)
+        flux_phot = flux_jy * Jy / (wavelength * h)
 
         return flux_phot
 
@@ -303,4 +302,3 @@ class ZodiSourcePhotonFlux(AbstractZodiSource):
             Scalar flux density in ph/s/m^2/nm/arcsec^2
         """
         return self._flux_interp(wavelength)
-

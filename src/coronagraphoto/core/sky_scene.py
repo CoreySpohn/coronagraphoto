@@ -3,8 +3,8 @@
 from typing import Optional
 
 import equinox as eqx
-
 from exoverses.jax import System
+
 from coronagraphoto.core.zodi_sources import AbstractZodiSource
 
 

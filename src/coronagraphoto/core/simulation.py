@@ -1,12 +1,8 @@
 """Functions for running full simulations and processing sources."""
 
 import jax.numpy as jnp
-
-import coronagraphoto.conversions as conv
-from coronagraphoto.transforms.image_transforms import (
-    ccw_rotation_matrix,
-    resample_flux,
-)
+from hwoutils.conversions import arcsec_to_lambda_d, lambda_d_to_arcsec
+from hwoutils.transforms import ccw_rotation_matrix, resample_flux
 
 
 def pre_coro_bin_processing(flux, bin_center_nm, bin_width_nm, optical_path):
@@ -57,7 +53,7 @@ def gen_planet_count_rate(
     source_positions_as = rotation_matrix @ source_positions_as
 
     # Convert the source position from arcseconds to lambda/D
-    source_positions_lod = conv.arcsec_to_lambda_d(
+    source_positions_lod = arcsec_to_lambda_d(
         source_positions_as, wavelength_nm, optical_path.primary.diameter_m
     )
 
@@ -118,7 +114,7 @@ def gen_star_count_rate(
 ):
     """Generate the star count rate on the detector."""
     # Convert the source diameter from arcseconds to lambda/D
-    source_diam_lod = conv.arcsec_to_lambda_d(
+    source_diam_lod = arcsec_to_lambda_d(
         star.diameter_arcsec, wavelength_nm, optical_path.primary.diameter_m
     )
     # Get the source's spectral flux density at the bin center wavelength
@@ -163,7 +159,9 @@ def sim_star(
 
 
 def _convolve_quadrants(flux, psf_datacube):
-    """Convolve flux with a quarter-symmetric PSF datacube using a fold-and-sum approach.
+    """Convolve flux with a quarter-symmetric PSF datacube.
+
+    Uses a fold-and-sum approach.
 
     Handles padding dynamically to ensure all quadrants match the shape of the
     first quadrant (which defines the PSF datacube shape).
@@ -250,7 +248,7 @@ def gen_disk_count_rate(
     # Get source pixel scale in arcsec
     pixscale_src = disk.pixel_scale_arcsec
     # Calculate target pixel scale in arcsec (coronagraph pixel scale is in lambda/D)
-    pixscale_tgt = conv.lambda_d_to_arcsec(
+    pixscale_tgt = lambda_d_to_arcsec(
         optical_path.coronagraph.pixel_scale_lod,
         wavelength_nm,
         optical_path.primary.diameter_m,
@@ -359,7 +357,7 @@ def gen_zodi_count_rate(
     sky_trans = optical_path.coronagraph.sky_trans
 
     # Calculate coronagraph pixel scale in arcseconds
-    pixscale_coro_arcsec = conv.lambda_d_to_arcsec(
+    pixscale_coro_arcsec = lambda_d_to_arcsec(
         optical_path.coronagraph.pixel_scale_lod,
         wavelength_nm,
         optical_path.primary.diameter_m,

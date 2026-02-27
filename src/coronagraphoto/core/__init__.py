@@ -18,14 +18,14 @@ from coronagraphoto.core.zodi_sources import (
 )
 
 __all__ = [
-    "SkyScene",
-    "OpticalPath",
     "AbstractSource",
-    "DiskSource",
-    "PlanetSources",
-    "StarSource",
-    "Exposure",
     "AbstractZodiSource",
+    "DiskSource",
+    "Exposure",
+    "OpticalPath",
+    "PlanetSources",
+    "SkyScene",
+    "StarSource",
     "ZodiSourceAYO",
     "ZodiSourceLeinert",
     "ZodiSourcePhotonFlux",

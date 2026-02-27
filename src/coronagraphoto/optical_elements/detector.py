@@ -5,11 +5,10 @@ from typing import final
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from hwoutils.conversions import lambda_d_to_arcsec
+from hwoutils.transforms import resample_flux
 from jax.random import PRNGKey
 from jaxtyping import Array
-
-from coronagraphoto import conversions as conv
-from coronagraphoto.transforms.image_transforms import resample_flux
 
 
 # Pure functions for noise simulation
@@ -92,13 +91,15 @@ class AbstractDetector(eqx.Module):
         """Resample the incident flux to the detector plane.
 
         Args:
-            inc_flux: The incident flux in photons/s after passing through the coronagraph and color filter.
-            inc_pixel_scale: The pixel scale of the incident image from the coronagraph in (lambda/D)/pixel.
+            inc_flux: The incident flux in photons/s after passing
+                through the coronagraph and color filter.
+            inc_pixel_scale: The pixel scale of the incident image
+                from the coronagraph in (lambda/D)/pixel.
             wavelength: The wavelength in nm (placeholder for consistency).
             primary_diameter_m: The diameter of the primary mirror in meters.
         """
         # Convert the pixel scale of the incident image to arcsec/pixel
-        inc_pixel_scale_arcsec = conv.lambda_d_to_arcsec(
+        inc_pixel_scale_arcsec = lambda_d_to_arcsec(
             inc_pixel_scale, wavelength, primary_diameter_m
         )
 
@@ -117,7 +118,8 @@ class AbstractDetector(eqx.Module):
         """Map incident photons onto the detector plane and then read electrons.
 
         Args:
-            inc_photon_rate: The incident photon rate in photons/s after passing through the coronagraph and color filter.
+            inc_photon_rate: The incident photon rate in photons/s
+                after passing through the coronagraph and color filter.
             exposure_time: The exposure time in seconds.
             prng_key: The PRNG key for the random number generator.
 

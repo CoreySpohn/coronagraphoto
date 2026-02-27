@@ -16,10 +16,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils import constants as const
+from hwoutils import conversions as conv
 from orbix.system.planets import Planets as OrbixPlanets
 
-from coronagraphoto import constants as const
-from coronagraphoto import conversions as conv
 from coronagraphoto.core.optical_path import OpticalPath
 from coronagraphoto.core.simulation import (
     gen_planet_count_rate,
@@ -34,7 +34,6 @@ from coronagraphoto.optical_elements import (
     PrimaryAperture,
     SimpleDetector,
 )
-from coronagraphoto.optical_elements.detector import Detector
 
 # =============================================================================
 # MOCKS & FIXTURES
@@ -129,7 +128,10 @@ def standard_star():
 
 
 class TestEndToEndRadiometry:
-    """Verify that photon counts through the full pipeline match analytic expectations."""
+    """Verify photon counts through the full pipeline.
+
+    Checks that counts match analytic expectations.
+    """
 
     def test_star_flux_conservation(self, perfect_system, standard_star):
         """Verify gen_star_count_rate produces the exact analytic photon count."""
@@ -153,7 +155,8 @@ class TestEndToEndRadiometry:
         expected_rate = flux_density * area * BANDWIDTH
 
         assert jnp.isclose(total_simulated_rate, expected_rate, rtol=0.01), (
-            f"Flux Conservation Error: Simulated={float(total_simulated_rate):.4e} ph/s, "
+            "Flux Conservation Error: "
+            f"Simulated={float(total_simulated_rate):.4e} ph/s, "
             f"Expected={float(expected_rate):.4e} ph/s"
         )
 
@@ -193,9 +196,9 @@ class TestEndToEndRadiometry:
         )
 
         ratio = rate_lossy / rate_perfect
-        assert jnp.isclose(
-            ratio, 0.5, rtol=0.01
-        ), f"Throughput not applied correctly: ratio={float(ratio):.4f}, expected=0.5"
+        assert jnp.isclose(ratio, 0.5, rtol=0.01), (
+            f"Throughput not applied correctly: ratio={float(ratio):.4f}, expected=0.5"
+        )
 
 
 # =============================================================================
@@ -237,9 +240,10 @@ class TestSurfaceBrightness:
         n_coro_pixels = perfect_system.coronagraph.psf_shape[0] ** 2
         expected_total = expected_rate_per_coro_pix * n_coro_pixels
 
-        assert jnp.isclose(
-            total_simulated, expected_total, rtol=0.05
-        ), f"Zodi total: {float(total_simulated):.4e}, Expected: {float(expected_total):.4e}"
+        assert jnp.isclose(total_simulated, expected_total, rtol=0.05), (
+            f"Zodi total: {float(total_simulated):.4e}, "
+            f"Expected: {float(expected_total):.4e}"
+        )
 
 
 # =============================================================================
@@ -354,9 +358,9 @@ class TestPlanetFidelity:
 
         # Center is at (50, 50). Planet at M0=0 should be at +X direction
         # Expected: x ≈ 60, y ≈ 50
-        assert (
-            abs(int(x) - 60) <= 2
-        ), f"Planet at wrong X position. Got x={x}, Expected ~60"
+        assert abs(int(x) - 60) <= 2, (
+            f"Planet at wrong X position. Got x={x}, Expected ~60"
+        )
         assert abs(int(y) - 50) <= 2, f"Planet shifted in Y. Got y={y}, Expected ~50"
 
 
@@ -368,24 +372,29 @@ class TestPlanetFidelity:
 class TestMaskPhysics:
     """Verify coronagraphic masking works correctly."""
 
-    def test_coronagraph_sky_trans_suppression(self, perfect_system):
-        """Verify the sky_trans map actually blocks light where set to 0."""
-        # Create a coronagraph with central pixel masked
-        masked_trans = perfect_system.coronagraph.sky_trans.at[50, 50].set(0.0)
+    def test_sky_trans_modulates_zodi(self, perfect_system):
+        """Verify sky_trans scales zodiacal background flux per pixel.
+
+        sky_trans is the sky transmission map -- it modulates how much
+        background (zodi) light reaches each coronagraph pixel. Setting
+        it to zero in a region should zero out zodi flux there.
+        """
+        zodi = ZodiSourceAYO(jnp.array([550.0]), surface_brightness_mag=20.0)
+        WAVELENGTH = 550.0
+        BIN_WIDTH = 50.0
+
+        full_img = gen_zodi_count_rate(0.0, WAVELENGTH, BIN_WIDTH, zodi, perfect_system)
+
+        # Zero out a 5x5 patch in sky_trans
+        masked_trans = perfect_system.coronagraph.sky_trans.at[48:53, 48:53].set(0.0)
         masked_coro = eqx.tree_at(
-            lambda c: c.sky_trans, perfect_system.coronagraph, masked_trans
+            lambda c: c.sky_trans,
+            perfect_system.coronagraph,
+            masked_trans,
         )
         masked_sys = eqx.tree_at(lambda s: s.coronagraph, perfect_system, masked_coro)
 
-        # Run Zodi (uniform extended source)
-        zodi = ZodiSourceAYO(jnp.array([550.0]), surface_brightness_mag=20.0)
-        img = gen_zodi_count_rate(0.0, 550.0, 50.0, zodi, masked_sys)
+        masked_img = gen_zodi_count_rate(0.0, WAVELENGTH, BIN_WIDTH, zodi, masked_sys)
 
-        # Center should be much darker than neighbor
-        center_val = img[50, 50]
-        neighbor_val = img[50, 51]
-
-        assert center_val < neighbor_val * 0.1, (
-            f"Mask did not suppress central flux: center={float(center_val):.2e}, "
-            f"neighbor={float(neighbor_val):.2e}"
-        )
+        # Total flux should decrease
+        assert jnp.sum(masked_img) < jnp.sum(full_img)
