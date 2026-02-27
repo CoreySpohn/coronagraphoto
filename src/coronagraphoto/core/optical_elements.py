@@ -1,11 +1,9 @@
 """Module holding all standard optical elements."""
 
 from abc import abstractmethod
-from typing import final
 
 import equinox as eqx
 import jax.numpy as jnp
-from jaxtyping import Array
 
 
 class AbstractOpticalElement(eqx.Module):

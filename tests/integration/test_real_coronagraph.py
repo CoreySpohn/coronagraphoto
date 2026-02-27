@@ -8,7 +8,6 @@ known JAX/numpy compatibility issues).
 Tests are marked slow and require network access.
 """
 
-import jax.numpy as jnp
 import numpy as np
 import pytest
 from lod_unit import lod

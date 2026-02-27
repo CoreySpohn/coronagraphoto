@@ -14,10 +14,10 @@ from coronagraphoto.optical_elements.throughput_elements import (
 
 __all__ = [
     "AbstractDetector",
-    "SimpleDetector",
+    "ConstantThroughputElement",
     "Detector",
+    "LinearThroughputElement",
     "OpticalFilter",
     "PrimaryAperture",
-    "ConstantThroughputElement",
-    "LinearThroughputElement",
+    "SimpleDetector",
 ]

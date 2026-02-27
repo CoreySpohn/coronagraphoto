@@ -1,13 +1,11 @@
 """Tests for zodiacal light utilities in coronagraphoto.util.zodiacal_light."""
 
 import jax.numpy as jnp
-import pytest
-
-from coronagraphoto.util.zodiacal_light import (
+from orbix.observatory.zodiacal import (
     V_BAND_WAVELENGTH_NM,
     ayo_default_zodi_flux_jy,
     ayo_default_zodi_mag,
-    create_zodi_spectrum,
+    create_zodi_spectrum_jax,
     flux_to_mag_jy,
     leinert_zodi_factor,
     leinert_zodi_mag,
@@ -134,32 +132,17 @@ class TestAYODefaultFunctions:
         assert flux > 0
 
 
-class TestCreateZodiSpectrum:
+class TestCreateZodiSpectrumJax:
     """Tests for zodiacal light spectrum generation."""
 
     def test_output_shape(self):
         """Output should match input wavelength array shape."""
         wavelengths = jnp.array([400.0, 500.0, 600.0, 700.0, 800.0])
-        spectrum = create_zodi_spectrum(wavelengths)
+        spectrum = create_zodi_spectrum_jax(wavelengths)
         assert spectrum.shape == wavelengths.shape
 
     def test_all_positive(self):
         """All spectral values should be positive."""
         wavelengths = jnp.linspace(400.0, 900.0, 10)
-        spectrum = create_zodi_spectrum(wavelengths)
+        spectrum = create_zodi_spectrum_jax(wavelengths)
         assert jnp.all(spectrum > 0)
-
-    def test_ayo_vs_leinert_mode(self):
-        """AYO and Leinert modes should give different results."""
-        wavelengths = jnp.array([500.0, 600.0, 700.0])
-
-        spectrum_ayo = create_zodi_spectrum(wavelengths, use_ayo_default=True)
-        spectrum_leinert = create_zodi_spectrum(
-            wavelengths,
-            use_ayo_default=False,
-            ecliptic_lat_deg=30.0,
-            solar_lon_deg=90.0,
-        )
-
-        # Values should differ (AYO uses fixed position)
-        assert not jnp.allclose(spectrum_ayo, spectrum_leinert)

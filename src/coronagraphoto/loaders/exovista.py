@@ -1,14 +1,9 @@
 """ExoVista data loader — delegates to exoverses.jax and wraps in SkyScene."""
 
-from typing import Optional, Sequence
+from collections.abc import Sequence
+from typing import Optional
 
 from exoverses.jax import from_exovista
-from exoverses.jax.loaders import (
-    _load_star as load_star_from_exovista,
-    _load_planets as load_planets_from_exovista,
-    _load_disk as load_disk_from_exovista,
-    get_earth_like_planet_indices,
-)
 
 from coronagraphoto.core.sky_scene import SkyScene
 from coronagraphoto.core.zodi_sources import ZodiSourceAYO

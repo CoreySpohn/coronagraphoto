@@ -1,1 +1,1 @@
-# Test package marker
+"""Test utilities for coronagraphoto."""

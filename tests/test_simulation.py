@@ -1,8 +1,5 @@
 """Tests for simulation functions in coronagraphoto.core.simulation."""
 
-import jax.numpy as jnp
-import pytest
-
 
 class TestSimulationFunctions:
     """Tests for high-level simulation functions.

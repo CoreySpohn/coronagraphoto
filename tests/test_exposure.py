@@ -1,7 +1,6 @@
 """Tests for Exposure parameters in coronagraphoto.core.exposure."""
 
 import jax.numpy as jnp
-import pytest
 
 from coronagraphoto.core.exposure import Exposure
 

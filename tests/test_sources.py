@@ -6,7 +6,6 @@ import pytest
 from coronagraphoto.core.sources import (
     AbstractSource,
     DiskSource,
-    PlanetSources,
     StarSource,
 )
 

@@ -5,7 +5,6 @@ import jax.numpy as jnp
 import pytest
 
 from coronagraphoto.optical_elements.detector import (
-    AbstractDetector,
     Detector,
     SimpleDetector,
     simulate_cic,

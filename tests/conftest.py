@@ -1,7 +1,6 @@
 """Shared pytest fixtures for coronagraphoto tests."""
 
 import jax
-import jax.numpy as jnp
 import pytest
 
 

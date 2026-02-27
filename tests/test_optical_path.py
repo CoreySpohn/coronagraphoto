@@ -1,7 +1,6 @@
 """Tests for OpticalPath in coronagraphoto.core.optical_path."""
 
 import jax.numpy as jnp
-import pytest
 
 from coronagraphoto.optical_elements.throughput_elements import (
     ConstantThroughputElement,
@@ -22,8 +21,7 @@ class TestOpticalPathAttenuation:
         elem2 = ConstantThroughputElement(0.8)
         elem3 = ConstantThroughputElement(0.95)
 
-        # Manual calculation
-        combined = 0.9 * 0.8 * 0.95
+        # Manual calculation: 0.9 * 0.8 * 0.95
         expected = 0.684
 
         # Verify the elements work correctly
