@@ -1,4 +1,5 @@
 {
+  "upload_type": "software",
   "creators": [
     {
       "orcid": "0000-0002-3138-0240",
@@ -7,5 +8,32 @@
     }
   ],
   "license": "MIT",
-  "title": "CoreySpohn/coronagraphoto: A Python package for simulating coronagraph images"
+  "title": "coronagraphoto",
+  "description": "coronagraphoto is an open-source Python library for simulating coronagraphic observations of exoplanetary systems. It bridges yield calculations and image generation for missions like the Habitable Worlds Observatory (HWO) by combining high-fidelity coronagraph models loaded via yippy with planetary system simulations from ExoVista. Built on JAX, coronagraphoto is fully JIT-compilable, differentiable, and GPU-accelerated for large-scale optimization and high-performance simulation.",
+  "keywords": [
+    "coronagraph",
+    "exoplanets",
+    "Habitable Worlds Observatory",
+    "direct imaging",
+    "image simulation",
+    "yield input package",
+    "JAX"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "10.5281/zenodo.20172435",
+      "relation": "requires",
+      "scheme": "doi"
+    },
+    {
+      "identifier": "10.5281/zenodo.20146086",
+      "relation": "references",
+      "scheme": "doi"
+    },
+    {
+      "identifier": "https://github.com/CoreySpohn/coronagraphoto",
+      "relation": "isSupplementTo",
+      "scheme": "url"
+    }
+  ]
 }
