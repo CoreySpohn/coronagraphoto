@@ -8,10 +8,10 @@ turns it into detector images via the ``sim_*`` and ``gen_*`` functions.
 from coronagraphoto.core import (
     Exposure,
     OpticalPath,
-    sim_background,
     sim_disk,
     sim_planets,
     sim_star,
+    sim_zodi,
 )
 from coronagraphoto.loaders import load_scene_from_exovista
 from coronagraphoto.optical_elements import (
@@ -25,8 +25,8 @@ __all__ = [
     "PrimaryAperture",
     "SimpleDetector",
     "load_scene_from_exovista",
-    "sim_background",
     "sim_disk",
     "sim_planets",
     "sim_star",
+    "sim_zodi",
 ]

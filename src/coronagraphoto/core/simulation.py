@@ -318,33 +318,29 @@ def sim_disk(
     return readout_electrons
 
 
-_BACKGROUND_NOT_IMPLEMENTED = (
-    "Background simulation is not yet implemented in coronagraphoto. The "
-    "single-AbstractBackground + Python-loop pattern (`sum(sim_background(...) "
-    "for bg in scene.backgrounds)`) is JAX-unfriendly: heterogeneous tuples "
-    "force per-element retracing inside JIT, and concrete background types "
-    "(zodi, exozodi, galaxy fields, dust clumps, transients) are likely to "
-    "diverge enough that a single generic kernel is the wrong abstraction. "
-    "Build the scene in skyscapes (`skyscapes.Scene` + "
-    "`skyscapes.background.*`); coronagraphoto's background-to-image plumbing "
-    "is pending design."
+_ZODI_NOT_IMPLEMENTED = (
+    "Zodi simulation is not yet implemented in coronagraphoto. The eventual "
+    "API will dispatch on the concrete zodi type (ZodiSourceAYO / "
+    "ZodiSourceLeinert / ZodiSourcePhotonFlux), keeping each kernel "
+    "monomorphic for JIT. Scene primitives live in skyscapes "
+    "(`skyscapes.Scene.zodi`, `skyscapes.background.*`); coronagraphoto's "
+    "zodi-to-image plumbing is pending design."
 )
 
 
-def gen_background_count_rate(*args, **kwargs):
-    """Pending: turn a skyscapes background into a per-pixel count-rate map.
+def gen_zodi_count_rate(*args, **kwargs):
+    """Pending: turn a skyscapes zodi source into a per-pixel count-rate map.
 
-    Not implemented. The right shape (single function vs typed dispatch vs
-    eqx.Module method on each background class) is being decided alongside
-    the broader background-source taxonomy.
+    Not implemented. The right shape (single function dispatching on type,
+    per-class method, or typed wrappers per zodi variant) is being decided
+    alongside the broader background-source taxonomy.
     """
-    raise NotImplementedError(_BACKGROUND_NOT_IMPLEMENTED)
+    raise NotImplementedError(_ZODI_NOT_IMPLEMENTED)
 
 
-def sim_background(*args, **kwargs):
-    """Pending: simulate a skyscapes background through the optical path.
+def sim_zodi(*args, **kwargs):
+    """Pending: simulate a skyscapes zodi source through the optical path.
 
-    Not implemented. See :func:`gen_background_count_rate` for the
-    rationale.
+    Not implemented. See :func:`gen_zodi_count_rate` for the rationale.
     """
-    raise NotImplementedError(_BACKGROUND_NOT_IMPLEMENTED)
+    raise NotImplementedError(_ZODI_NOT_IMPLEMENTED)

@@ -47,4 +47,4 @@ def load_scene_from_exovista(
         surface_brightness_mag=zodi_surface_brightness_mag,
     )
 
-    return Scene(system=system, backgrounds=(zodi,))
+    return Scene(system=system, zodi=zodi)

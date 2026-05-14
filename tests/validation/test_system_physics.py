@@ -25,9 +25,9 @@ from skyscapes.scene import SpectrumStar as StarSource
 
 from coronagraphoto.core.optical_path import OpticalPath
 from coronagraphoto.core.simulation import (
-    gen_background_count_rate,
     gen_planet_count_rate,
     gen_star_count_rate,
+    gen_zodi_count_rate,
     sim_star,
 )
 from coronagraphoto.optical_elements import (
@@ -207,7 +207,7 @@ class TestEndToEndRadiometry:
 
 @pytest.mark.skip(
     reason=(
-        "gen_background_count_rate is currently a NotImplementedError stub. "
+        "gen_zodi_count_rate is currently a NotImplementedError stub. "
         "The background-to-image API is being redesigned; re-enable once a "
         "JAX-friendly shape (typed dispatch or per-class method) is in place."
     )
@@ -223,7 +223,7 @@ class TestSurfaceBrightness:
         WAVELENGTH = 550.0
         WIDTH = 1.0
 
-        image_rate = gen_background_count_rate(
+        image_rate = gen_zodi_count_rate(
             start_time_jd=0.0,
             wavelength_nm=WAVELENGTH,
             bin_width_nm=WIDTH,
@@ -385,7 +385,7 @@ class TestPlanetFidelity:
 
 @pytest.mark.skip(
     reason=(
-        "test_sky_trans_modulates_zodi calls gen_background_count_rate which "
+        "test_sky_trans_modulates_zodi calls gen_zodi_count_rate which "
         "is currently a NotImplementedError stub. Re-enable once the "
         "background-to-image API is finalized."
     )
@@ -404,9 +404,7 @@ class TestMaskPhysics:
         WAVELENGTH = 550.0
         BIN_WIDTH = 50.0
 
-        full_img = gen_background_count_rate(
-            0.0, WAVELENGTH, BIN_WIDTH, zodi, perfect_system
-        )
+        full_img = gen_zodi_count_rate(0.0, WAVELENGTH, BIN_WIDTH, zodi, perfect_system)
 
         # Zero out a 5x5 patch in sky_trans
         masked_trans = perfect_system.coronagraph.sky_trans.at[48:53, 48:53].set(0.0)
@@ -417,9 +415,7 @@ class TestMaskPhysics:
         )
         masked_sys = eqx.tree_at(lambda s: s.coronagraph, perfect_system, masked_coro)
 
-        masked_img = gen_background_count_rate(
-            0.0, WAVELENGTH, BIN_WIDTH, zodi, masked_sys
-        )
+        masked_img = gen_zodi_count_rate(0.0, WAVELENGTH, BIN_WIDTH, zodi, masked_sys)
 
         # Total flux should decrease
         assert jnp.sum(masked_img) < jnp.sum(full_img)

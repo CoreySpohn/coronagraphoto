@@ -88,14 +88,14 @@ def sim_band(exposure, optical_path, scene, key):
     )
 
     # Use the sim_* methods to calculate incident electrons from each
-    # astrophysical source. Scene primitives (star, planets, disk,
-    # backgrounds) come from skyscapes.
+    # astrophysical source. Scene primitives (star, planets, disk, zodi,
+    # and future background fields) come from skyscapes.
     star_electrons = sim_star(*args, scene.star, optical_path, k1)
     planet_electrons = sim_planets(*args, exposure.position_angle_deg, scene.planets, optical_path, k2)
     disk_electrons = sim_disk(*args, exposure.position_angle_deg, scene.disk, optical_path, k3)
-    # Background sources (zodi, exozodi, galaxy field, ...) live on
-    # `scene.backgrounds`. The image-simulation API for backgrounds is
-    # currently being designed; today this snippet ignores them.
+    # Background fields (scene.zodi today, scene.galaxy_field / etc.
+    # later) get their own named simulators with type-specific kernels.
+    # That API is being designed; today this snippet ignores them.
 
     return star_electrons + planet_electrons + disk_electrons
 
