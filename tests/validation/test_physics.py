@@ -106,7 +106,7 @@ class TestLeinertZodiValidation:
 
     def test_ayo_22_mag_reference(self):
         """AYO defaults to 22 mag/arcsec² at V-band."""
-        from coronagraphoto.core.zodi_sources import ZodiSourceAYO
+        from skyscapes.background import ZodiSourceAYO
 
         wavelengths = jnp.array([500.0, 550.0, 600.0])
         zodi = ZodiSourceAYO(wavelengths_nm=wavelengths)
@@ -231,18 +231,18 @@ class TestOrbitalMechanics:
         from orbix.system.planets import Planets as OrbixPlanets
 
         planets = OrbixPlanets(
-            Ms=jnp.atleast_1d(const.Msun2kg),
-            dist=jnp.atleast_1d(10.0),
-            a=jnp.array([1.0]),
+            Ms_kg=jnp.atleast_1d(const.Msun2kg),
+            dist_pc=jnp.atleast_1d(10.0),
+            a_AU=jnp.array([1.0]),
             e=jnp.array([0.0]),
-            i=jnp.array([0.0]),
-            W=jnp.array([0.0]),
-            w=jnp.array([0.0]),
-            M0=jnp.array([0.0]),
-            t0=jnp.array([0.0]),
-            Mp=jnp.array([0.0]),
-            Rp=jnp.array([1.0]),
-            p=jnp.array([0.2]),
+            i_rad=jnp.array([0.0]),
+            W_rad=jnp.array([0.0]),
+            w_rad=jnp.array([0.0]),
+            M0_rad=jnp.array([0.0]),
+            t0_d=jnp.array([0.0]),
+            Mp_Mearth=jnp.array([0.0]),
+            Rp_Rearth=jnp.array([1.0]),
+            Ag=jnp.array([0.2]),
         )
         solver = get_grid_solver(level="scalar", E=False, trig=True, jit=True)
 
@@ -259,20 +259,20 @@ class TestOrbitalMechanics:
         from orbix.system.planets import Planets as OrbixPlanets
 
         planets = OrbixPlanets(
-            Ms=jnp.atleast_1d(const.Msun2kg),
-            dist=jnp.atleast_1d(10.0),
-            a=jnp.array([1.0, 4.0]),
+            Ms_kg=jnp.atleast_1d(const.Msun2kg),
+            dist_pc=jnp.atleast_1d(10.0),
+            a_AU=jnp.array([1.0, 4.0]),
             e=jnp.array([0.0, 0.0]),
-            i=jnp.array([0.0, 0.0]),
-            W=jnp.array([0.0, 0.0]),
-            w=jnp.array([0.0, 0.0]),
-            M0=jnp.array([0.0, 0.0]),
-            t0=jnp.array([0.0, 0.0]),
-            Mp=jnp.array([0.0, 0.0]),
-            Rp=jnp.array([1.0, 1.0]),
-            p=jnp.array([0.2, 0.2]),
+            i_rad=jnp.array([0.0, 0.0]),
+            W_rad=jnp.array([0.0, 0.0]),
+            w_rad=jnp.array([0.0, 0.0]),
+            M0_rad=jnp.array([0.0, 0.0]),
+            t0_d=jnp.array([0.0, 0.0]),
+            Mp_Mearth=jnp.array([0.0, 0.0]),
+            Rp_Rearth=jnp.array([1.0, 1.0]),
+            Ag=jnp.array([0.2, 0.2]),
         )
 
-        period_ratio = float(planets.n[0]) / float(planets.n[1])
+        period_ratio = float(planets.n_radpd[0]) / float(planets.n_radpd[1])
         expected = np.sqrt(4.0**3)
         assert jnp.isclose(period_ratio, expected, rtol=1e-4)

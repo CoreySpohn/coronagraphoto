@@ -12,25 +12,25 @@ class TestSimulationFunctions:
     def test_simulation_functions_exist(self):
         """Verify simulation functions are importable."""
         from coronagraphoto.core.simulation import (
+            gen_background_count_rate,
             gen_disk_count_rate,
             gen_planet_count_rate,
             gen_star_count_rate,
-            gen_zodi_count_rate,
+            sim_background,
             sim_disk,
             sim_planets,
             sim_star,
-            sim_zodi,
         )
 
         # Verify they're callable
         assert callable(gen_planet_count_rate)
         assert callable(gen_star_count_rate)
         assert callable(gen_disk_count_rate)
-        assert callable(gen_zodi_count_rate)
+        assert callable(gen_background_count_rate)
         assert callable(sim_planets)
         assert callable(sim_star)
         assert callable(sim_disk)
-        assert callable(sim_zodi)
+        assert callable(sim_background)
 
     def test_helper_functions_exist(self):
         """Verify helper functions are importable."""

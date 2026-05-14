@@ -1,32 +1,38 @@
-"""ExoVista data loader — delegates to exoverses.jax and wraps in SkyScene."""
+"""ExoVista data loader -- builds a ``skyscapes.Scene`` with a default zodi."""
 
 from collections.abc import Sequence
 
-from exoverses.jax import from_exovista
+import jax.numpy as jnp
+from skyscapes import Scene, from_exovista
+from skyscapes.background import ZodiSourceAYO
 
-from coronagraphoto.core.sky_scene import SkyScene
-from coronagraphoto.core.zodi_sources import ZodiSourceAYO
 
-
-def load_sky_scene_from_exovista(
+def load_scene_from_exovista(
     fits_file: str,
     planet_indices: Sequence[int] | None = None,
     required_planets: int | None = None,
     only_earths: bool = False,
-) -> SkyScene:
-    """Load complete sky scene from ExoVista FITS file.
+    zodi_surface_brightness_mag: float = 22.0,
+) -> Scene:
+    """Load a full :class:`skyscapes.Scene` from an ExoVista FITS file.
 
-    Delegates system loading to ``exoverses.jax.from_exovista()`` and
-    wraps the result in a :class:`SkyScene` with a default AYO zodi source.
+    Delegates system loading to :func:`skyscapes.from_exovista` and adds
+    a default :class:`~skyscapes.background.ZodiSourceAYO` background using
+    the host star's wavelength grid.
 
     Args:
         fits_file: Path to the ExoVista FITS file.
         planet_indices: Planet indices to load (0-based). ``None`` = all.
-        required_planets: Pad/truncate to this many planets for fixed shapes.
-        only_earths: If True and *planet_indices* is None, auto-filter Earths.
+        required_planets: Pad/truncate to this many planets for fixed
+            shapes.
+        only_earths: If True and ``planet_indices`` is None, auto-filter
+            Earths.
+        zodi_surface_brightness_mag: V-band surface brightness for the
+            default zodi background. Default 22.0 (AYO standard).
 
     Returns:
-        SkyScene object containing the system and zodiacal light source.
+        ``skyscapes.Scene`` with the loaded system and a default zodi
+        background.
     """
     system = from_exovista(
         fits_file,
@@ -35,10 +41,10 @@ def load_sky_scene_from_exovista(
         only_earths=only_earths,
     )
 
-    # Create ZodiSource with AYO-compatible default (22 mag/arcsec² at V)
+    wavelengths_nm = jnp.asarray(system.star._wavelengths_nm)
     zodi = ZodiSourceAYO(
-        wavelengths_nm=system.star._wavelengths_nm,
-        surface_brightness_mag=22.0,
+        wavelengths_nm=wavelengths_nm,
+        surface_brightness_mag=zodi_surface_brightness_mag,
     )
 
-    return SkyScene(system=system, zodi=zodi)
+    return Scene(system=system, backgrounds=(zodi,))

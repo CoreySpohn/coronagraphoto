@@ -66,20 +66,20 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from coronagraphoto import (
-    Exposure, OpticalPath, load_sky_scene_from_exovista,
+    Exposure, OpticalPath, load_scene_from_exovista,
     conversions
 )
 from coronagraphoto.optical_elements import (
     PrimaryAperture, SimpleDetector, ConstantThroughputElement, from_yippy
 )
-from coronagraphoto.core.simulation import sim_star, sim_planets, sim_disk, sim_zodi
+from coronagraphoto.core.simulation import sim_star, sim_planets, sim_disk
 from yippy import Coronagraph as YippyCoronagraph
 
 # 1. Define the Physics (Simulate all bands and sum)
 def sim_band(exposure, optical_path, scene, key):
     """Simulate a single wavelength band."""
     # Split keys for different sources
-    k1, k2, k3, k4 = jax.random.split(key, 4)
+    k1, k2, k3 = jax.random.split(key, 3)
 
     # Unpack scalar params for this band
     args = (
@@ -88,13 +88,16 @@ def sim_band(exposure, optical_path, scene, key):
     )
 
     # Use the sim_* methods to calculate incident electrons from each
-    # astrophysical source
-    star_electrons = sim_star(*args, scene.stars, optical_path, k1)
+    # astrophysical source. Scene primitives (star, planets, disk,
+    # backgrounds) come from skyscapes.
+    star_electrons = sim_star(*args, scene.star, optical_path, k1)
     planet_electrons = sim_planets(*args, exposure.position_angle_deg, scene.planets, optical_path, k2)
     disk_electrons = sim_disk(*args, exposure.position_angle_deg, scene.disk, optical_path, k3)
-    zodi_electrons = sim_zodi(*args, scene.zodi, optical_path, k4)
+    # Background sources (zodi, exozodi, galaxy field, ...) live on
+    # `scene.backgrounds`. The image-simulation API for backgrounds is
+    # currently being designed; today this snippet ignores them.
 
-    return star_electrons + planet_electrons + disk_electrons + zodi_electrons
+    return star_electrons + planet_electrons + disk_electrons
 
 def sim_exposure(exposure, optical_path, scene, prng_key):
     """Simulate a single exposure/readout of the detector."""
@@ -115,7 +118,8 @@ def sim_exposure(exposure, optical_path, scene, prng_key):
     return all_source_electrons + noise_electrons
 
 # 2. Load the Scene (ExoVista) and Coronagraph (yippy)
-scene = load_sky_scene_from_exovista("path/to/exovista_system.fits")
+# Returns a skyscapes.Scene with the planetary system + a default zodi background
+scene = load_scene_from_exovista("path/to/exovista_system.fits")
 yippy_coro = YippyCoronagraph("path/to/coronagraph_data")
 coronagraph = from_yippy(yippy_coro)
 
