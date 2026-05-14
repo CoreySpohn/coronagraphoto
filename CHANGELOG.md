@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.2](https://github.com/CoreySpohn/coronagraphoto/compare/v2.2.1...v2.2.2) (2026-05-14)
+
+
+### Bug Fixes
+
+* Updating zenodo citation details ([9b9b8bb](https://github.com/CoreySpohn/coronagraphoto/commit/9b9b8bbc0a67b6d3a9c5a4df7910ae2c8616abac))
+
 ## [2.2.1](https://github.com/CoreySpohn/coronagraphoto/compare/v2.2.0...v2.2.1) (2026-02-27)
 
 
