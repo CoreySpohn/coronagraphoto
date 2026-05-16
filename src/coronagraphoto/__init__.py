@@ -11,6 +11,7 @@ from coronagraphoto.core import (
     sim_disk,
     sim_planets,
     sim_star,
+    sim_system,
     sim_zodi,
 )
 from coronagraphoto.loaders import load_scene_from_exovista
@@ -28,5 +29,6 @@ __all__ = [
     "sim_disk",
     "sim_planets",
     "sim_star",
+    "sim_system",
     "sim_zodi",
 ]

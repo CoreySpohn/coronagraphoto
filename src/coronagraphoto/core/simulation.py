@@ -1,8 +1,10 @@
 """Functions for running full simulations and processing sources."""
 
+import jax
 import jax.numpy as jnp
 from hwoutils.conversions import arcsec_to_lambda_d, lambda_d_to_arcsec
 from hwoutils.transforms import ccw_rotation_matrix, resample_flux
+from skyscapes.background import ZodiSource
 
 
 def pre_coro_bin_processing(flux, bin_center_nm, bin_width_nm, optical_path):
@@ -40,43 +42,54 @@ def gen_planet_count_rate(
     start_time_jd,
     wavelength_nm,
     bin_width_nm,
-    position_angle_deg,
-    planets,
+    telescope_pa_deg,
+    planet,
     optical_path,
+    *,
+    star,
+    trig_solver,
 ):
-    """Generate the planet count rate on the detector."""
-    # The on-sky position is calculated in RA vs Dec, and strictly in arcsec
-    source_positions_as = planets.position(start_time_jd)
+    """Generate the per-batch planet count rate on the detector.
 
-    # A positive position angle corresponds to a CW rotation of the sky
-    rotation_matrix = ccw_rotation_matrix(-position_angle_deg)
+    Operates on a single ``skyscapes.scene.Planet`` (which internally
+    batches K planets sharing the same atmosphere class). The Python
+    loop over a heterogeneous ``System.planets`` tuple lives in
+    :func:`sim_system`; this function stays inside the per-Planet-type
+    JIT cache boundary (see ``brain/Planet Loop Architecture.md``).
+    """
+    # The new Planet API takes a 1-D time axis; squeeze T=1.
+    source_positions_as = planet.position_arcsec(
+        trig_solver, jnp.atleast_1d(start_time_jd), star=star
+    )[:, :, 0]  # (2, K)
+
+    # A positive telescope PA corresponds to a CW rotation of the sky.
+    rotation_matrix = ccw_rotation_matrix(-telescope_pa_deg)
     source_positions_as = rotation_matrix @ source_positions_as
 
-    # Convert the source position from arcseconds to lambda/D
+    # arcsec -> lambda/D.
     source_positions_lod = arcsec_to_lambda_d(
         source_positions_as, wavelength_nm, optical_path.primary.diameter_m
     )
 
-    # Get the source's spectral flux density at the bin center wavelength
-    # ph/s/m^2/nm
-    flux = planets.spec_flux_density(wavelength_nm, start_time_jd)
+    # Per-planet flux density. spec_flux_density returns (K, T); we pass T=1
+    # (single epoch) and drop the T axis to get (K,).
+    flux = planet.spec_flux_density(
+        trig_solver,
+        jnp.atleast_1d(wavelength_nm),
+        jnp.atleast_1d(start_time_jd),
+        star=star,
+    )[:, 0]  # (K,) -- drop T=1 axis
     flux = pre_coro_bin_processing(flux, wavelength_nm, bin_width_nm, optical_path)
 
-    # Create the PSFs for each source position
+    # Create the PSFs for each source position.
     psfs = optical_path.coronagraph.create_psfs(
         source_positions_lod[0], source_positions_lod[1]
     )
-    # Multiply flux by the coronagraph PSF and sum to get the image rate
-    # of all planets at once
-    # ph/s/pixel
+    # Multiply flux by the coronagraph PSF and sum over planets.
     image_rate_coro = jnp.einsum("i,ijk->jk", flux, psfs)
 
-    # Map to detector
-    image_rate_detector = post_coro_bin_processing(
-        image_rate_coro, wavelength_nm, optical_path
-    )
-
-    return image_rate_detector
+    # Map to detector.
+    return post_coro_bin_processing(image_rate_coro, wavelength_nm, optical_path)
 
 
 def sim_planets(
@@ -84,25 +97,28 @@ def sim_planets(
     exposure_time_s,
     wavelength_nm,
     bin_width_nm,
-    position_angle_deg,
-    planets,
+    telescope_pa_deg,
+    planet,
     optical_path,
     prng_key,
+    *,
+    star,
+    trig_solver,
 ):
-    """Process an off-axis source through the provided optical path."""
+    """Process a per-batch Planet through the optical path."""
     image_rate_detector = gen_planet_count_rate(
         start_time_jd,
         wavelength_nm,
         bin_width_nm,
-        position_angle_deg,
-        planets,
+        telescope_pa_deg,
+        planet,
         optical_path,
+        star=star,
+        trig_solver=trig_solver,
     )
-    # Readout the electrons from the detector
-    readout_electrons = optical_path.detector.readout_source_electrons(
+    return optical_path.detector.readout_source_electrons(
         image_rate_detector, exposure_time_s, prng_key
     )
-    return readout_electrons
 
 
 def gen_star_count_rate(
@@ -232,7 +248,7 @@ def gen_disk_count_rate(
     start_time_jd,
     wavelength_nm,
     bin_width_nm,
-    position_angle_deg,
+    telescope_pa_deg,
     disk,
     optical_path,
 ):
@@ -263,7 +279,7 @@ def gen_disk_count_rate(
         pixscale_src,
         pixscale_tgt,
         shape_tgt,
-        -position_angle_deg,
+        -telescope_pa_deg,
     )
 
     # Select convolution method based on PSF datacube shape
@@ -298,7 +314,7 @@ def sim_disk(
     exposure_time_s,
     wavelength_nm,
     bin_width_nm,
-    position_angle_deg,
+    telescope_pa_deg,
     disk,
     optical_path,
     prng_key,
@@ -308,7 +324,7 @@ def sim_disk(
         start_time_jd,
         wavelength_nm,
         bin_width_nm,
-        position_angle_deg,
+        telescope_pa_deg,
         disk,
         optical_path,
     )
@@ -318,29 +334,151 @@ def sim_disk(
     return readout_electrons
 
 
-_ZODI_NOT_IMPLEMENTED = (
-    "Zodi simulation is not yet implemented in coronagraphoto. The eventual "
-    "API will dispatch on the concrete zodi type (ZodiSourceAYO / "
-    "ZodiSourceLeinert / ZodiSourcePhotonFlux), keeping each kernel "
-    "monomorphic for JIT. Scene primitives live in skyscapes "
-    "(`skyscapes.Scene.zodi`, `skyscapes.background.*`); coronagraphoto's "
-    "zodi-to-image plumbing is pending design."
-)
+def gen_zodi_count_rate(
+    start_time_jd,
+    wavelength_nm,
+    bin_width_nm,
+    zodi: ZodiSource,
+    optical_path,
+    ecliptic_lat_deg: float = 0.0,
+    solar_lon_deg: float = 135.0,
+):
+    """Generate the zodi count rate on the detector.
 
-
-def gen_zodi_count_rate(*args, **kwargs):
-    """Pending: turn a skyscapes zodi source into a per-pixel count-rate map.
-
-    Not implemented. The right shape (single function dispatching on type,
-    per-class method, or typed wrappers per zodi variant) is being decided
-    alongside the broader background-source taxonomy.
+    Treats zodi as a spatially uniform surface-brightness source. The
+    coronagraph's sky transmission map sets the per-pixel attenuation;
+    no PSF convolution is needed (a flat field convolved with any
+    normalised PSF returns itself).
     """
-    raise NotImplementedError(_ZODI_NOT_IMPLEMENTED)
+    sb_per_arcsec2 = zodi.spec_flux_density(
+        wavelength_nm, start_time_jd, ecliptic_lat_deg, solar_lon_deg
+    )
+
+    pix_arcsec = lambda_d_to_arcsec(
+        optical_path.coronagraph.pixel_scale_lod,
+        wavelength_nm,
+        optical_path.primary.diameter_m,
+    )
+    pix_solid_angle_arcsec2 = pix_arcsec**2
+
+    flux_per_pixel = sb_per_arcsec2 * pix_solid_angle_arcsec2
+
+    sky_trans = optical_path.coronagraph.sky_trans()
+    flux_map = flux_per_pixel * sky_trans
+
+    flux_map = pre_coro_bin_processing(
+        flux_map, wavelength_nm, bin_width_nm, optical_path
+    )
+
+    image_rate_detector = post_coro_bin_processing(
+        flux_map, wavelength_nm, optical_path
+    )
+    return image_rate_detector
 
 
-def sim_zodi(*args, **kwargs):
-    """Pending: simulate a skyscapes zodi source through the optical path.
+def sim_zodi(
+    start_time_jd,
+    exposure_time_s,
+    wavelength_nm,
+    bin_width_nm,
+    zodi: ZodiSource,
+    optical_path,
+    prng_key,
+    ecliptic_lat_deg: float = 0.0,
+    solar_lon_deg: float = 135.0,
+):
+    """Process a zodi source through the provided optical path."""
+    image_rate_detector = gen_zodi_count_rate(
+        start_time_jd,
+        wavelength_nm,
+        bin_width_nm,
+        zodi,
+        optical_path,
+        ecliptic_lat_deg=ecliptic_lat_deg,
+        solar_lon_deg=solar_lon_deg,
+    )
+    readout_electrons = optical_path.detector.readout_source_electrons(
+        image_rate_detector, exposure_time_s, prng_key
+    )
+    return readout_electrons
 
-    Not implemented. See :func:`gen_zodi_count_rate` for the rationale.
+
+def sim_system(
+    scene,
+    optical_path,
+    start_time_jd,
+    exposure_time_s,
+    wavelength_nm,
+    bin_width_nm,
+    telescope_pa_deg,
+    prng_key,
+):
+    """Simulate a full :class:`~skyscapes.Scene` through the optical path.
+
+    Sums per-source detector readouts. Each source consumes its own
+    independent PRNG subkey (see :mod:`jax.random` best practices).
+
+    The Python loop over ``scene.system.planets`` is intentionally
+    unjitted -- it orchestrates JIT-cached per-Planet-type kernels (see
+    ``brain/Planet Loop Architecture.md``). The expensive math is inside
+    each ``sim_planets`` call, not the loop.
     """
-    raise NotImplementedError(_ZODI_NOT_IMPLEMENTED)
+    has_disk = scene.system.disk is not None
+    has_zodi = scene.zodi is not None
+
+    n_keys = 1 + len(scene.system.planets) + int(has_disk) + int(has_zodi)
+    keys = jax.random.split(prng_key, n_keys)
+    idx = 0
+
+    total = sim_star(
+        start_time_jd,
+        exposure_time_s,
+        wavelength_nm,
+        bin_width_nm,
+        scene.system.star,
+        optical_path,
+        keys[idx],
+    )
+    idx += 1
+
+    for planet in scene.system.planets:
+        total = total + sim_planets(
+            start_time_jd,
+            exposure_time_s,
+            wavelength_nm,
+            bin_width_nm,
+            telescope_pa_deg,
+            planet,
+            optical_path,
+            keys[idx],
+            star=scene.system.star,
+            trig_solver=scene.system.trig_solver,
+        )
+        idx += 1
+
+    if has_disk:
+        total = total + sim_disk(
+            start_time_jd,
+            exposure_time_s,
+            wavelength_nm,
+            bin_width_nm,
+            telescope_pa_deg,
+            scene.system.disk,
+            optical_path,
+            keys[idx],
+        )
+        idx += 1
+
+    if has_zodi:
+        total = total + sim_zodi(
+            start_time_jd,
+            exposure_time_s,
+            wavelength_nm,
+            bin_width_nm,
+            scene.zodi,
+            optical_path,
+            keys[idx],
+        )
+        idx += 1
+
+    return total

@@ -11,16 +11,13 @@ Test Tiers:
 """
 
 import equinox as eqx
-import interpax
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils import constants as const
 from hwoutils import conversions as conv
-from orbix.system.planets import Planets as OrbixPlanets
 from skyscapes.background import ZodiSourceAYO
-from skyscapes.scene import Planet as PlanetSources
 from skyscapes.scene import SpectrumStar as StarSource
 
 from coronagraphoto.core.optical_path import OpticalPath
@@ -56,7 +53,7 @@ class MockCoronagraph(eqx.Module):
     psf_shape: tuple[int, int]
     center_x: float
     center_y: float
-    sky_trans: jnp.ndarray
+    _sky_trans_data: jnp.ndarray
     psf_datacube: jnp.ndarray
 
     def __init__(self, size: int = 101, pixel_scale_lod: float = 0.5):
@@ -70,8 +67,12 @@ class MockCoronagraph(eqx.Module):
         self.center_x = (size - 1) / 2.0
         self.center_y = (size - 1) / 2.0
         self.pixel_scale_lod = pixel_scale_lod
-        self.sky_trans = jnp.ones((size, size))
+        self._sky_trans_data = jnp.ones((size, size))
         self.psf_datacube = None  # Not needed for point source tests
+
+    def sky_trans(self) -> jnp.ndarray:
+        """Return the sky transmission map (matches yippy.SkyTrans.__call__)."""
+        return self._sky_trans_data
 
     def create_psfs(self, x_lod: jnp.ndarray, y_lod: jnp.ndarray) -> jnp.ndarray:
         """Generate Gaussian PSFs at the specified lambda/D coordinates."""
@@ -205,13 +206,6 @@ class TestEndToEndRadiometry:
 # =============================================================================
 
 
-@pytest.mark.skip(
-    reason=(
-        "gen_zodi_count_rate is currently a NotImplementedError stub. "
-        "The background-to-image API is being redesigned; re-enable once a "
-        "JAX-friendly shape (typed dispatch or per-class method) is in place."
-    )
-)
 class TestSurfaceBrightness:
     """Verify extended source integration is correct."""
 
@@ -227,7 +221,7 @@ class TestSurfaceBrightness:
             start_time_jd=0.0,
             wavelength_nm=WAVELENGTH,
             bin_width_nm=WIDTH,
-            background=zodi,
+            zodi=zodi,
             optical_path=perfect_system,
         )
 
@@ -294,88 +288,104 @@ class TestDetectorNoiseIntegration:
 # =============================================================================
 
 
-@pytest.mark.skip(
-    reason=(
-        "PlanetSources API changed substantially with the skyscapes migration: "
-        "the new skyscapes.scene.Planet composes orbit + atmosphere rather than "
-        "taking (star, orbix_planet, contrast_interp). Rewrite needed against "
-        "the new Planet API."
-    )
-)
 class TestPlanetFidelity:
     """Verify planet positioning is correct across wavelengths."""
 
     @pytest.fixture
-    def planet_setup(self, standard_star):
-        """Create a planet at 5 AU (0.5 arcsec @ 10pc distance)."""
-        orbix_planets = OrbixPlanets(
-            Ms=jnp.atleast_1d(const.Msun2kg),
-            dist=jnp.atleast_1d(10.0),
-            a=jnp.array([5.0]),
+    def planet_setup(self):
+        """Build a scene.Planet at 5 AU (0.5 arcsec @ 10pc) with grey contrast."""
+        from orbix.kepler.shortcuts.grid import get_grid_solver
+        from orbix.system.orbit import KeplerianOrbit
+        from skyscapes.atmosphere import LambertianAtmosphere
+        from skyscapes.scene import Planet, SpectrumStar
+
+        star = SpectrumStar(
+            Ms_kg=const.Msun2kg,
+            dist_pc=10.0,
+            wavelengths_nm=jnp.array([400.0, 550.0, 700.0, 800.0]),
+            times_jd=jnp.array([0.0, 1.0]),
+            flux_density_jy=jnp.full((4, 2), 3631.0),
+            diameter_arcsec=0.0,
+        )
+        orbit = KeplerianOrbit(
+            a_AU=jnp.array([5.0]),
             e=jnp.array([0.0]),
-            i=jnp.array([0.0]),
-            W=jnp.array([0.0]),
-            w=jnp.array([0.0]),
-            M0=jnp.array([0.0]),
-            t0=jnp.array([0.0]),
-            Mp=jnp.array([1.0]),
-            Rp=jnp.array([1.0]),
-            p=jnp.array([0.3]),  # Geometric albedo
+            W_rad=jnp.array([0.0]),
+            i_rad=jnp.array([0.0]),
+            w_rad=jnp.array([0.0]),
+            M0_rad=jnp.array([0.0]),
+            t0_d=jnp.array([0.0]),
         )
-        # Flat contrast 1e-6 across wavelengths and times
-        # Interpolator3D needs at least 2 points per axis
-        contrast = interpax.Interpolator3D(
-            jnp.array([400.0, 800.0]),
-            jnp.array([0.0, 1.0]),  # Match star's times_jd
-            jnp.array([0.0, 90.0]),  # Phase angles
-            jnp.full((2, 2, 2), 1e-6),
+        # Grey atmosphere with Ag chosen so flux at M0=0 is non-trivial.
+        atmosphere = LambertianAtmosphere(
+            Rp_Rearth=jnp.array([1.0]),
+            Ag=jnp.array([0.3]),
         )
-        return PlanetSources(
-            star=standard_star,
-            orbix_planet=orbix_planets,
-            contrast_interp=contrast,
-        )
+        planet = Planet(orbit=orbit, atmosphere=atmosphere)
+        solver = get_grid_solver(level="scalar", E=False, trig=True, jit=True)
+        return planet, star, solver
 
     def test_planet_achromatic_position(self, perfect_system, planet_setup):
-        """CRITICAL: Verify planet stays at the same DETECTOR pixel vs wavelength.
+        """Planet stays at the same DETECTOR pixel across wavelengths.
 
-        Physics: Planet is at fixed arcsec separation (0.5").
-        - At 400nm, this is X lambda/D
-        - At 800nm, this is X/2 lambda/D
-        - The pipeline must scale coordinates inversely to keep planet at same pixel.
+        Physics: planet is at a fixed arcsec separation. The pipeline must
+        scale arcsec -> lambda/D correctly so the pixel location is
+        wavelength-invariant.
         """
-        # Blue (400nm)
+        planet, star, solver = planet_setup
+
         img_blue = gen_planet_count_rate(
-            0.0, 400.0, 50.0, 0.0, planet_setup, perfect_system
+            0.0,
+            400.0,
+            50.0,
+            0.0,
+            planet,
+            perfect_system,
+            star=star,
+            trig_solver=solver,
         )
         yb, xb = jnp.unravel_index(jnp.argmax(img_blue), img_blue.shape)
 
-        # Red (800nm)
         img_red = gen_planet_count_rate(
-            0.0, 800.0, 50.0, 0.0, planet_setup, perfect_system
+            0.0,
+            800.0,
+            50.0,
+            0.0,
+            planet,
+            perfect_system,
+            star=star,
+            trig_solver=solver,
         )
         yr, xr = jnp.unravel_index(jnp.argmax(img_red), img_red.shape)
 
         dist = jnp.sqrt((float(xb) - float(xr)) ** 2 + (float(yb) - float(yr)) ** 2)
         assert dist <= 1.5, (
-            f"Achromatic failure: Planet moved {dist:.2f} pixels "
+            f"Achromatic failure: planet moved {dist:.2f} pixels "
             f"(Blue@400nm: [{xb},{yb}]; Red@800nm: [{xr},{yr}])"
         )
 
     def test_planet_absolute_position(self, perfect_system, planet_setup):
-        """Verify 0.5 arcsec separation maps to the correct pixel offset.
+        """0.5 arcsec separation maps to the correct pixel offset.
 
-        At 0.05 arcsec/pixel, 0.5 arcsec = 10 pixels from center.
+        At 0.05 arcsec/pixel, 0.5 arcsec = 10 pixels from center (50, 50).
+        Planet at M0=0 lands at +X direction.
         """
-        img = gen_planet_count_rate(0.0, 550.0, 50.0, 0.0, planet_setup, perfect_system)
-        y, x = jnp.unravel_index(jnp.argmax(img), img.shape)
-
-        # Center is at (50, 50). Planet at M0=0 should be at +X direction
-        # Expected: x ≈ 60, y ≈ 50
-        assert abs(int(x) - 60) <= 2, (
-            f"Planet at wrong X position. Got x={x}, Expected ~60"
+        planet, star, solver = planet_setup
+        img = gen_planet_count_rate(
+            0.0,
+            550.0,
+            50.0,
+            0.0,
+            planet,
+            perfect_system,
+            star=star,
+            trig_solver=solver,
         )
-        assert abs(int(y) - 50) <= 2, f"Planet shifted in Y. Got y={y}, Expected ~50"
+        y, x = jnp.unravel_index(jnp.argmax(img), img.shape)
+        assert abs(int(x) - 60) <= 2, (
+            f"Planet at wrong X position. Got x={x}, expected ~60."
+        )
+        assert abs(int(y) - 50) <= 2, f"Planet shifted in Y. Got y={y}, expected ~50."
 
 
 # =============================================================================
@@ -383,13 +393,6 @@ class TestPlanetFidelity:
 # =============================================================================
 
 
-@pytest.mark.skip(
-    reason=(
-        "test_sky_trans_modulates_zodi calls gen_zodi_count_rate which "
-        "is currently a NotImplementedError stub. Re-enable once the "
-        "background-to-image API is finalized."
-    )
-)
 class TestMaskPhysics:
     """Verify coronagraphic masking works correctly."""
 
@@ -407,9 +410,11 @@ class TestMaskPhysics:
         full_img = gen_zodi_count_rate(0.0, WAVELENGTH, BIN_WIDTH, zodi, perfect_system)
 
         # Zero out a 5x5 patch in sky_trans
-        masked_trans = perfect_system.coronagraph.sky_trans.at[48:53, 48:53].set(0.0)
+        masked_trans = perfect_system.coronagraph._sky_trans_data.at[48:53, 48:53].set(
+            0.0
+        )
         masked_coro = eqx.tree_at(
-            lambda c: c.sky_trans,
+            lambda c: c._sky_trans_data,
             perfect_system.coronagraph,
             masked_trans,
         )
@@ -419,3 +424,83 @@ class TestMaskPhysics:
 
         # Total flux should decrease
         assert jnp.sum(masked_img) < jnp.sum(full_img)
+
+
+# =============================================================================
+# TIER 6: ZODI DISPATCH (regression guard for nominal-union design)
+# =============================================================================
+
+
+class TestZodiTypeAgnosticDispatch:
+    """Regression guard for nominal-union zodi dispatch.
+
+    ``gen_zodi_count_rate`` must accept any concrete ``ZodiSource`` and
+    route it through the same code path (no type-based branching).
+
+    AYO and PhotonFlux share an identical photon-flux model when
+    PhotonFlux is fed AYO's flux output, so their count-rate maps must
+    match to machine precision. Leinert uses an independent
+    position-and-wavelength model and is not expected to match
+    numerically; we only assert it produces a finite, positive,
+    same-shape map -- enough to prove dispatch works without making
+    a false physical-equivalence claim.
+    """
+
+    def test_gen_zodi_count_rate_is_zodi_type_agnostic(self, perfect_system):
+        """All three ZodiSource variants flow through gen_zodi_count_rate."""
+        from skyscapes.background import (
+            ZodiSourceLeinert,
+            ZodiSourcePhotonFlux,
+        )
+
+        WAVELENGTH = 550.0
+        BIN_WIDTH = 1.0
+        wavelengths = jnp.array([WAVELENGTH])
+        mag = 22.0
+
+        ayo = ZodiSourceAYO(wavelengths, surface_brightness_mag=mag)
+        phot = ZodiSourcePhotonFlux(
+            wavelengths,
+            jnp.array([ayo.spec_flux_density(WAVELENGTH, 0.0)]),
+            reference_mag_arcsec2=mag,
+        )
+        leinert = ZodiSourceLeinert(reference_mag_arcsec2=mag)
+
+        rate_ayo = gen_zodi_count_rate(
+            0.0,
+            WAVELENGTH,
+            BIN_WIDTH,
+            ayo,
+            perfect_system,
+            ecliptic_lat_deg=0.0,
+            solar_lon_deg=135.0,
+        )
+        rate_phot = gen_zodi_count_rate(
+            0.0,
+            WAVELENGTH,
+            BIN_WIDTH,
+            phot,
+            perfect_system,
+            ecliptic_lat_deg=0.0,
+            solar_lon_deg=135.0,
+        )
+        rate_leinert = gen_zodi_count_rate(
+            0.0,
+            WAVELENGTH,
+            BIN_WIDTH,
+            leinert,
+            perfect_system,
+            ecliptic_lat_deg=0.0,
+            solar_lon_deg=135.0,
+        )
+
+        assert rate_ayo.shape == rate_phot.shape == rate_leinert.shape
+
+        # AYO and PhotonFlux are constructed to share the same flux at
+        # WAVELENGTH; their per-pixel rates must match to machine precision.
+        assert jnp.allclose(rate_ayo, rate_phot, rtol=1e-6, atol=0)
+
+        # Leinert is a physically distinct model -- just assert it produces
+        # a finite, positive map of the same shape (proves dispatch works).
+        assert jnp.all(jnp.isfinite(rate_leinert))
+        assert jnp.sum(rate_leinert) > 0
