@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.3.0](https://github.com/CoreySpohn/coronagraphoto/compare/v2.2.2...v2.3.0) (2026-05-21)
+
+
+### Features
+
+* Add support for new skyscapes disks ([81c24dd](https://github.com/CoreySpohn/coronagraphoto/commit/81c24dd3889cbf663839dad52ee3a5232d58db90))
+* Update to match skyscapes API for loading exovista data ([5cdaf5f](https://github.com/CoreySpohn/coronagraphoto/commit/5cdaf5f91db136485fceac78ecdf0c58eec0971d))
+
 ## [2.2.2](https://github.com/CoreySpohn/coronagraphoto/compare/v2.2.1...v2.2.2) (2026-05-14)
 
 
