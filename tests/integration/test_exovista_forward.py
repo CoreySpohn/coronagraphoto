@@ -30,14 +30,14 @@ pytestmark = [pytest.mark.slow, pytest.mark.integration]
 
 
 class _PerfectCoronagraph(eqx.Module):
-    """Mock coronagraph: Gaussian PSF, full sky transmission, no PSF datacube."""
+    """Mock coronagraph: Gaussian PSF, full sky transmission, quarter-grid datacube."""
 
     pixel_scale_lod: float
     psf_shape: tuple[int, int]
     center_x: float
     center_y: float
     _sky_trans_data: jnp.ndarray
-    psf_datacube: object
+    psf_datacube: jnp.ndarray
 
     def __init__(self, size: int = 101, pixel_scale_lod: float = 0.5):
         self.psf_shape = (size, size)
@@ -45,7 +45,22 @@ class _PerfectCoronagraph(eqx.Module):
         self.center_y = (size - 1) / 2.0
         self.pixel_scale_lod = pixel_scale_lod
         self._sky_trans_data = jnp.ones((size, size))
-        self.psf_datacube = None
+
+        # Quarter-grid PSF datacube: one Gaussian PSF per source pixel in
+        # the quarter grid (lower-right quadrant including the center
+        # row + column). gen_disk_count_rate's quarter-grid branch
+        # (_convolve_quadrants) consumes this shape.
+        q_y = size // 2 + 1
+        q_x = size // 2 + 1
+
+        def _one_psf(src_y, src_x):
+            sigma = 1.5
+            yy, xx = jnp.mgrid[:size, :size]
+            g = jnp.exp(-((xx - src_x) ** 2 + (yy - src_y) ** 2) / (2 * sigma**2))
+            return g / jnp.sum(g)
+
+        src_y, src_x = jnp.mgrid[:q_y, :q_x]
+        self.psf_datacube = jax.vmap(jax.vmap(_one_psf))(src_y, src_x)
 
     def create_psfs(self, x_lod, y_lod):
         x_pix = self.center_x + (x_lod / self.pixel_scale_lod)
@@ -83,23 +98,14 @@ def perfect_system():
 
 
 def test_exovista_scene_simulates_end_to_end(perfect_system):
-    """Load ExoVista FITS, run sim_system, assert sensible output.
+    """Load ExoVista FITS, run sim_system on the full scene, assert sensible output.
 
-    The disk is stripped from the loaded scene before simulation. The
-    current ``gen_disk_count_rate`` calls ``disk.spec_flux_density(...)``
-    which the new ``skyscapes.disk.ExovistaDisk`` doesn't expose (it has
-    ``surface_brightness(...)`` returning contrast). Adapting the disk
-    path to the new ``AbstractDisk`` API is its own spec
-    (see ``brain/specs/2026-05-16-exovista-end-to-end-support-design.md``
-    "Out of scope"). This test exercises star + planets + zodi via
-    ``sim_system``; the disk path is covered by a separate future test.
+    Exercises star + planets + disk + zodi via ``sim_system``. The mock
+    coronagraph provides a quarter-grid Gaussian PSF datacube so the
+    disk simulation path can run.
     """
     fits_file = fetch_scene()
     scene = load_scene_from_exovista(fits_file, only_earths=True)
-
-    # Strip the disk: deferred until sim_disk is redesigned for the new
-    # AbstractDisk API.
-    scene = eqx.tree_at(lambda s: s.system.disk, scene, None)
 
     start_time_jd = float(scene.system.planets[0].orbit.t0_d[0])
     wavelength_nm = 550.0
@@ -178,4 +184,26 @@ def test_exovista_scene_simulates_end_to_end(perfect_system):
         f"{planet_offset_px:.2f} coro-px from predicted planet position "
         f"({predicted_coro_x:.2f}, {predicted_coro_y:.2f}) -- "
         "pipeline wiring may be off."
+    )
+
+    # Sanity: the disk contributes real flux. Re-run with the disk
+    # stripped and assert the disk-included image has strictly more
+    # total counts. Catches the failure mode where the disk path
+    # silently produces zero (e.g. unit-conversion bug, all-zero
+    # contrast).
+    scene_no_disk = eqx.tree_at(lambda s: s.system.disk, scene, None)
+    image_no_disk = sim_system(
+        scene=scene_no_disk,
+        optical_path=perfect_system,
+        start_time_jd=start_time_jd,
+        exposure_time_s=3600.0,
+        wavelength_nm=wavelength_nm,
+        bin_width_nm=50.0,
+        telescope_pa_deg=0.0,
+        prng_key=jax.random.PRNGKey(0),
+    )
+    assert float(jnp.sum(image)) > float(jnp.sum(image_no_disk)), (
+        "Image total counts should be strictly larger with the disk "
+        f"included; got disk-included={float(jnp.sum(image)):.3e}, "
+        f"disk-stripped={float(jnp.sum(image_no_disk)):.3e}."
     )

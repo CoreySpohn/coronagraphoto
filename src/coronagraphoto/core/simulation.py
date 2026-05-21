@@ -11,7 +11,7 @@ def pre_coro_bin_processing(flux, bin_center_nm, bin_width_nm, optical_path):
     """Process a bin through the pre-coro elements of the optical path."""
     # Multiply by the wavelength bin width
     # ph/s/m^2
-    flux *= bin_width_nm
+    flux = flux * bin_width_nm
 
     # Multiply by the primary aperture area
     # ph/s
@@ -20,7 +20,7 @@ def pre_coro_bin_processing(flux, bin_center_nm, bin_width_nm, optical_path):
     # Multiply by the combined attenuation of the optical path
     # ph/s
     path_attenuation = optical_path.calculate_combined_attenuation(bin_center_nm)
-    flux *= path_attenuation
+    flux = flux * path_attenuation
     return flux
 
 
@@ -251,62 +251,83 @@ def gen_disk_count_rate(
     telescope_pa_deg,
     disk,
     optical_path,
+    *,
+    star,
+    incl_deg,
+    pa_deg,
 ):
-    """Generate the disk count rate on the detector."""
-    # Get the source's spectral flux density at the bin center wavelength
-    # ph/s/m^2/nm
-    flux = disk.spec_flux_density(wavelength_nm, start_time_jd)
+    """Generate the disk count rate on the detector.
 
-    # This gets us to ph/s/pixel for the disk
+    Disks return CONTRAST (dimensionless flux ratio relative to the host
+    star); we multiply by ``star.spec_flux_density`` here to convert to
+    photon flux density per pixel before resampling and PSF convolution.
+
+    ``incl_deg`` / ``pa_deg`` are the disk's intrinsic orientation in the
+    sky frame; ``telescope_pa_deg`` is the telescope's roll. The disk is
+    rendered at its intrinsic geometry, then resample_flux rotates the
+    rendered image by ``-telescope_pa_deg`` into the detector frame.
+
+    Raises:
+        ValueError: if ``optical_path.coronagraph.psf_datacube`` is
+            ``None``. The disk pipeline convolves the resampled disk
+            image with the per-source-position PSFs and cannot run
+            without it.
+    """
+    if optical_path.coronagraph.psf_datacube is None:
+        raise ValueError(
+            "gen_disk_count_rate requires a coronagraph with a PSF "
+            "datacube; got optical_path.coronagraph.psf_datacube=None. "
+            "The disk pipeline convolves the resampled disk image with "
+            "the per-source-position PSFs and cannot run without it."
+        )
+
+    # ph/s/m^2/nm per pixel = contrast * star flux density.
+    # SpectrumStar.spec_flux_density returns a scalar when given scalar
+    # inputs (same call shape that gen_star_count_rate uses today).
+    contrast = disk.surface_brightness(wavelength_nm, start_time_jd, incl_deg, pa_deg)
+    star_flux = star.spec_flux_density(wavelength_nm, start_time_jd)
+    flux = contrast * star_flux
+
+    # ph/s/pixel after bandwidth + collecting area + optics attenuation.
     flux = pre_coro_bin_processing(flux, wavelength_nm, bin_width_nm, optical_path)
 
-    # Resample the disk image to the coronagraph pixel scale
-    # Get source pixel scale in arcsec
-    pixscale_src = disk.pixel_scale_arcsec
-    # Calculate target pixel scale in arcsec (coronagraph pixel scale is in lambda/D)
+    # Resample disk pixel scale -> coronagraph pixel scale; rotate by telescope PA.
     pixscale_tgt = lambda_d_to_arcsec(
         optical_path.coronagraph.pixel_scale_lod,
         wavelength_nm,
         optical_path.primary.diameter_m,
     )
-    # Get target shape from coronagraph PSF shape
     ny, nx = optical_path.coronagraph.psf_shape
-    shape_tgt = (ny, nx)
-
-    # Resample the flux while conserving total flux and rotating the disk
     flux = resample_flux(
         flux,
-        pixscale_src,
+        disk.pixel_scale_arcsec,
         pixscale_tgt,
-        shape_tgt,
+        (ny, nx),
         -telescope_pa_deg,
     )
 
-    # Select convolution method based on PSF datacube shape
+    # Existing convolution paths (full vs quarter PSF datacube).
     psf_datacube = optical_path.coronagraph.psf_datacube
-
-    # Dimensions of the PSF source grid
     n_src_y, n_src_x = psf_datacube.shape[:2]
-
-    # Expected dimensions for quarter-grid optimization
-    # (Assuming odd dimensions for full grid, quarter grid is (N-1)/2 + 1)
-    # e.g., Full=101 -> Quarter=51
     q_src_y = ny // 2 + 1
     q_src_x = nx // 2 + 1
-
     if n_src_y == ny and n_src_x == nx:
         # Full PSF datacube
-        # ph/s/pixel
         image_rate_coro = jnp.einsum("ij,ijxy->xy", flux, psf_datacube)
     elif n_src_y == q_src_y and n_src_x == q_src_x:
         # Quarter PSF datacube
         image_rate_coro = _convolve_quadrants(flux, psf_datacube)
+    else:
+        raise ValueError(
+            "gen_disk_count_rate: psf_datacube source-grid shape "
+            f"({n_src_y}, {n_src_x}) does not match either the full PSF "
+            f"shape ({ny}, {nx}) or the quarter PSF shape "
+            f"({q_src_y}, {q_src_x}). Coronagraphs must publish a full "
+            "or quarter datacube."
+        )
 
-    # Map to detector
-    image_rate_detector = post_coro_bin_processing(
-        image_rate_coro, wavelength_nm, optical_path
-    )
-    return image_rate_detector
+    # Map to detector.
+    return post_coro_bin_processing(image_rate_coro, wavelength_nm, optical_path)
 
 
 def sim_disk(
@@ -318,8 +339,18 @@ def sim_disk(
     disk,
     optical_path,
     prng_key,
+    *,
+    star,
+    incl_deg,
+    pa_deg,
 ):
-    """Process a disk through the provided optical path."""
+    """Process a disk through the provided optical path.
+
+    ``incl_deg`` / ``pa_deg`` are the disk's intrinsic sky-frame
+    orientation; ``sim_system`` pulls them from
+    ``scene.system.midplane_inc_deg`` / ``midplane_pa_deg`` so every
+    disk component in the System renders at the same midplane.
+    """
     image_rate_detector = gen_disk_count_rate(
         start_time_jd,
         wavelength_nm,
@@ -327,11 +358,13 @@ def sim_disk(
         telescope_pa_deg,
         disk,
         optical_path,
+        star=star,
+        incl_deg=incl_deg,
+        pa_deg=pa_deg,
     )
-    readout_electrons = optical_path.detector.readout_source_electrons(
+    return optical_path.detector.readout_source_electrons(
         image_rate_detector, exposure_time_s, prng_key
     )
-    return readout_electrons
 
 
 def gen_zodi_count_rate(
@@ -466,6 +499,9 @@ def sim_system(
             scene.system.disk,
             optical_path,
             keys[idx],
+            star=scene.system.star,
+            incl_deg=jnp.asarray(scene.system.midplane_inc_deg),
+            pa_deg=jnp.asarray(scene.system.midplane_pa_deg),
         )
         idx += 1
 

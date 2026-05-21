@@ -1,8 +1,9 @@
 """Data management utilities for coronagraphoto.
 
-This module provides utilities for fetching example data files for testing
-and documentation. It reuses the same pooch registry as coronalyze to avoid
-duplication.
+Fetches example data files for testing and documentation. The example
+coronagraph YIP is delegated to ``yippy.fetch_yip`` so there is exactly
+one canonical YIP hosting location across the workspace; example
+ExoVista scenes still come from the coronalyze raw data folder.
 
 Example:
     >>> from coronagraphoto.datasets import fetch_coronagraph, fetch_scene
@@ -12,9 +13,9 @@ Example:
 
 import pooch
 from pooch import Unzip
+from yippy import fetch_yip
 
 REGISTRY = {
-    "coronagraphs.zip": "md5:1537f41c20cb10170537a7d4e89f64b2",
     "scenes.zip": "md5:c777aefb65887249892093b1aba6d86a",
 }
 
@@ -26,18 +27,15 @@ PIKACHU = pooch.create(
 
 
 def fetch_coronagraph() -> str:
-    """Fetch and unpack example coronagraph data.
+    """Fetch and unpack the example coronagraph YIP.
 
-    Downloads the eac1_aavc_512 coronagraph (apodized vortex) for use
-    with yippy and coronagraphoto.
+    Delegates to ``yippy.fetch_yip("eac1_aavc_2d")`` so coronagraphoto
+    reuses yippy's canonical YIP cache instead of duplicating hosting.
 
     Returns:
         Path to the coronagraph directory.
     """
-    PIKACHU.fetch("coronagraphs.zip", processor=Unzip())
-    return str(
-        PIKACHU.abspath / "coronagraphs.zip.unzip" / "coronagraphs" / "eac1_aavc_512"
-    )
+    return fetch_yip("eac1_aavc_2d")
 
 
 def fetch_scene() -> str:

@@ -387,6 +387,82 @@ class TestPlanetFidelity:
         )
         assert abs(int(y) - 50) <= 2, f"Planet shifted in Y. Got y={y}, expected ~50."
 
+    def test_planet_count_rate_vmap_over_time(self, perfect_system):
+        """Multi-time API is just ``jax.vmap`` over ``start_time_jd``.
+
+        ``gen_planet_count_rate`` is single-time, but the function is
+        pure JAX with no time-dependent control flow, so
+        vmapping over ``start_time_jd`` returns a stack of per-epoch images
+        with the orbit propagated independently at each time. Catches any
+        future regression that would break this trace-time vectorisation
+        (e.g. a Python branch on a traced time value).
+
+        Uses a local ``SimpleStar`` instead of the ``planet_setup``
+        fixture's ``SpectrumStar`` because the fixture's flux interpolant
+        is built over ``times_jd=[0, 1]`` and extrapolates to NaN at the
+        times we sweep here.
+        """
+        from orbix.kepler.shortcuts.grid import get_grid_solver
+        from orbix.system.orbit import KeplerianOrbit
+        from skyscapes.atmosphere import LambertianAtmosphere
+        from skyscapes.scene import Planet, SimpleStar
+
+        star = SimpleStar(
+            Ms_kg=const.Msun2kg,
+            dist_pc=10.0,
+            flux_phot_per_nm_m2=1e9,
+        )
+        orbit = KeplerianOrbit(
+            a_AU=jnp.array([5.0]),
+            e=jnp.array([0.0]),
+            W_rad=jnp.array([0.0]),
+            i_rad=jnp.array([0.0]),
+            w_rad=jnp.array([0.0]),
+            M0_rad=jnp.array([0.0]),
+            t0_d=jnp.array([0.0]),
+        )
+        atmosphere = LambertianAtmosphere(
+            Rp_Rearth=jnp.array([1.0]),
+            Ag=jnp.array([0.3]),
+        )
+        planet = Planet(orbit=orbit, atmosphere=atmosphere)
+        solver = get_grid_solver(level="scalar", E=False, trig=True, jit=True)
+
+        # Pick four times across roughly half an orbit. With a=5 AU around
+        # a 1 Msun star, P ~ 11.18 yr ~ 4083 d, so 1500 d spans ~37% of an
+        # orbit -- enough that the planet pixel position varies.
+        times = jnp.array([0.0, 500.0, 1000.0, 1500.0])
+
+        def at_time(t):
+            return gen_planet_count_rate(
+                t,
+                550.0,
+                50.0,
+                0.0,
+                planet,
+                perfect_system,
+                star=star,
+                trig_solver=solver,
+            )
+
+        images = jax.vmap(at_time)(times)
+
+        # Shape: (T, det_ny, det_nx).
+        assert images.shape == (len(times), *perfect_system.detector.shape)
+        # All time slices finite and contain real flux.
+        assert bool(jnp.all(jnp.isfinite(images)))
+        assert bool(jnp.all(images.sum(axis=(1, 2)) > 0))
+
+        # The brightest pixel should move between time slices, since the
+        # planet is orbiting. If two consecutive epochs landed on the same
+        # pixel something is wrong with the time threading.
+        peaks = jnp.argmax(images.reshape(len(times), -1), axis=1)
+        unique_peaks = len(set(int(p) for p in peaks))
+        assert unique_peaks >= 2, (
+            f"Planet pixel did not move across 4 epochs spanning ~1500 d "
+            f"of a ~4080 d orbit; all peaks at {peaks.tolist()}."
+        )
+
 
 # =============================================================================
 # TIER 5: MASK PHYSICS
@@ -504,3 +580,66 @@ class TestZodiTypeAgnosticDispatch:
         # a finite, positive map of the same shape (proves dispatch works).
         assert jnp.all(jnp.isfinite(rate_leinert))
         assert jnp.sum(rate_leinert) > 0
+
+
+# =============================================================================
+# TIER 7: DISK PIPELINE GUARDS
+# =============================================================================
+
+
+class TestDiskPipelineGuards:
+    """Loud-fail guards on the disk simulation path."""
+
+    def test_gen_disk_count_rate_raises_on_missing_psf_datacube(self):
+        """A coronagraph without a PSF datacube must fail loudly, not silently."""
+        from skyscapes.disk import ExovistaDisk
+        from skyscapes.scene import SpectrumStar
+
+        from coronagraphoto.core.simulation import gen_disk_count_rate
+
+        class _CoroNoDatacube(eqx.Module):
+            pixel_scale_lod: float = 0.5
+            psf_shape: tuple = (51, 51)
+            psf_datacube: object = None
+
+            def sky_trans(self):
+                return jnp.ones(self.psf_shape)
+
+        primary = PrimaryAperture(diameter_m=2.0, obscuration_factor=0.0)
+        optics = ConstantThroughputElement(throughput=1.0)
+        detector = SimpleDetector(
+            pixel_scale=0.05,
+            shape=(51, 51),
+            quantum_efficiency=1.0,
+            dark_current_rate=0.0,
+        )
+        coro = _CoroNoDatacube()
+        path = OpticalPath(primary, (optics,), coro, detector)
+
+        wl = jnp.linspace(400.0, 700.0, 5)
+        disk = ExovistaDisk(
+            pixel_scale_arcsec=0.05,
+            wavelengths_nm=wl,
+            contrast_cube=jnp.full((wl.size, 51, 51), 1e-9),
+        )
+        star = SpectrumStar(
+            Ms_kg=const.Msun2kg,
+            dist_pc=10.0,
+            wavelengths_nm=jnp.array([400.0, 550.0, 700.0]),
+            times_jd=jnp.array([0.0, 1.0]),
+            flux_density_jy=jnp.full((3, 2), 3631.0),
+            diameter_arcsec=0.0,
+        )
+
+        with pytest.raises(ValueError, match="psf_datacube"):
+            gen_disk_count_rate(
+                start_time_jd=0.0,
+                wavelength_nm=550.0,
+                bin_width_nm=50.0,
+                telescope_pa_deg=0.0,
+                disk=disk,
+                optical_path=path,
+                star=star,
+                incl_deg=0.0,
+                pa_deg=0.0,
+            )

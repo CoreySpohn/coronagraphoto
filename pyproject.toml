@@ -61,3 +61,9 @@ select = ["B", "D", "E", "F", "I", "UP", "RUF"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: tests that take longer than a few seconds (deselect with -m 'not slow')",
+    "integration: end-to-end tests against real fixtures (deselect with -m 'not integration')",
+]
