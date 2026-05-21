@@ -7,6 +7,7 @@ A JAX-accelerated coronagraphic observation simulator for HWO mission planning.
 :caption: Documentation
 
 functional_approach
+simulating_zodi_with_telescope_orbit
 ```
 
 ```{toctree}
