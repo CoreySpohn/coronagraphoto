@@ -6,7 +6,6 @@ turns it into detector images via the ``sim_*`` and ``gen_*`` functions.
 """
 
 from coronagraphoto.core import (
-    Exposure,
     OpticalPath,
     sim_disk,
     sim_planets,
@@ -21,7 +20,6 @@ from coronagraphoto.optical_elements import (
 )
 
 __all__ = [
-    "Exposure",
     "OpticalPath",
     "PrimaryAperture",
     "SimpleDetector",
