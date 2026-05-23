@@ -19,13 +19,12 @@ import pytest
 from skyscapes.datasets import fetch_scene
 from yippy import EqxCoronagraph
 
-from coronagraphoto import load_scene_from_exovista, sim_system
-from coronagraphoto.core.optical_path import OpticalPath
+from coronagraphoto import OpticalPath, load_scene_from_exovista, sim_system
 from coronagraphoto.datasets import fetch_coronagraph
 from coronagraphoto.optical_elements import (
     ConstantThroughputElement,
-    PrimaryAperture,
     SimpleDetector,
+    SimplePrimary,
 )
 
 pytestmark = [pytest.mark.slow, pytest.mark.integration]
@@ -48,7 +47,7 @@ def real_optical_path():
     coro = EqxCoronagraph(yip_path, ensure_psf_datacube=False)
 
     ny, nx = coro.psf_shape
-    primary = PrimaryAperture(diameter_m=8.0, obscuration_factor=0.0)
+    primary = SimplePrimary(diameter_m=8.0)
     optics = ConstantThroughputElement(throughput=1.0)
     detector = SimpleDetector(
         pixel_scale=0.05,

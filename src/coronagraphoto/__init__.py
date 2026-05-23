@@ -15,14 +15,14 @@ from coronagraphoto.core import (
 )
 from coronagraphoto.loaders import load_scene_from_exovista
 from coronagraphoto.optical_elements import (
-    PrimaryAperture,
     SimpleDetector,
+    SimplePrimary,
 )
 
 __all__ = [
     "OpticalPath",
-    "PrimaryAperture",
     "SimpleDetector",
+    "SimplePrimary",
     "load_scene_from_exovista",
     "sim_disk",
     "sim_planets",

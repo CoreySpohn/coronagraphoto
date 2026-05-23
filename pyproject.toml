@@ -24,6 +24,7 @@ dependencies = [
   "jax",
   "lod_unit",
   "numpy",
+  "optixstuff",
   "orbix",
   "yippy",
   "skyscapes",

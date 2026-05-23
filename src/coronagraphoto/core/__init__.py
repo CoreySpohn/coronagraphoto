@@ -1,6 +1,7 @@
 """Core classes and functions for coronagraphoto."""
 
-from coronagraphoto.core.optical_path import OpticalPath
+from optixstuff import OpticalPath
+
 from coronagraphoto.core.simulation import (
     sim_disk,
     sim_planets,

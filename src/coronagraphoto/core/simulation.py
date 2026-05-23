@@ -25,21 +25,40 @@ from skyscapes.background import ZodiSource
 
 def pre_coro_bin_processing(flux, bin_center_nm, bin_width_nm, optical_path):
     """Process a bin through the pre-coro elements of the optical path."""
-    # ph/s/m^2
+    # ph/s/m^2/nm -> ph/s/m^2
     flux = flux * bin_width_nm
     # ph/s
-    flux = optical_path.primary.apply(flux, bin_center_nm)
-    path_attenuation = optical_path.calculate_combined_attenuation(bin_center_nm)
-    return flux * path_attenuation
+    flux = flux * optical_path.primary.area_m2
+    # apply combined attenuation of mirrors / filters / etc.
+    return flux * optical_path.system_throughput(bin_center_nm)
+
+
+def _resample_to_detector(image_rate_coro, bin_center_nm, optical_path):
+    """Resample a coronagraph-plane image onto the detector pixel grid.
+
+    Pipeline geometry, not detector hardware: needs the coronagraph's
+    plate scale (lambda/D / px), the detector's plate scale (arcsec/px),
+    the wavelength, and the primary diameter to convert lambda/D to
+    arcsec.
+    """
+    inc_pixel_scale_arcsec = lambda_d_to_arcsec(
+        optical_path.coronagraph.pixel_scale_lod,
+        bin_center_nm,
+        optical_path.primary.diameter_m,
+    )
+    return resample_flux(
+        image_rate_coro,
+        inc_pixel_scale_arcsec,
+        optical_path.detector.pixel_scale,
+        optical_path.detector.shape,
+        0.0,  # rotation is applied source-side, not detector-side
+    )
 
 
 def post_coro_bin_processing(image_rate_coro, bin_center_nm, optical_path):
     """Process a bin through the post-coro elements of the optical path."""
-    image_rate_detector = optical_path.detector.resample_to_detector(
-        image_rate_coro,
-        optical_path.coronagraph.pixel_scale_lod,
-        bin_center_nm,
-        optical_path.primary.diameter_m,
+    image_rate_detector = _resample_to_detector(
+        image_rate_coro, bin_center_nm, optical_path
     )
     return jnp.clip(image_rate_detector, 0, None)
 

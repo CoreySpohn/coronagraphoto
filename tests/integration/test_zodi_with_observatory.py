@@ -24,12 +24,12 @@ import pytest
 from orbix.observatory import ObservatoryL2Halo
 from skyscapes.background import ZodiSourceLeinert
 
-from coronagraphoto.core.optical_path import OpticalPath
+from coronagraphoto import OpticalPath
 from coronagraphoto.core.simulation import gen_zodi_count_rate
 from coronagraphoto.optical_elements import (
     ConstantThroughputElement,
-    PrimaryAperture,
     SimpleDetector,
+    SimplePrimary,
 )
 
 
@@ -59,7 +59,7 @@ class _PerfectCoronagraph(eqx.Module):
 @pytest.fixture(scope="module")
 def optical_path():
     """8 m primary + perfect optics + mock coronagraph + flat detector."""
-    primary = PrimaryAperture(diameter_m=8.0, obscuration_factor=0.0)
+    primary = SimplePrimary(diameter_m=8.0)
     optics = ConstantThroughputElement(throughput=1.0)
     detector = SimpleDetector(
         pixel_scale=0.05,

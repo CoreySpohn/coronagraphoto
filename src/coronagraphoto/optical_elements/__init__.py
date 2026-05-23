@@ -1,23 +1,39 @@
-"""Optical elements for coronagraphoto."""
+"""Re-exports of hardware abstractions from :mod:`optixstuff`.
 
-from coronagraphoto.optical_elements.detector import (
+Detector, primary, throughput, and filter classes live in optixstuff so
+both coronagraphoto (image simulation) and jaxedith (ETC) share one set
+of hardware models. This module is a thin compatibility shim -- prefer
+importing directly from ``optixstuff`` in new code.
+"""
+
+from optixstuff import (
     AbstractDetector,
-    Detector,
-    SimpleDetector,
-)
-from coronagraphoto.optical_elements.optical_filters import OpticalFilter
-from coronagraphoto.optical_elements.primary import PrimaryAperture
-from coronagraphoto.optical_elements.throughput_elements import (
+    AbstractOpticalElement,
+    AbstractPrimary,
     ConstantThroughputElement,
+    Detector,
     LinearThroughputElement,
+    OpticalFilter,
+    SimpleDetector,
+    SimplePrimary,
+)
+from optixstuff.detector import (
+    simulate_cic,
+    simulate_dark_current,
+    simulate_read_noise,
 )
 
 __all__ = [
     "AbstractDetector",
+    "AbstractOpticalElement",
+    "AbstractPrimary",
     "ConstantThroughputElement",
     "Detector",
     "LinearThroughputElement",
     "OpticalFilter",
-    "PrimaryAperture",
     "SimpleDetector",
+    "SimplePrimary",
+    "simulate_cic",
+    "simulate_dark_current",
+    "simulate_read_noise",
 ]

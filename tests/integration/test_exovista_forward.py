@@ -18,12 +18,11 @@ import pytest
 from hwoutils.conversions import arcsec_to_lambda_d
 from skyscapes.datasets import fetch_scene
 
-from coronagraphoto import load_scene_from_exovista, sim_system
-from coronagraphoto.core.optical_path import OpticalPath
+from coronagraphoto import OpticalPath, load_scene_from_exovista, sim_system
 from coronagraphoto.optical_elements import (
     ConstantThroughputElement,
-    PrimaryAperture,
     SimpleDetector,
+    SimplePrimary,
 )
 
 pytestmark = [pytest.mark.slow, pytest.mark.integration]
@@ -82,7 +81,7 @@ class _PerfectCoronagraph(eqx.Module):
 @pytest.fixture(scope="module")
 def perfect_system():
     """Perfect 8 m primary + transparent optics + mock coronagraph + flat detector."""
-    primary = PrimaryAperture(diameter_m=8.0, obscuration_factor=0.0)
+    primary = SimplePrimary(diameter_m=8.0)
     optics = ConstantThroughputElement(throughput=1.0)
     detector = SimpleDetector(
         pixel_scale=0.05,

@@ -20,7 +20,7 @@ from hwoutils import conversions as conv
 from skyscapes.background import ZodiSourceAYO
 from skyscapes.scene import SpectrumStar as StarSource
 
-from coronagraphoto.core.optical_path import OpticalPath
+from coronagraphoto import OpticalPath
 from coronagraphoto.core.simulation import (
     gen_planet_count_rate,
     gen_star_count_rate,
@@ -29,8 +29,8 @@ from coronagraphoto.core.simulation import (
 )
 from coronagraphoto.optical_elements import (
     ConstantThroughputElement,
-    PrimaryAperture,
     SimpleDetector,
+    SimplePrimary,
 )
 
 # =============================================================================
@@ -93,7 +93,7 @@ class MockCoronagraph(eqx.Module):
 @pytest.fixture
 def perfect_system():
     """Create an OpticalPath with 100% throughput and a transparent coronagraph."""
-    primary = PrimaryAperture(diameter_m=2.0, obscuration_factor=0.0)
+    primary = SimplePrimary(diameter_m=2.0)
     optics = ConstantThroughputElement(throughput=1.0)
     detector = SimpleDetector(
         pixel_scale=0.05,
@@ -159,7 +159,7 @@ class TestEndToEndRadiometry:
     def test_throughput_attenuation(self, standard_star):
         """Verify that throughput elements correctly reduce flux."""
         # Create system with 50% throughput
-        primary = PrimaryAperture(diameter_m=2.0, obscuration_factor=0.0)
+        primary = SimplePrimary(diameter_m=2.0)
         optics = ConstantThroughputElement(throughput=0.5)
         detector = SimpleDetector(
             pixel_scale=0.05, shape=(101, 101), quantum_efficiency=1.0
@@ -170,7 +170,7 @@ class TestEndToEndRadiometry:
         # Perfect system
         perfect_optics = ConstantThroughputElement(throughput=1.0)
         perfect_system = OpticalPath(
-            PrimaryAperture(2.0, 0.0),
+            SimplePrimary(2.0),
             (perfect_optics,),
             MockCoronagraph(size=101, pixel_scale_lod=0.5),
             SimpleDetector(pixel_scale=0.05, shape=(101, 101), quantum_efficiency=1.0),
@@ -599,7 +599,7 @@ class TestDiskPipelineGuards:
                 default_factory=lambda: jnp.ones((51, 51))
             )
 
-        primary = PrimaryAperture(diameter_m=2.0, obscuration_factor=0.0)
+        primary = SimplePrimary(diameter_m=2.0)
         optics = ConstantThroughputElement(throughput=1.0)
         detector = SimpleDetector(
             pixel_scale=0.05,

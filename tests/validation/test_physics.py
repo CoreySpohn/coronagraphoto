@@ -27,12 +27,16 @@ class TestRadiometricPhotonBucket:
     def test_aperture_area_calculation(self):
         """Verify primary aperture area calculation with obscuration.
 
-        Physics: A = pi*(D/2)**2 * (1 - obscuration)
+        Physics: A = pi*(D/2)**2 * (1 - obscuration**2)
+        (optixstuff.SimplePrimary subtracts the obscured-disk area, so
+        the input is a linear obscuration fraction, squared internally.)
         """
-        from coronagraphoto.optical_elements import PrimaryAperture
+        from coronagraphoto.optical_elements import SimplePrimary
 
-        aperture = PrimaryAperture(diameter_m=6.0, obscuration_factor=0.2)
-        expected_area = np.pi * 3.0**2 * (1 - 0.2)
+        # Linear obscuration b such that 1 - b^2 = 0.8 -> b = sqrt(0.2).
+        b = float(np.sqrt(0.2))
+        aperture = SimplePrimary(diameter_m=6.0, obscuration=b)
+        expected_area = np.pi * 3.0**2 * (1 - b**2)
         assert jnp.isclose(aperture.area_m2, expected_area, rtol=1e-6)
 
     def test_throughput_chain_multiplication(self):
@@ -124,7 +128,7 @@ class TestDetectorStatistics:
 
     def test_dark_current_poisson_statistics(self):
         """Dark current must follow Poisson statistics: Variance ≈ Mean."""
-        from coronagraphoto.optical_elements.detector import simulate_dark_current
+        from coronagraphoto.optical_elements import simulate_dark_current
 
         key = jax.random.PRNGKey(42)
         image = simulate_dark_current(100.0, 1.0, (1000, 1000), key)
@@ -137,7 +141,7 @@ class TestDetectorStatistics:
 
     def test_read_noise_scaling(self):
         """Read noise sigma must scale with sqrt(N_frames)."""
-        from coronagraphoto.optical_elements.detector import simulate_read_noise
+        from coronagraphoto.optical_elements import simulate_read_noise
 
         key1, key2 = jax.random.PRNGKey(42), jax.random.PRNGKey(43)
         SHAPE = (1000, 1000)
