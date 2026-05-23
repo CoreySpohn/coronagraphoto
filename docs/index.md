@@ -6,7 +6,6 @@ A JAX-accelerated coronagraphic observation simulator for HWO mission planning.
 :maxdepth: 2
 :caption: Documentation
 
-functional_approach
 simulating_zodi_with_telescope_orbit
 ```
 
@@ -33,9 +32,31 @@ autoapi/coronagraphoto/index
 pip install coronagraphoto
 ```
 
-## Quick Start
+## Quick start
+
+See the [README](https://github.com/CoreySpohn/coronagraphoto#quick-start) for a full end-to-end example. In short:
 
 ```python
-from coronagraphoto import ...
-# See examples/ for usage
+import jax
+from coronagraphoto import (
+    OpticalPath, PrimaryAperture, SimpleDetector,
+    load_scene_from_exovista, sim_system,
+)
+from coronagraphoto.optical_elements import ConstantThroughputElement
+from yippy import EqxCoronagraph
+
+scene = load_scene_from_exovista("path/to/exovista_system.fits")
+optical_path = OpticalPath(
+    primary=PrimaryAperture(diameter_m=6.0),
+    attenuating_elements=(ConstantThroughputElement(throughput=0.9),),
+    coronagraph=EqxCoronagraph("path/to/coronagraph_data"),
+    detector=SimpleDetector(pixel_scale=0.01, shape=(512, 512)),
+)
+image = sim_system(
+    scene, optical_path, jax.random.PRNGKey(0),
+    start_time_jd=2_460_000.0, exposure_time_s=3600.0,
+    wavelength_nm=550.0, bin_width_nm=50.0,
+    telescope_pa_deg=0.0,
+    ecliptic_lat_deg=0.0, solar_lon_deg=135.0,
+)
 ```
