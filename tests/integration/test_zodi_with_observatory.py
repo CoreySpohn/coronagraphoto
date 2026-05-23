@@ -43,21 +43,17 @@ class _PerfectCoronagraph(eqx.Module):
 
     pixel_scale_lod: float
     psf_shape: tuple[int, int]
-    _sky_trans_data: jnp.ndarray
+    sky_trans: jnp.ndarray
 
     def __init__(self, size: int = 65, pixel_scale_lod: float = 0.5):
         self.psf_shape = (size, size)
         self.pixel_scale_lod = pixel_scale_lod
-        self._sky_trans_data = jnp.ones((size, size))
+        self.sky_trans = jnp.ones((size, size))
 
     @property
     def psf_datacube(self):
         """Unused by ``gen_zodi_count_rate`` but required by the protocol."""
         return None
-
-    def sky_trans(self):
-        """Uniform transmission everywhere."""
-        return self._sky_trans_data
 
 
 @pytest.fixture(scope="module")
@@ -107,11 +103,11 @@ def _integrated_year(
         ecl_lat = float(obs.ecliptic_latitude_deg(float(mjd), ra_rad, dec_rad))
         helio_lon = float(obs.helio_ecliptic_longitude_deg(float(mjd), ra_rad, dec_rad))
         rate = gen_zodi_count_rate(
-            float(mjd),
-            wavelength_nm,
-            bin_width_nm,
             zodi,
             optical_path,
+            start_time_jd=float(mjd),
+            wavelength_nm=wavelength_nm,
+            bin_width_nm=bin_width_nm,
             ecliptic_lat_deg=ecl_lat,
             solar_lon_deg=helio_lon,
         )

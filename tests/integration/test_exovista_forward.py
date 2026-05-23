@@ -36,7 +36,7 @@ class _PerfectCoronagraph(eqx.Module):
     psf_shape: tuple[int, int]
     center_x: float
     center_y: float
-    _sky_trans_data: jnp.ndarray
+    sky_trans: jnp.ndarray
     psf_datacube: jnp.ndarray
 
     def __init__(self, size: int = 101, pixel_scale_lod: float = 0.5):
@@ -44,7 +44,7 @@ class _PerfectCoronagraph(eqx.Module):
         self.center_x = (size - 1) / 2.0
         self.center_y = (size - 1) / 2.0
         self.pixel_scale_lod = pixel_scale_lod
-        self._sky_trans_data = jnp.ones((size, size))
+        self.sky_trans = jnp.ones((size, size))
 
         # Quarter-grid PSF datacube: one Gaussian PSF per source pixel in
         # the quarter grid (lower-right quadrant including the center
@@ -78,9 +78,6 @@ class _PerfectCoronagraph(eqx.Module):
     def stellar_intens(self, diam_lod):
         return self.create_psfs(jnp.array([0.0]), jnp.array([0.0]))[0]
 
-    def sky_trans(self):
-        return self._sky_trans_data
-
 
 @pytest.fixture(scope="module")
 def perfect_system():
@@ -110,14 +107,16 @@ def test_exovista_scene_simulates_end_to_end(perfect_system):
     start_time_jd = float(scene.system.planets[0].orbit.t0_d[0])
     wavelength_nm = 550.0
     image = sim_system(
-        scene=scene,
-        optical_path=perfect_system,
+        scene,
+        perfect_system,
+        jax.random.PRNGKey(0),
         start_time_jd=start_time_jd,
         exposure_time_s=3600.0,
         wavelength_nm=wavelength_nm,
         bin_width_nm=50.0,
         telescope_pa_deg=0.0,
-        prng_key=jax.random.PRNGKey(0),
+        ecliptic_lat_deg=0.0,
+        solar_lon_deg=135.0,
     )
 
     # Shape and finiteness.
@@ -193,14 +192,16 @@ def test_exovista_scene_simulates_end_to_end(perfect_system):
     # contrast).
     scene_no_disk = eqx.tree_at(lambda s: s.system.disk, scene, None)
     image_no_disk = sim_system(
-        scene=scene_no_disk,
-        optical_path=perfect_system,
+        scene_no_disk,
+        perfect_system,
+        jax.random.PRNGKey(0),
         start_time_jd=start_time_jd,
         exposure_time_s=3600.0,
         wavelength_nm=wavelength_nm,
         bin_width_nm=50.0,
         telescope_pa_deg=0.0,
-        prng_key=jax.random.PRNGKey(0),
+        ecliptic_lat_deg=0.0,
+        solar_lon_deg=135.0,
     )
     assert float(jnp.sum(image)) > float(jnp.sum(image_no_disk)), (
         "Image total counts should be strictly larger with the disk "

@@ -53,7 +53,7 @@ class MockCoronagraph(eqx.Module):
     psf_shape: tuple[int, int]
     center_x: float
     center_y: float
-    _sky_trans_data: jnp.ndarray
+    sky_trans: jnp.ndarray
     psf_datacube: jnp.ndarray
 
     def __init__(self, size: int = 101, pixel_scale_lod: float = 0.5):
@@ -67,12 +67,8 @@ class MockCoronagraph(eqx.Module):
         self.center_x = (size - 1) / 2.0
         self.center_y = (size - 1) / 2.0
         self.pixel_scale_lod = pixel_scale_lod
-        self._sky_trans_data = jnp.ones((size, size))
+        self.sky_trans = jnp.ones((size, size))
         self.psf_datacube = None  # Not needed for point source tests
-
-    def sky_trans(self) -> jnp.ndarray:
-        """Return the sky transmission map (matches yippy.SkyTrans.__call__)."""
-        return self._sky_trans_data
 
     def create_psfs(self, x_lod: jnp.ndarray, y_lod: jnp.ndarray) -> jnp.ndarray:
         """Generate Gaussian PSFs at the specified lambda/D coordinates."""
@@ -140,11 +136,11 @@ class TestEndToEndRadiometry:
         TIME_JD = 0.5
 
         image_rate = gen_star_count_rate(
+            standard_star,
+            perfect_system,
             start_time_jd=TIME_JD,
             wavelength_nm=WAVELENGTH,
             bin_width_nm=BANDWIDTH,
-            star=standard_star,
-            optical_path=perfect_system,
         )
 
         total_simulated_rate = jnp.sum(image_rate)
@@ -186,12 +182,20 @@ class TestEndToEndRadiometry:
 
         rate_lossy = jnp.sum(
             gen_star_count_rate(
-                TIME_JD, WAVELENGTH, BANDWIDTH, standard_star, lossy_system
+                standard_star,
+                lossy_system,
+                start_time_jd=TIME_JD,
+                wavelength_nm=WAVELENGTH,
+                bin_width_nm=BANDWIDTH,
             )
         )
         rate_perfect = jnp.sum(
             gen_star_count_rate(
-                TIME_JD, WAVELENGTH, BANDWIDTH, standard_star, perfect_system
+                standard_star,
+                perfect_system,
+                start_time_jd=TIME_JD,
+                wavelength_nm=WAVELENGTH,
+                bin_width_nm=BANDWIDTH,
             )
         )
 
@@ -218,11 +222,13 @@ class TestSurfaceBrightness:
         WIDTH = 1.0
 
         image_rate = gen_zodi_count_rate(
+            zodi,
+            perfect_system,
             start_time_jd=0.0,
             wavelength_nm=WAVELENGTH,
             bin_width_nm=WIDTH,
-            zodi=zodi,
-            optical_path=perfect_system,
+            ecliptic_lat_deg=0.0,
+            solar_lon_deg=135.0,
         )
 
         # Analytic prediction
@@ -260,13 +266,13 @@ class TestDetectorNoiseIntegration:
         exposure_time = 1.0
 
         img = sim_star(
+            standard_star,
+            perfect_system,
+            key,
             start_time_jd=0.5,
             exposure_time_s=exposure_time,
             wavelength_nm=550.0,
             bin_width_nm=50.0,
-            star=standard_star,
-            optical_path=perfect_system,
-            prng_key=key,
         )
 
         total_counts = jnp.sum(img)
@@ -335,24 +341,24 @@ class TestPlanetFidelity:
         planet, star, solver = planet_setup
 
         img_blue = gen_planet_count_rate(
-            0.0,
-            400.0,
-            50.0,
-            0.0,
             planet,
             perfect_system,
+            start_time_jd=0.0,
+            wavelength_nm=400.0,
+            bin_width_nm=50.0,
+            telescope_pa_deg=0.0,
             star=star,
             trig_solver=solver,
         )
         yb, xb = jnp.unravel_index(jnp.argmax(img_blue), img_blue.shape)
 
         img_red = gen_planet_count_rate(
-            0.0,
-            800.0,
-            50.0,
-            0.0,
             planet,
             perfect_system,
+            start_time_jd=0.0,
+            wavelength_nm=800.0,
+            bin_width_nm=50.0,
+            telescope_pa_deg=0.0,
             star=star,
             trig_solver=solver,
         )
@@ -372,12 +378,12 @@ class TestPlanetFidelity:
         """
         planet, star, solver = planet_setup
         img = gen_planet_count_rate(
-            0.0,
-            550.0,
-            50.0,
-            0.0,
             planet,
             perfect_system,
+            start_time_jd=0.0,
+            wavelength_nm=550.0,
+            bin_width_nm=50.0,
+            telescope_pa_deg=0.0,
             star=star,
             trig_solver=solver,
         )
@@ -435,12 +441,12 @@ class TestPlanetFidelity:
 
         def at_time(t):
             return gen_planet_count_rate(
-                t,
-                550.0,
-                50.0,
-                0.0,
                 planet,
                 perfect_system,
+                start_time_jd=t,
+                wavelength_nm=550.0,
+                bin_width_nm=50.0,
+                telescope_pa_deg=0.0,
                 star=star,
                 trig_solver=solver,
             )
@@ -483,20 +489,25 @@ class TestMaskPhysics:
         WAVELENGTH = 550.0
         BIN_WIDTH = 50.0
 
-        full_img = gen_zodi_count_rate(0.0, WAVELENGTH, BIN_WIDTH, zodi, perfect_system)
+        zodi_kwargs = dict(
+            start_time_jd=0.0,
+            wavelength_nm=WAVELENGTH,
+            bin_width_nm=BIN_WIDTH,
+            ecliptic_lat_deg=0.0,
+            solar_lon_deg=135.0,
+        )
+        full_img = gen_zodi_count_rate(zodi, perfect_system, **zodi_kwargs)
 
         # Zero out a 5x5 patch in sky_trans
-        masked_trans = perfect_system.coronagraph._sky_trans_data.at[48:53, 48:53].set(
-            0.0
-        )
+        masked_trans = perfect_system.coronagraph.sky_trans.at[48:53, 48:53].set(0.0)
         masked_coro = eqx.tree_at(
-            lambda c: c._sky_trans_data,
+            lambda c: c.sky_trans,
             perfect_system.coronagraph,
             masked_trans,
         )
         masked_sys = eqx.tree_at(lambda s: s.coronagraph, perfect_system, masked_coro)
 
-        masked_img = gen_zodi_count_rate(0.0, WAVELENGTH, BIN_WIDTH, zodi, masked_sys)
+        masked_img = gen_zodi_count_rate(zodi, masked_sys, **zodi_kwargs)
 
         # Total flux should decrease
         assert jnp.sum(masked_img) < jnp.sum(full_img)
@@ -542,33 +553,16 @@ class TestZodiTypeAgnosticDispatch:
         )
         leinert = ZodiSourceLeinert(reference_mag_arcsec2=mag)
 
-        rate_ayo = gen_zodi_count_rate(
-            0.0,
-            WAVELENGTH,
-            BIN_WIDTH,
-            ayo,
-            perfect_system,
+        zodi_kwargs = dict(
+            start_time_jd=0.0,
+            wavelength_nm=WAVELENGTH,
+            bin_width_nm=BIN_WIDTH,
             ecliptic_lat_deg=0.0,
             solar_lon_deg=135.0,
         )
-        rate_phot = gen_zodi_count_rate(
-            0.0,
-            WAVELENGTH,
-            BIN_WIDTH,
-            phot,
-            perfect_system,
-            ecliptic_lat_deg=0.0,
-            solar_lon_deg=135.0,
-        )
-        rate_leinert = gen_zodi_count_rate(
-            0.0,
-            WAVELENGTH,
-            BIN_WIDTH,
-            leinert,
-            perfect_system,
-            ecliptic_lat_deg=0.0,
-            solar_lon_deg=135.0,
-        )
+        rate_ayo = gen_zodi_count_rate(ayo, perfect_system, **zodi_kwargs)
+        rate_phot = gen_zodi_count_rate(phot, perfect_system, **zodi_kwargs)
+        rate_leinert = gen_zodi_count_rate(leinert, perfect_system, **zodi_kwargs)
 
         assert rate_ayo.shape == rate_phot.shape == rate_leinert.shape
 
@@ -601,9 +595,9 @@ class TestDiskPipelineGuards:
             pixel_scale_lod: float = 0.5
             psf_shape: tuple = (51, 51)
             psf_datacube: object = None
-
-            def sky_trans(self):
-                return jnp.ones(self.psf_shape)
+            sky_trans: jnp.ndarray = eqx.field(
+                default_factory=lambda: jnp.ones((51, 51))
+            )
 
         primary = PrimaryAperture(diameter_m=2.0, obscuration_factor=0.0)
         optics = ConstantThroughputElement(throughput=1.0)
@@ -633,12 +627,12 @@ class TestDiskPipelineGuards:
 
         with pytest.raises(ValueError, match="psf_datacube"):
             gen_disk_count_rate(
+                disk,
+                path,
                 start_time_jd=0.0,
                 wavelength_nm=550.0,
                 bin_width_nm=50.0,
                 telescope_pa_deg=0.0,
-                disk=disk,
-                optical_path=path,
                 star=star,
                 incl_deg=0.0,
                 pa_deg=0.0,
