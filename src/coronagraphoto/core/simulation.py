@@ -146,9 +146,12 @@ def gen_planet_count_rate(
         source_positions_as, wavelength_nm, optical_path.primary.diameter_m
     )
 
+    # ``wavelength_nm`` stays scalar -- the underlying atmosphere reflectivity
+    # code expects a scalar and broadcasts internally. ``start_time_jd`` is
+    # promoted to (1,) because the orbit propagator needs a T axis.
     flux = planet.spec_flux_density(
         trig_solver,
-        jnp.atleast_1d(wavelength_nm),
+        wavelength_nm,
         jnp.atleast_1d(start_time_jd),
         star=star,
     )[:, 0]  # (K,) -- drop T=1 axis

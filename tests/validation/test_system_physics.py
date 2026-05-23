@@ -331,6 +331,67 @@ class TestPlanetFidelity:
         solver = get_grid_solver(level="scalar", E=False, trig=True, jit=True)
         return planet, star, solver
 
+    def test_planet_runs_with_wavelength_dependent_atmosphere(self, perfect_system):
+        """Regression: ``gen_planet_count_rate`` must accept scalar wavelength.
+
+        Catches a latent bug where ``wavelength_nm`` was promoted to ``(1,)``
+        before being handed to the atmosphere; wavelength-dependent
+        atmospheres (e.g., :class:`PrecomputedReflectivity`) then produced
+        an extra axis and the downstream einsum failed. The Lambertian
+        path didn't catch it because :class:`LambertianAtmosphere` ignores
+        wavelength entirely.
+        """
+        from orbix.kepler.shortcuts.grid import get_grid_solver
+        from orbix.system.orbit import KeplerianOrbit
+        from skyscapes.atmosphere import GridAtmosphere
+        from skyscapes.scene import Planet, SpectrumStar
+
+        star = SpectrumStar(
+            Ms_kg=const.Msun2kg,
+            dist_pc=10.0,
+            wavelengths_nm=jnp.array([400.0, 550.0, 700.0]),
+            times_jd=jnp.array([0.0, 1.0]),
+            flux_density_jy=jnp.full((3, 2), 3631.0),
+            diameter_arcsec=0.0,
+        )
+        orbit = KeplerianOrbit(
+            a_AU=jnp.array([5.0]),
+            e=jnp.array([0.0]),
+            W_rad=jnp.array([0.0]),
+            i_rad=jnp.array([0.0]),
+            w_rad=jnp.array([0.0]),
+            M0_rad=jnp.array([0.0]),
+            t0_d=jnp.array([0.0]),
+        )
+        # GridAtmosphere is wavelength-dependent (interpolates per planet
+        # across wavelengths and phase angles); shape-broken atmospheres
+        # would crash here even though Lambertian-based tests pass.
+        wls = jnp.linspace(400.0, 700.0, 5)
+        phase_deg = jnp.linspace(0.0, 180.0, 7)
+        contrast_grid = jnp.full((1, wls.size, phase_deg.size), 1e-9)
+        atmosphere = GridAtmosphere(
+            Rp_Rearth=jnp.array([1.0]),
+            wavelengths_nm=wls,
+            phase_angle_deg=phase_deg,
+            contrast_grid=contrast_grid,
+        )
+        planet = Planet(orbit=orbit, atmosphere=atmosphere)
+        solver = get_grid_solver(level="scalar", E=False, trig=True, jit=True)
+
+        img = gen_planet_count_rate(
+            planet,
+            perfect_system,
+            start_time_jd=0.0,
+            wavelength_nm=550.0,
+            bin_width_nm=50.0,
+            telescope_pa_deg=0.0,
+            star=star,
+            trig_solver=solver,
+        )
+        assert img.shape == perfect_system.detector.shape
+        assert bool(jnp.all(jnp.isfinite(img)))
+        assert float(jnp.sum(img)) > 0
+
     def test_planet_achromatic_position(self, perfect_system, planet_setup):
         """Planet stays at the same DETECTOR pixel across wavelengths.
 
