@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.1](https://github.com/CoreySpohn/coronagraphoto/compare/v2.3.0...v2.3.1) (2026-05-24)
+
+
+### Bug Fixes
+
+* **coronagraphoto:** Pass scalar wavelength to atmosphere in gen_planet_count_rate ([6edcb5f](https://github.com/CoreySpohn/coronagraphoto/commit/6edcb5f12601b392469819e39db57e4d3fb9423b))
+
 ## [2.3.0](https://github.com/CoreySpohn/coronagraphoto/compare/v2.2.2...v2.3.0) (2026-05-21)
 
 
