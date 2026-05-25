@@ -1,5 +1,25 @@
 # Changelog
 
+## [3.0.0](https://github.com/CoreySpohn/coronagraphoto/compare/v2.3.1...v3.0.0) (2026-05-25)
+
+
+### ⚠ BREAKING CHANGES
+
+* Update docs and match the optixstuff api changes
+* SimpleDetector re-export -> IdealDetector (mirrors optixstuff v1.0); ConstantThroughputElement -> ConstantThroughput; ZodiSource -> Zodi and ZodiSource*/SpectrumStar/SimpleStar consumer renames track skyscapes v1.0. Public coronagraphoto API surface is unchanged in name; only the re-exported symbols from sibling libraries follow their renames.
+* gen_*_count_rate renamed to *_rate; sim_* renamed to *_readout; coronagraphoto.core and coronagraphoto.core.simulation paths removed (use top-level coronagraphoto or coronagraphoto.simulation); new system_rate added as differentiable counterpart to system_readout
+
+### Features
+
+* flatten subpackages and unify simulation API as *_rate/*_readout ([494c266](https://github.com/CoreySpohn/coronagraphoto/commit/494c266fc5f62ab61775f200526fc6282945512f))
+* follow skyscapes/optixstuff renames in re-exports and call sites ([ed143c7](https://github.com/CoreySpohn/coronagraphoto/commit/ed143c7a21ead23b4383fdca8ab3f26dcfd729fb))
+* Update docs and match the optixstuff api changes ([d12ed23](https://github.com/CoreySpohn/coronagraphoto/commit/d12ed2311725229e2211329b4e06342d30967ed9))
+
+
+### Bug Fixes
+
+* Add mermaid rendering to docs ([98bcb7e](https://github.com/CoreySpohn/coronagraphoto/commit/98bcb7e9973ce09e0fa12b5c75c5c734529f55a4))
+
 ## [2.3.1](https://github.com/CoreySpohn/coronagraphoto/compare/v2.3.0...v2.3.1) (2026-05-24)
 
 
