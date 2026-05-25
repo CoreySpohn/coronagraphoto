@@ -66,7 +66,7 @@ optical_path = OpticalPath(
     primary=PrimaryAperture(diameter_m=6.0),
     attenuating_elements=(ConstantThroughput(throughput=0.9),),
     coronagraph=coronagraph,
-    detector=IdealDetector(pixel_scale=0.01, shape=(512, 512)),
+    detector=IdealDetector(pixel_scale_arcsec=0.01, shape=(512, 512)),
 )
 
 # 3. Simulate one detector readout.

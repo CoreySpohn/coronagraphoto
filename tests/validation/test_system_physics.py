@@ -17,15 +17,15 @@ import numpy as np
 import pytest
 from hwoutils import constants as const
 from hwoutils import conversions as conv
+from optixstuff import (
+    ConstantThroughput,
+    IdealDetector,
+    OpticalPath,
+    SimplePrimary,
+)
 from skyscapes.background import AYOZodi
 from skyscapes.scene import Star as StarSource
 
-from coronagraphoto import OpticalPath
-from coronagraphoto.optical_elements import (
-    ConstantThroughput,
-    IdealDetector,
-    SimplePrimary,
-)
 from coronagraphoto.simulation import (
     planet_rate,
     star_rate,
@@ -96,10 +96,10 @@ def perfect_system():
     primary = SimplePrimary(diameter_m=2.0)
     optics = ConstantThroughput(throughput=1.0)
     detector = IdealDetector(
-        pixel_scale=0.05,
+        pixel_scale_arcsec=0.05,
         shape=(101, 101),
         quantum_efficiency=1.0,
-        dark_current_rate=0.0,
+        dark_current_rate_e_per_s=0.0,
     )
     coro = MockCoronagraph(size=101, pixel_scale_lod=0.5)
     return OpticalPath(primary, (optics,), coro, detector)
@@ -162,7 +162,7 @@ class TestEndToEndRadiometry:
         primary = SimplePrimary(diameter_m=2.0)
         optics = ConstantThroughput(throughput=0.5)
         detector = IdealDetector(
-            pixel_scale=0.05, shape=(101, 101), quantum_efficiency=1.0
+            pixel_scale_arcsec=0.05, shape=(101, 101), quantum_efficiency=1.0
         )
         coro = MockCoronagraph(size=101, pixel_scale_lod=0.5)
         lossy_system = OpticalPath(primary, (optics,), coro, detector)
@@ -173,7 +173,9 @@ class TestEndToEndRadiometry:
             SimplePrimary(2.0),
             (perfect_optics,),
             MockCoronagraph(size=101, pixel_scale_lod=0.5),
-            IdealDetector(pixel_scale=0.05, shape=(101, 101), quantum_efficiency=1.0),
+            IdealDetector(
+                pixel_scale_arcsec=0.05, shape=(101, 101), quantum_efficiency=1.0
+            ),
         )
 
         WAVELENGTH = 550.0
@@ -263,14 +265,14 @@ class TestDetectorNoiseIntegration:
     def test_full_chain_signal_consistency(self, perfect_system, standard_star):
         """Run star_readout and verify output is consistent with expectations."""
         key = jax.random.PRNGKey(42)
-        exposure_time = 1.0
+        exposure_time_s = 1.0
 
         img = star_readout(
             standard_star,
             perfect_system,
             key,
             start_time_jd=0.5,
-            exposure_time_s=exposure_time,
+            exposure_time_s=exposure_time_s,
             wavelength_nm=550.0,
             bin_width_nm=50.0,
         )
@@ -280,7 +282,7 @@ class TestDetectorNoiseIntegration:
         flux_density = standard_star.spec_flux_density(550.0, 0.5)
         area = np.pi * (perfect_system.primary.diameter_m / 2) ** 2
         expected_rate = flux_density * area * 50.0
-        expected_counts = expected_rate * exposure_time
+        expected_counts = expected_rate * exposure_time_s
 
         # 10% tolerance for resampling edge losses
         assert jnp.isclose(total_counts, expected_counts, rtol=0.1), (
@@ -302,7 +304,7 @@ class TestPlanetFidelity:
         """Build a scene.Planet at 5 AU (0.5 arcsec @ 10pc) with grey contrast."""
         from orbix.kepler.shortcuts.grid import get_grid_solver
         from orbix.system.orbit import KeplerianOrbit
-        from skyscapes.atmosphere import LambertianAtmosphere
+        from skyscapes.physical_model import LambertianPhysicalModel
         from skyscapes.scene import Planet, Star
 
         star = Star(
@@ -322,28 +324,30 @@ class TestPlanetFidelity:
             M0_rad=jnp.array([0.0]),
             t0_d=jnp.array([0.0]),
         )
-        # Grey atmosphere with Ag chosen so flux at M0=0 is non-trivial.
-        atmosphere = LambertianAtmosphere(
+        # Grey physical model with Ag chosen so flux at M0=0 is non-trivial.
+        physical_model = LambertianPhysicalModel(Ag=jnp.array([0.3]))
+        planet = Planet(
             Rp_Rearth=jnp.array([1.0]),
-            Ag=jnp.array([0.3]),
+            Mp_Mearth=jnp.array([1.0]),
+            orbit=orbit,
+            physical_model=physical_model,
         )
-        planet = Planet(orbit=orbit, atmosphere=atmosphere)
         solver = get_grid_solver(level="scalar", E=False, trig=True, jit=True)
         return planet, star, solver
 
-    def test_planet_runs_with_wavelength_dependent_atmosphere(self, perfect_system):
+    def test_planet_runs_with_wavelength_dependent_physical_model(self, perfect_system):
         """Regression: ``planet_rate`` must accept scalar wavelength.
 
         Catches a latent bug where ``wavelength_nm`` was promoted to ``(1,)``
-        before being handed to the atmosphere; wavelength-dependent
-        atmospheres (e.g., :class:`PrecomputedReflectivity`) then produced
+        before being handed to the physical model; wavelength-dependent
+        models (e.g., :class:`PrecomputedPhysicalModel`) then produced
         an extra axis and the downstream einsum failed. The Lambertian
-        path didn't catch it because :class:`LambertianAtmosphere` ignores
-        wavelength entirely.
+        path didn't catch it because :class:`LambertianPhysicalModel`
+        ignores wavelength entirely.
         """
         from orbix.kepler.shortcuts.grid import get_grid_solver
         from orbix.system.orbit import KeplerianOrbit
-        from skyscapes.atmosphere import GridAtmosphere
+        from skyscapes.physical_model import GridPhysicalModel
         from skyscapes.scene import Planet, Star
 
         star = Star(
@@ -363,19 +367,23 @@ class TestPlanetFidelity:
             M0_rad=jnp.array([0.0]),
             t0_d=jnp.array([0.0]),
         )
-        # GridAtmosphere is wavelength-dependent (interpolates per planet
-        # across wavelengths and phase angles); shape-broken atmospheres
+        # GridPhysicalModel is wavelength-dependent (interpolates per planet
+        # across wavelengths and phase angles); shape-broken models
         # would crash here even though Lambertian-based tests pass.
         wls = jnp.linspace(400.0, 700.0, 5)
         phase_deg = jnp.linspace(0.0, 180.0, 7)
         contrast_grid = jnp.full((1, wls.size, phase_deg.size), 1e-9)
-        atmosphere = GridAtmosphere(
-            Rp_Rearth=jnp.array([1.0]),
+        physical_model = GridPhysicalModel(
             wavelengths_nm=wls,
             phase_angle_deg=phase_deg,
             contrast_grid=contrast_grid,
         )
-        planet = Planet(orbit=orbit, atmosphere=atmosphere)
+        planet = Planet(
+            Rp_Rearth=jnp.array([1.0]),
+            Mp_Mearth=jnp.array([1.0]),
+            orbit=orbit,
+            physical_model=physical_model,
+        )
         solver = get_grid_solver(level="scalar", E=False, trig=True, jit=True)
 
         img = planet_rate(
@@ -471,7 +479,7 @@ class TestPlanetFidelity:
         """
         from orbix.kepler.shortcuts.grid import get_grid_solver
         from orbix.system.orbit import KeplerianOrbit
-        from skyscapes.atmosphere import LambertianAtmosphere
+        from skyscapes.physical_model import LambertianPhysicalModel
         from skyscapes.scene import FlatStar, Planet
 
         star = FlatStar(
@@ -488,11 +496,13 @@ class TestPlanetFidelity:
             M0_rad=jnp.array([0.0]),
             t0_d=jnp.array([0.0]),
         )
-        atmosphere = LambertianAtmosphere(
+        physical_model = LambertianPhysicalModel(Ag=jnp.array([0.3]))
+        planet = Planet(
             Rp_Rearth=jnp.array([1.0]),
-            Ag=jnp.array([0.3]),
+            Mp_Mearth=jnp.array([1.0]),
+            orbit=orbit,
+            physical_model=physical_model,
         )
-        planet = Planet(orbit=orbit, atmosphere=atmosphere)
         solver = get_grid_solver(level="scalar", E=False, trig=True, jit=True)
 
         # Pick four times across roughly half an orbit. With a=5 AU around
@@ -663,10 +673,10 @@ class TestDiskPipelineGuards:
         primary = SimplePrimary(diameter_m=2.0)
         optics = ConstantThroughput(throughput=1.0)
         detector = IdealDetector(
-            pixel_scale=0.05,
+            pixel_scale_arcsec=0.05,
             shape=(51, 51),
             quantum_efficiency=1.0,
-            dark_current_rate=0.0,
+            dark_current_rate_e_per_s=0.0,
         )
         coro = _CoroNoDatacube()
         path = OpticalPath(primary, (optics,), coro, detector)

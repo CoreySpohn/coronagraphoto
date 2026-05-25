@@ -21,15 +21,15 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from optixstuff import (
+    ConstantThroughput,
+    IdealDetector,
+    OpticalPath,
+    SimplePrimary,
+)
 from orbix.observatory import ObservatoryL2Halo
 from skyscapes.background import LeinertZodi
 
-from coronagraphoto import OpticalPath
-from coronagraphoto.optical_elements import (
-    ConstantThroughput,
-    IdealDetector,
-    SimplePrimary,
-)
 from coronagraphoto.simulation import zodi_rate
 
 
@@ -62,10 +62,10 @@ def optical_path():
     primary = SimplePrimary(diameter_m=8.0)
     optics = ConstantThroughput(throughput=1.0)
     detector = IdealDetector(
-        pixel_scale=0.05,
+        pixel_scale_arcsec=0.05,
         shape=(65, 65),
         quantum_efficiency=1.0,
-        dark_current_rate=0.0,
+        dark_current_rate_e_per_s=0.0,
     )
     coro = _PerfectCoronagraph(size=65, pixel_scale_lod=0.5)
     return OpticalPath(primary, (optics,), coro, detector)

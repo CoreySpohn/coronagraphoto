@@ -16,16 +16,17 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
+from optixstuff import (
+    ConstantThroughput,
+    IdealDetector,
+    OpticalPath,
+    SimplePrimary,
+)
 from skyscapes.datasets import fetch_scene
 from yippy import EqxCoronagraph
 
-from coronagraphoto import OpticalPath, load_scene_from_exovista, system_readout
+from coronagraphoto import load_scene_from_exovista, system_readout
 from coronagraphoto.datasets import fetch_coronagraph
-from coronagraphoto.optical_elements import (
-    ConstantThroughput,
-    IdealDetector,
-    SimplePrimary,
-)
 
 pytestmark = [pytest.mark.slow, pytest.mark.integration]
 
@@ -50,10 +51,10 @@ def real_optical_path():
     primary = SimplePrimary(diameter_m=8.0)
     optics = ConstantThroughput(throughput=1.0)
     detector = IdealDetector(
-        pixel_scale=0.05,
+        pixel_scale_arcsec=0.05,
         shape=(ny, nx),
         quantum_efficiency=1.0,
-        dark_current_rate=0.0,
+        dark_current_rate_e_per_s=0.0,
     )
     return OpticalPath(primary, (optics,), coro, detector)
 

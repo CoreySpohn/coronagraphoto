@@ -51,7 +51,7 @@ def _resample_to_detector(image_rate_coro, bin_center_nm, optical_path):
     return resample_flux(
         image_rate_coro,
         inc_pixel_scale_arcsec,
-        optical_path.detector.pixel_scale,
+        optical_path.detector.pixel_scale_arcsec,
         optical_path.detector.shape,
         0.0,  # rotation is applied source-side, not detector-side
     )

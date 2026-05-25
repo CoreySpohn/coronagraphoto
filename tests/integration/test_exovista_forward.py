@@ -16,14 +16,15 @@ import jax
 import jax.numpy as jnp
 import pytest
 from hwoutils.conversions import arcsec_to_lambda_d
-from skyscapes.datasets import fetch_scene
-
-from coronagraphoto import OpticalPath, load_scene_from_exovista, system_readout
-from coronagraphoto.optical_elements import (
+from optixstuff import (
     ConstantThroughput,
     IdealDetector,
+    OpticalPath,
     SimplePrimary,
 )
+from skyscapes.datasets import fetch_scene
+
+from coronagraphoto import load_scene_from_exovista, system_readout
 
 pytestmark = [pytest.mark.slow, pytest.mark.integration]
 
@@ -84,10 +85,10 @@ def perfect_system():
     primary = SimplePrimary(diameter_m=8.0)
     optics = ConstantThroughput(throughput=1.0)
     detector = IdealDetector(
-        pixel_scale=0.05,
+        pixel_scale_arcsec=0.05,
         shape=(101, 101),
         quantum_efficiency=1.0,
-        dark_current_rate=0.0,
+        dark_current_rate_e_per_s=0.0,
     )
     coro = _PerfectCoronagraph(size=101, pixel_scale_lod=0.5)
     return OpticalPath(primary, (optics,), coro, detector)

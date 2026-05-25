@@ -31,7 +31,7 @@ class TestRadiometricPhotonBucket:
         (optixstuff.SimplePrimary subtracts the obscured-disk area, so
         the input is a linear obscuration fraction, squared internally.)
         """
-        from coronagraphoto.optical_elements import SimplePrimary
+        from optixstuff import SimplePrimary
 
         # Linear obscuration b such that 1 - b^2 = 0.8 -> b = sqrt(0.2).
         b = float(np.sqrt(0.2))
@@ -41,7 +41,7 @@ class TestRadiometricPhotonBucket:
 
     def test_throughput_chain_multiplication(self):
         """Verify that throughput elements multiply correctly through the chain."""
-        from coronagraphoto.optical_elements import ConstantThroughput
+        from optixstuff import ConstantThroughput
 
         t1 = ConstantThroughput(throughput=0.9)
         t2 = ConstantThroughput(throughput=0.8)
@@ -71,11 +71,13 @@ class TestConvolutionAccuracy:
 
     def test_interpolation_at_grid_points(self):
         """Interpolation at exact grid points must return the grid values."""
-        from coronagraphoto.optical_elements import LinearThroughput
+        from optixstuff import SpectralThroughput
 
         wavelengths = jnp.array([400.0, 500.0, 600.0, 700.0])
         throughputs = jnp.array([0.7, 0.8, 0.9, 0.85])
-        element = LinearThroughput(wavelengths_nm=wavelengths, throughputs=throughputs)
+        element = SpectralThroughput(
+            wavelengths_nm=wavelengths, throughputs=throughputs
+        )
 
         for wl, expected_t in zip(wavelengths, throughputs, strict=True):
             actual = element.get_throughput(float(wl))
@@ -126,10 +128,10 @@ class TestDetectorStatistics:
 
     def test_dark_current_poisson_statistics(self):
         """Dark current must follow Poisson statistics: Variance ≈ Mean."""
-        from coronagraphoto.optical_elements import simulate_dark_current
+        from optixstuff import dark_current
 
         key = jax.random.PRNGKey(42)
-        image = simulate_dark_current(100.0, 1.0, (1000, 1000), key)
+        image = dark_current(100.0, 1.0, (1000, 1000), key)
 
         mean_val = jnp.mean(image)
         var_val = jnp.var(image)
@@ -139,21 +141,21 @@ class TestDetectorStatistics:
 
     def test_read_noise_scaling(self):
         """Read noise sigma must scale with sqrt(N_frames)."""
-        from coronagraphoto.optical_elements import simulate_read_noise
+        from optixstuff import read_noise
 
         key1, key2 = jax.random.PRNGKey(42), jax.random.PRNGKey(43)
         SHAPE = (1000, 1000)
 
-        std_1 = jnp.std(simulate_read_noise(5.0, 1, SHAPE, key1))
-        std_100 = jnp.std(simulate_read_noise(5.0, 100, SHAPE, key2))
+        std_1 = jnp.std(read_noise(5.0, 1, SHAPE, key1))
+        std_100 = jnp.std(read_noise(5.0, 100, SHAPE, key2))
 
         assert jnp.isclose(std_100 / std_1, 10.0, rtol=0.1)
 
     def test_snr_scaling_law(self):
         """SNR must scale with sqrt(Time) in photon-limited regime."""
-        from coronagraphoto.optical_elements import IdealDetector
+        from optixstuff import IdealDetector
 
-        det = IdealDetector(pixel_scale=1.0, shape=(100, 100))
+        det = IdealDetector(pixel_scale_arcsec=1.0, shape=(100, 100))
         flux = jnp.full((100, 100), 10000.0)
 
         img1 = det.readout_source_electrons(flux, 1.0, jax.random.PRNGKey(1))
@@ -166,9 +168,11 @@ class TestDetectorStatistics:
 
     def test_poisson_photon_counting(self):
         """Photon arrival must follow Poisson statistics."""
-        from coronagraphoto.optical_elements import IdealDetector
+        from optixstuff import IdealDetector
 
-        det = IdealDetector(pixel_scale=1.0, shape=(500, 500), quantum_efficiency=1.0)
+        det = IdealDetector(
+            pixel_scale_arcsec=1.0, shape=(500, 500), quantum_efficiency=1.0
+        )
         image = det.readout_source_electrons(
             jnp.full((500, 500), 1000.0), 10.0, jax.random.PRNGKey(123)
         )

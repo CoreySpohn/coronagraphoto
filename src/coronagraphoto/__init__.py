@@ -7,13 +7,7 @@ differentiable, used for fitting and retrievals) or Poisson-realised
 detector readouts (``*_readout`` functions, used for data generation).
 """
 
-from optixstuff import OpticalPath
-
 from coronagraphoto.loaders import load_scene_from_exovista
-from coronagraphoto.optical_elements import (
-    IdealDetector,
-    SimplePrimary,
-)
 from coronagraphoto.simulation import (
     disk_rate,
     disk_readout,
@@ -28,9 +22,6 @@ from coronagraphoto.simulation import (
 )
 
 __all__ = [
-    "IdealDetector",
-    "OpticalPath",
-    "SimplePrimary",
     "disk_rate",
     "disk_readout",
     "load_scene_from_exovista",

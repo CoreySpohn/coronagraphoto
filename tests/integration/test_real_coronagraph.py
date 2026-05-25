@@ -55,9 +55,9 @@ class TestCoronagraphLoading:
 
     def test_coronagraph_has_pixel_scale(self, real_coronagraph):
         """Verify coronagraph has pixel scale attribute."""
-        assert hasattr(real_coronagraph, "pixel_scale")
+        assert hasattr(real_coronagraph, "pixel_scale_arcsec")
         # Should be around 0.25 lod/pixel for aavc
-        assert 0.1 < real_coronagraph.pixel_scale.value < 1.0
+        assert 0.1 < real_coronagraph.pixel_scale_arcsec.value < 1.0
 
 
 class TestStellarIntensity:
