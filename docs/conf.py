@@ -17,6 +17,7 @@ extensions = [
     "sphinx.ext.intersphinx",
     "sphinx.ext.viewcode",
     "sphinx.ext.mathjax",
+    "sphinxcontrib.mermaid",
     "IPython.sphinxext.ipython_console_highlighting",
 ]
 
@@ -40,6 +41,7 @@ autoapi_ignore = ["**/*version.py"]
 autodoc_typehints = "description"
 
 myst_enable_extensions = ["amsmath", "dollarmath"]
+myst_fence_as_directive = ["mermaid"]
 
 # -- Options for HTML output -------------------------------------------------
 

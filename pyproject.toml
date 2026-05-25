@@ -37,6 +37,7 @@ docs = [
   "sphinx-book-theme",
   "sphinx-autoapi",
   "sphinx_autodoc_typehints",
+  "sphinxcontrib-mermaid",
   "ipython",
 ]
 test = ["nox", "pytest", "hypothesis", "pytest-cov", "pooch"]
