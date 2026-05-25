@@ -6,7 +6,7 @@ Public API conventions:
   noiseless per-pixel photo-electron rate on the detector for one source.
 - ``sim_<source>(source, optical_path, prng_key, *, ...)`` returns a
   noisy detector readout (photon Poisson + QE binomial) for one source.
-- ``sim_system(scene, optical_path, prng_key, *, ...)`` sums every
+- ``system_readout(scene, optical_path, prng_key, *, ...)`` sums every
   source in the scene into a single readout.
 
 All observation parameters (``start_time_jd``, ``exposure_time_s``,
@@ -68,7 +68,7 @@ def post_coro_bin_processing(image_rate_coro, bin_center_nm, optical_path):
 # ---------------------------------------------------------------------------
 
 
-def gen_star_count_rate(
+def star_rate(
     star,
     optical_path,
     *,
@@ -86,7 +86,7 @@ def gen_star_count_rate(
     return post_coro_bin_processing(image_rate_coro, wavelength_nm, optical_path)
 
 
-def sim_star(
+def star_readout(
     star,
     optical_path,
     prng_key,
@@ -97,7 +97,7 @@ def sim_star(
     bin_width_nm,
 ):
     """Process a star through the provided optical path."""
-    image_rate_detector = gen_star_count_rate(
+    image_rate_detector = star_rate(
         star,
         optical_path,
         start_time_jd=start_time_jd,
@@ -114,7 +114,7 @@ def sim_star(
 # ---------------------------------------------------------------------------
 
 
-def gen_planet_count_rate(
+def planet_rate(
     planet,
     optical_path,
     *,
@@ -130,7 +130,7 @@ def gen_planet_count_rate(
     Operates on a single ``skyscapes.scene.Planet`` (which internally
     batches K planets sharing the same atmosphere class). The Python
     loop over a heterogeneous ``System.planets`` tuple lives in
-    :func:`sim_system`; this function stays inside the per-Planet-type
+    :func:`system_readout`; this function stays inside the per-Planet-type
     JIT cache boundary (see ``brain/Planet Loop Architecture.md``).
     """
     # The new Planet API takes a 1-D time axis; squeeze T=1.
@@ -164,7 +164,7 @@ def gen_planet_count_rate(
     return post_coro_bin_processing(image_rate_coro, wavelength_nm, optical_path)
 
 
-def sim_planets(
+def planet_readout(
     planet,
     optical_path,
     prng_key,
@@ -178,7 +178,7 @@ def sim_planets(
     trig_solver,
 ):
     """Process a per-batch Planet through the optical path."""
-    image_rate_detector = gen_planet_count_rate(
+    image_rate_detector = planet_rate(
         planet,
         optical_path,
         start_time_jd=start_time_jd,
@@ -241,7 +241,7 @@ def _convolve_quadrants(flux, psf_datacube):
     return img_q1 + img_q2 + img_q3 + img_q4
 
 
-def gen_disk_count_rate(
+def disk_rate(
     disk,
     optical_path,
     *,
@@ -270,7 +270,7 @@ def gen_disk_count_rate(
     """
     if optical_path.coronagraph.psf_datacube is None:
         raise ValueError(
-            "gen_disk_count_rate requires a coronagraph with a PSF "
+            "disk_rate requires a coronagraph with a PSF "
             "datacube; got optical_path.coronagraph.psf_datacube=None. "
             "The disk pipeline convolves the resampled disk image with "
             "the per-source-position PSFs and cannot run without it."
@@ -305,7 +305,7 @@ def gen_disk_count_rate(
         image_rate_coro = _convolve_quadrants(flux, psf_datacube)
     else:
         raise ValueError(
-            "gen_disk_count_rate: psf_datacube source-grid shape "
+            "disk_rate: psf_datacube source-grid shape "
             f"({n_src_y}, {n_src_x}) does not match either the full PSF "
             f"shape ({ny}, {nx}) or the quarter PSF shape "
             f"({q_src_y}, {q_src_x}). Coronagraphs must publish a full "
@@ -315,7 +315,7 @@ def gen_disk_count_rate(
     return post_coro_bin_processing(image_rate_coro, wavelength_nm, optical_path)
 
 
-def sim_disk(
+def disk_readout(
     disk,
     optical_path,
     prng_key,
@@ -332,11 +332,11 @@ def sim_disk(
     """Process a disk through the provided optical path.
 
     ``incl_deg`` / ``pa_deg`` are the disk's intrinsic sky-frame
-    orientation; ``sim_system`` pulls them from
+    orientation; ``system_readout`` pulls them from
     ``scene.system.midplane_inc_deg`` / ``midplane_pa_deg`` so every
     disk component in the System renders at the same midplane.
     """
-    image_rate_detector = gen_disk_count_rate(
+    image_rate_detector = disk_rate(
         disk,
         optical_path,
         start_time_jd=start_time_jd,
@@ -357,7 +357,7 @@ def sim_disk(
 # ---------------------------------------------------------------------------
 
 
-def gen_zodi_count_rate(
+def zodi_rate(
     zodi: ZodiSource,
     optical_path,
     *,
@@ -391,7 +391,7 @@ def gen_zodi_count_rate(
     return post_coro_bin_processing(flux_map, wavelength_nm, optical_path)
 
 
-def sim_zodi(
+def zodi_readout(
     zodi: ZodiSource,
     optical_path,
     prng_key,
@@ -404,7 +404,7 @@ def sim_zodi(
     solar_lon_deg,
 ):
     """Process a zodi source through the provided optical path."""
-    image_rate_detector = gen_zodi_count_rate(
+    image_rate_detector = zodi_rate(
         zodi,
         optical_path,
         start_time_jd=start_time_jd,
@@ -423,7 +423,76 @@ def sim_zodi(
 # ---------------------------------------------------------------------------
 
 
-def sim_system(
+def system_rate(
+    scene,
+    optical_path,
+    *,
+    start_time_jd,
+    wavelength_nm,
+    bin_width_nm,
+    telescope_pa_deg,
+    ecliptic_lat_deg,
+    solar_lon_deg,
+):
+    """Sum of deterministic per-source count rates for a :class:`~skyscapes.Scene`.
+
+    The differentiable companion to :func:`system_readout`. Returns the
+    total rate map (electrons/s/pixel, no Poisson noise, no QE multiply)
+    summing star, every planet, the optional disk, and the optional zodi.
+    Use this for likelihood evaluation, retrievals, or any inference loop
+    that needs gradients through the full forward model.
+    """
+    has_disk = scene.system.disk is not None
+    has_zodi = scene.zodi is not None
+
+    total = star_rate(
+        scene.system.star,
+        optical_path,
+        start_time_jd=start_time_jd,
+        wavelength_nm=wavelength_nm,
+        bin_width_nm=bin_width_nm,
+    )
+
+    for planet in scene.system.planets:
+        total = total + planet_rate(
+            planet,
+            optical_path,
+            start_time_jd=start_time_jd,
+            wavelength_nm=wavelength_nm,
+            bin_width_nm=bin_width_nm,
+            telescope_pa_deg=telescope_pa_deg,
+            star=scene.system.star,
+            trig_solver=scene.system.trig_solver,
+        )
+
+    if has_disk:
+        total = total + disk_rate(
+            scene.system.disk,
+            optical_path,
+            start_time_jd=start_time_jd,
+            wavelength_nm=wavelength_nm,
+            bin_width_nm=bin_width_nm,
+            telescope_pa_deg=telescope_pa_deg,
+            star=scene.system.star,
+            incl_deg=jnp.asarray(scene.system.midplane_inc_deg),
+            pa_deg=jnp.asarray(scene.system.midplane_pa_deg),
+        )
+
+    if has_zodi:
+        total = total + zodi_rate(
+            scene.zodi,
+            optical_path,
+            start_time_jd=start_time_jd,
+            wavelength_nm=wavelength_nm,
+            bin_width_nm=bin_width_nm,
+            ecliptic_lat_deg=ecliptic_lat_deg,
+            solar_lon_deg=solar_lon_deg,
+        )
+
+    return total
+
+
+def system_readout(
     scene,
     optical_path,
     prng_key,
@@ -444,7 +513,7 @@ def sim_system(
     The Python loop over ``scene.system.planets`` is intentionally
     unjitted -- it orchestrates JIT-cached per-Planet-type kernels (see
     ``brain/Planet Loop Architecture.md``). The expensive math is inside
-    each ``sim_planets`` call, not the loop.
+    each ``planet_readout`` call, not the loop.
     """
     has_disk = scene.system.disk is not None
     has_zodi = scene.zodi is not None
@@ -452,7 +521,7 @@ def sim_system(
     n_keys = 1 + len(scene.system.planets) + int(has_disk) + int(has_zodi)
     keys = iter(jax.random.split(prng_key, n_keys))
 
-    total = sim_star(
+    total = star_readout(
         scene.system.star,
         optical_path,
         next(keys),
@@ -463,7 +532,7 @@ def sim_system(
     )
 
     for planet in scene.system.planets:
-        total = total + sim_planets(
+        total = total + planet_readout(
             planet,
             optical_path,
             next(keys),
@@ -477,7 +546,7 @@ def sim_system(
         )
 
     if has_disk:
-        total = total + sim_disk(
+        total = total + disk_readout(
             scene.system.disk,
             optical_path,
             next(keys),
@@ -492,7 +561,7 @@ def sim_system(
         )
 
     if has_zodi:
-        total = total + sim_zodi(
+        total = total + zodi_readout(
             scene.zodi,
             optical_path,
             next(keys),

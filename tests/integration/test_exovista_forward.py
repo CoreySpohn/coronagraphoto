@@ -1,7 +1,7 @@
 """End-to-end ExoVista -> coronagraphoto integration test.
 
 Loads a real ExoVista FITS via ``load_scene_from_exovista``, runs the
-full ``sim_system`` pipeline against a perfect-coronagraph mock
+full ``system_readout`` pipeline against a perfect-coronagraph mock
 ``OpticalPath``, and asserts the resulting detector image is sensible
 (finite, positive total counts, expected shape).
 
@@ -18,7 +18,7 @@ import pytest
 from hwoutils.conversions import arcsec_to_lambda_d
 from skyscapes.datasets import fetch_scene
 
-from coronagraphoto import OpticalPath, load_scene_from_exovista, sim_system
+from coronagraphoto import OpticalPath, load_scene_from_exovista, system_readout
 from coronagraphoto.optical_elements import (
     ConstantThroughputElement,
     SimpleDetector,
@@ -47,7 +47,7 @@ class _PerfectCoronagraph(eqx.Module):
 
         # Quarter-grid PSF datacube: one Gaussian PSF per source pixel in
         # the quarter grid (lower-right quadrant including the center
-        # row + column). gen_disk_count_rate's quarter-grid branch
+        # row + column). disk_rate's quarter-grid branch
         # (_convolve_quadrants) consumes this shape.
         q_y = size // 2 + 1
         q_x = size // 2 + 1
@@ -94,9 +94,9 @@ def perfect_system():
 
 
 def test_exovista_scene_simulates_end_to_end(perfect_system):
-    """Load ExoVista FITS, run sim_system on the full scene, assert sensible output.
+    """Load ExoVista FITS, run system_readout on the full scene, assert sensible output.
 
-    Exercises star + planets + disk + zodi via ``sim_system``. The mock
+    Exercises star + planets + disk + zodi via ``system_readout``. The mock
     coronagraph provides a quarter-grid Gaussian PSF datacube so the
     disk simulation path can run.
     """
@@ -105,7 +105,7 @@ def test_exovista_scene_simulates_end_to_end(perfect_system):
 
     start_time_jd = float(scene.system.planets[0].orbit.t0_d[0])
     wavelength_nm = 550.0
-    image = sim_system(
+    image = system_readout(
         scene,
         perfect_system,
         jax.random.PRNGKey(0),
@@ -136,14 +136,14 @@ def test_exovista_scene_simulates_end_to_end(perfect_system):
     # ~11 pixels from the star -- well outside the 10-pixel stellar mask --
     # so the peak of an independently-rendered reference PSF is reliably
     # detectable. The reference PSF is generated via the same
-    # ``create_psfs`` call used inside ``gen_planet_count_rate``, exercising
+    # ``create_psfs`` call used inside ``planet_rate``, exercising
     # the full arcsec -> lambda/D -> coro-pixel chain.
     predicted_pos_arcsec = scene.system.positions(jnp.array([start_time_jd]))
     # Shape (2, K_total=1, T=1). Take planet 0 at the single epoch.
     ra_arcsec = float(predicted_pos_arcsec[0, 0, 0])
     dec_arcsec = float(predicted_pos_arcsec[1, 0, 0])
 
-    # arcsec -> lambda/D (same conversion as gen_planet_count_rate).
+    # arcsec -> lambda/D (same conversion as planet_rate).
     pos_as = jnp.array([[ra_arcsec], [dec_arcsec]])
     diam_m = float(perfect_system.primary.diameter_m)
     pos_lod = arcsec_to_lambda_d(pos_as, wavelength_nm, diam_m)
@@ -190,7 +190,7 @@ def test_exovista_scene_simulates_end_to_end(perfect_system):
     # silently produces zero (e.g. unit-conversion bug, all-zero
     # contrast).
     scene_no_disk = eqx.tree_at(lambda s: s.system.disk, scene, None)
-    image_no_disk = sim_system(
+    image_no_disk = system_readout(
         scene_no_disk,
         perfect_system,
         jax.random.PRNGKey(0),

@@ -1,4 +1,4 @@
-"""Integration: ``gen_zodi_count_rate`` x ``ObservatoryL2Halo`` x ``ZodiSourceLeinert``.
+"""Integration: ``zodi_rate`` x ``ObservatoryL2Halo`` x ``ZodiSourceLeinert``.
 
 Drives the full per-frame zodi-rate computation a paper figure / yield
 calculation would do, with the orbix L2 halo observatory feeding
@@ -25,18 +25,18 @@ from orbix.observatory import ObservatoryL2Halo
 from skyscapes.background import ZodiSourceLeinert
 
 from coronagraphoto import OpticalPath
-from coronagraphoto.core.simulation import gen_zodi_count_rate
 from coronagraphoto.optical_elements import (
     ConstantThroughputElement,
     SimpleDetector,
     SimplePrimary,
 )
+from coronagraphoto.simulation import zodi_rate
 
 
 class _PerfectCoronagraph(eqx.Module):
     """Minimal mock coronagraph: full sky transmission, no PSF dependence.
 
-    ``gen_zodi_count_rate`` only needs ``sky_trans`` (flat field) and the
+    ``zodi_rate`` only needs ``sky_trans`` (flat field) and the
     detector pixel-scale conversion -- it does NOT convolve through the
     PSF datacube. So this mock is enough for the zodi pipeline.
     """
@@ -52,7 +52,7 @@ class _PerfectCoronagraph(eqx.Module):
 
     @property
     def psf_datacube(self):
-        """Unused by ``gen_zodi_count_rate`` but required by the protocol."""
+        """Unused by ``zodi_rate`` but required by the protocol."""
         return None
 
 
@@ -102,7 +102,7 @@ def _integrated_year(
     for i, mjd in enumerate(mjds):
         ecl_lat = float(obs.ecliptic_latitude_deg(float(mjd), ra_rad, dec_rad))
         helio_lon = float(obs.helio_ecliptic_longitude_deg(float(mjd), ra_rad, dec_rad))
-        rate = gen_zodi_count_rate(
+        rate = zodi_rate(
             zodi,
             optical_path,
             start_time_jd=float(mjd),

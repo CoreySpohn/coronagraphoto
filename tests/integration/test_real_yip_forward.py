@@ -3,7 +3,7 @@
 Mirrors ``test_exovista_forward.py`` but swaps the ``_PerfectCoronagraph``
 mock for a real ``yippy.EqxCoronagraph`` loaded from the eac1_aavc_512
 YIP fetched via ``coronagraphoto.datasets.fetch_coronagraph``. Validates
-that ``sim_system`` runs end-to-end against actual coronagraph data, not
+that ``system_readout`` runs end-to-end against actual coronagraph data, not
 just our test mocks.
 
 Marked ``slow`` and ``integration`` so default fast runs deselect with
@@ -19,7 +19,7 @@ import pytest
 from skyscapes.datasets import fetch_scene
 from yippy import EqxCoronagraph
 
-from coronagraphoto import OpticalPath, load_scene_from_exovista, sim_system
+from coronagraphoto import OpticalPath, load_scene_from_exovista, system_readout
 from coronagraphoto.datasets import fetch_coronagraph
 from coronagraphoto.optical_elements import (
     ConstantThroughputElement,
@@ -72,7 +72,7 @@ def test_exovista_scene_simulates_end_to_end_with_real_yip(real_optical_path):
 
     start_time_jd = float(scene.system.planets[0].orbit.t0_d[0])
     wavelength_nm = 550.0
-    image = sim_system(
+    image = system_readout(
         scene,
         real_optical_path,
         jax.random.PRNGKey(0),

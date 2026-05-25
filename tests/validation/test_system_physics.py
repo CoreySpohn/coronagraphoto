@@ -21,16 +21,16 @@ from skyscapes.background import ZodiSourceAYO
 from skyscapes.scene import SpectrumStar as StarSource
 
 from coronagraphoto import OpticalPath
-from coronagraphoto.core.simulation import (
-    gen_planet_count_rate,
-    gen_star_count_rate,
-    gen_zodi_count_rate,
-    sim_star,
-)
 from coronagraphoto.optical_elements import (
     ConstantThroughputElement,
     SimpleDetector,
     SimplePrimary,
+)
+from coronagraphoto.simulation import (
+    planet_rate,
+    star_rate,
+    star_readout,
+    zodi_rate,
 )
 
 # =============================================================================
@@ -130,12 +130,12 @@ class TestEndToEndRadiometry:
     """
 
     def test_star_flux_conservation(self, perfect_system, standard_star):
-        """Verify gen_star_count_rate produces the exact analytic photon count."""
+        """Verify star_rate produces the exact analytic photon count."""
         WAVELENGTH = 550.0
         BANDWIDTH = 50.0
         TIME_JD = 0.5
 
-        image_rate = gen_star_count_rate(
+        image_rate = star_rate(
             standard_star,
             perfect_system,
             start_time_jd=TIME_JD,
@@ -181,7 +181,7 @@ class TestEndToEndRadiometry:
         TIME_JD = 0.5
 
         rate_lossy = jnp.sum(
-            gen_star_count_rate(
+            star_rate(
                 standard_star,
                 lossy_system,
                 start_time_jd=TIME_JD,
@@ -190,7 +190,7 @@ class TestEndToEndRadiometry:
             )
         )
         rate_perfect = jnp.sum(
-            gen_star_count_rate(
+            star_rate(
                 standard_star,
                 perfect_system,
                 start_time_jd=TIME_JD,
@@ -221,7 +221,7 @@ class TestSurfaceBrightness:
         WAVELENGTH = 550.0
         WIDTH = 1.0
 
-        image_rate = gen_zodi_count_rate(
+        image_rate = zodi_rate(
             zodi,
             perfect_system,
             start_time_jd=0.0,
@@ -261,11 +261,11 @@ class TestDetectorNoiseIntegration:
     """Verify the full readout chain produces correct noise statistics."""
 
     def test_full_chain_signal_consistency(self, perfect_system, standard_star):
-        """Run sim_star and verify output is consistent with expectations."""
+        """Run star_readout and verify output is consistent with expectations."""
         key = jax.random.PRNGKey(42)
         exposure_time = 1.0
 
-        img = sim_star(
+        img = star_readout(
             standard_star,
             perfect_system,
             key,
@@ -284,7 +284,7 @@ class TestDetectorNoiseIntegration:
 
         # 10% tolerance for resampling edge losses
         assert jnp.isclose(total_counts, expected_counts, rtol=0.1), (
-            f"sim_star counts outside acceptable range. "
+            f"star_readout counts outside acceptable range. "
             f"Measured={float(total_counts):.0f}, Expected~{float(expected_counts):.0f}"
         )
 
@@ -332,7 +332,7 @@ class TestPlanetFidelity:
         return planet, star, solver
 
     def test_planet_runs_with_wavelength_dependent_atmosphere(self, perfect_system):
-        """Regression: ``gen_planet_count_rate`` must accept scalar wavelength.
+        """Regression: ``planet_rate`` must accept scalar wavelength.
 
         Catches a latent bug where ``wavelength_nm`` was promoted to ``(1,)``
         before being handed to the atmosphere; wavelength-dependent
@@ -378,7 +378,7 @@ class TestPlanetFidelity:
         planet = Planet(orbit=orbit, atmosphere=atmosphere)
         solver = get_grid_solver(level="scalar", E=False, trig=True, jit=True)
 
-        img = gen_planet_count_rate(
+        img = planet_rate(
             planet,
             perfect_system,
             start_time_jd=0.0,
@@ -401,7 +401,7 @@ class TestPlanetFidelity:
         """
         planet, star, solver = planet_setup
 
-        img_blue = gen_planet_count_rate(
+        img_blue = planet_rate(
             planet,
             perfect_system,
             start_time_jd=0.0,
@@ -413,7 +413,7 @@ class TestPlanetFidelity:
         )
         yb, xb = jnp.unravel_index(jnp.argmax(img_blue), img_blue.shape)
 
-        img_red = gen_planet_count_rate(
+        img_red = planet_rate(
             planet,
             perfect_system,
             start_time_jd=0.0,
@@ -438,7 +438,7 @@ class TestPlanetFidelity:
         Planet at M0=0 lands at +X direction.
         """
         planet, star, solver = planet_setup
-        img = gen_planet_count_rate(
+        img = planet_rate(
             planet,
             perfect_system,
             start_time_jd=0.0,
@@ -457,7 +457,7 @@ class TestPlanetFidelity:
     def test_planet_count_rate_vmap_over_time(self, perfect_system):
         """Multi-time API is just ``jax.vmap`` over ``start_time_jd``.
 
-        ``gen_planet_count_rate`` is single-time, but the function is
+        ``planet_rate`` is single-time, but the function is
         pure JAX with no time-dependent control flow, so
         vmapping over ``start_time_jd`` returns a stack of per-epoch images
         with the orbit propagated independently at each time. Catches any
@@ -501,7 +501,7 @@ class TestPlanetFidelity:
         times = jnp.array([0.0, 500.0, 1000.0, 1500.0])
 
         def at_time(t):
-            return gen_planet_count_rate(
+            return planet_rate(
                 planet,
                 perfect_system,
                 start_time_jd=t,
@@ -557,7 +557,7 @@ class TestMaskPhysics:
             ecliptic_lat_deg=0.0,
             solar_lon_deg=135.0,
         )
-        full_img = gen_zodi_count_rate(zodi, perfect_system, **zodi_kwargs)
+        full_img = zodi_rate(zodi, perfect_system, **zodi_kwargs)
 
         # Zero out a 5x5 patch in sky_trans
         masked_trans = perfect_system.coronagraph.sky_trans.at[48:53, 48:53].set(0.0)
@@ -568,7 +568,7 @@ class TestMaskPhysics:
         )
         masked_sys = eqx.tree_at(lambda s: s.coronagraph, perfect_system, masked_coro)
 
-        masked_img = gen_zodi_count_rate(zodi, masked_sys, **zodi_kwargs)
+        masked_img = zodi_rate(zodi, masked_sys, **zodi_kwargs)
 
         # Total flux should decrease
         assert jnp.sum(masked_img) < jnp.sum(full_img)
@@ -582,7 +582,7 @@ class TestMaskPhysics:
 class TestZodiTypeAgnosticDispatch:
     """Regression guard for nominal-union zodi dispatch.
 
-    ``gen_zodi_count_rate`` must accept any concrete ``ZodiSource`` and
+    ``zodi_rate`` must accept any concrete ``ZodiSource`` and
     route it through the same code path (no type-based branching).
 
     AYO and PhotonFlux share an identical photon-flux model when
@@ -595,7 +595,7 @@ class TestZodiTypeAgnosticDispatch:
     """
 
     def test_gen_zodi_count_rate_is_zodi_type_agnostic(self, perfect_system):
-        """All three ZodiSource variants flow through gen_zodi_count_rate."""
+        """All three ZodiSource variants flow through zodi_rate."""
         from skyscapes.background import (
             ZodiSourceLeinert,
             ZodiSourcePhotonFlux,
@@ -621,9 +621,9 @@ class TestZodiTypeAgnosticDispatch:
             ecliptic_lat_deg=0.0,
             solar_lon_deg=135.0,
         )
-        rate_ayo = gen_zodi_count_rate(ayo, perfect_system, **zodi_kwargs)
-        rate_phot = gen_zodi_count_rate(phot, perfect_system, **zodi_kwargs)
-        rate_leinert = gen_zodi_count_rate(leinert, perfect_system, **zodi_kwargs)
+        rate_ayo = zodi_rate(ayo, perfect_system, **zodi_kwargs)
+        rate_phot = zodi_rate(phot, perfect_system, **zodi_kwargs)
+        rate_leinert = zodi_rate(leinert, perfect_system, **zodi_kwargs)
 
         assert rate_ayo.shape == rate_phot.shape == rate_leinert.shape
 
@@ -650,7 +650,7 @@ class TestDiskPipelineGuards:
         from skyscapes.disk import ExovistaDisk
         from skyscapes.scene import SpectrumStar
 
-        from coronagraphoto.core.simulation import gen_disk_count_rate
+        from coronagraphoto.simulation import disk_rate
 
         class _CoroNoDatacube(eqx.Module):
             pixel_scale_lod: float = 0.5
@@ -687,7 +687,7 @@ class TestDiskPipelineGuards:
         )
 
         with pytest.raises(ValueError, match="psf_datacube"):
-            gen_disk_count_rate(
+            disk_rate(
                 disk,
                 path,
                 start_time_jd=0.0,

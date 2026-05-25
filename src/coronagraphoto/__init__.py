@@ -2,31 +2,44 @@
 
 Scene primitives (Star, Planet, Disk, System, Scene, backgrounds) live in
 :mod:`skyscapes`. coronagraphoto consumes a :class:`skyscapes.Scene` and
-turns it into detector images via the ``sim_*`` and ``gen_*`` functions.
+produces either deterministic count-rate maps (``*_rate`` functions,
+differentiable, used for fitting and retrievals) or Poisson-realised
+detector readouts (``*_readout`` functions, used for data generation).
 """
 
-from coronagraphoto.core import (
-    OpticalPath,
-    sim_disk,
-    sim_planets,
-    sim_star,
-    sim_system,
-    sim_zodi,
-)
+from optixstuff import OpticalPath
+
 from coronagraphoto.loaders import load_scene_from_exovista
 from coronagraphoto.optical_elements import (
     SimpleDetector,
     SimplePrimary,
+)
+from coronagraphoto.simulation import (
+    disk_rate,
+    disk_readout,
+    planet_rate,
+    planet_readout,
+    star_rate,
+    star_readout,
+    system_rate,
+    system_readout,
+    zodi_rate,
+    zodi_readout,
 )
 
 __all__ = [
     "OpticalPath",
     "SimpleDetector",
     "SimplePrimary",
+    "disk_rate",
+    "disk_readout",
     "load_scene_from_exovista",
-    "sim_disk",
-    "sim_planets",
-    "sim_star",
-    "sim_system",
-    "sim_zodi",
+    "planet_rate",
+    "planet_readout",
+    "star_rate",
+    "star_readout",
+    "system_rate",
+    "system_readout",
+    "zodi_rate",
+    "zodi_readout",
 ]

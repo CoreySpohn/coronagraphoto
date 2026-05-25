@@ -40,7 +40,7 @@ See the [README](https://github.com/CoreySpohn/coronagraphoto#quick-start) for a
 import jax
 from coronagraphoto import (
     OpticalPath, PrimaryAperture, SimpleDetector,
-    load_scene_from_exovista, sim_system,
+    load_scene_from_exovista, system_readout,
 )
 from coronagraphoto.optical_elements import ConstantThroughputElement
 from yippy import EqxCoronagraph
@@ -52,7 +52,7 @@ optical_path = OpticalPath(
     coronagraph=EqxCoronagraph("path/to/coronagraph_data"),
     detector=SimpleDetector(pixel_scale=0.01, shape=(512, 512)),
 )
-image = sim_system(
+image = system_readout(
     scene, optical_path, jax.random.PRNGKey(0),
     start_time_jd=2_460_000.0, exposure_time_s=3600.0,
     wavelength_nm=550.0, bin_width_nm=50.0,

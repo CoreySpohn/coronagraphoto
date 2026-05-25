@@ -189,7 +189,7 @@ class TestAlgorithmicConservation:
 
     def test_convolve_quadrants_sum_preservation(self):
         """Quarter-symmetric convolution must preserve total flux when PSF sums to 1."""
-        from coronagraphoto.core.simulation import _convolve_quadrants
+        from coronagraphoto.simulation import _convolve_quadrants
 
         size = 51
         center = size // 2
