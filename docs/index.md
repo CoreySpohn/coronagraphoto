@@ -2,10 +2,9 @@
 
 JAX-native coronagraphic image simulation for HWO mission planning.
 
-`coronagraphoto` consumes a {class}`skyscapes.Scene` (star + planets
-+ disk + zodi) and an {class}`optixstuff.OpticalPath` (primary aperture
-+ throughput stack + coronagraph backend + detector) and produces one
-of two things:
+`coronagraphoto` consumes a {class}`skyscapes.Scene` (star + planets disk + zodi)
+and an {class}`optixstuff.OpticalPath` (primary aperture throughput stack + coronagraph backend + detector)
+and produces one of two things:
 
 - A **deterministic count-rate map** (`star_rate`, `planet_rate`,
   `disk_rate`, `zodi_rate`, `system_rate`) -- differentiable through
