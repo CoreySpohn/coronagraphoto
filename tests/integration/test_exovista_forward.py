@@ -20,8 +20,8 @@ from skyscapes.datasets import fetch_scene
 
 from coronagraphoto import OpticalPath, load_scene_from_exovista, system_readout
 from coronagraphoto.optical_elements import (
-    ConstantThroughputElement,
-    SimpleDetector,
+    ConstantThroughput,
+    IdealDetector,
     SimplePrimary,
 )
 
@@ -82,8 +82,8 @@ class _PerfectCoronagraph(eqx.Module):
 def perfect_system():
     """Perfect 8 m primary + transparent optics + mock coronagraph + flat detector."""
     primary = SimplePrimary(diameter_m=8.0)
-    optics = ConstantThroughputElement(throughput=1.0)
-    detector = SimpleDetector(
+    optics = ConstantThroughput(throughput=1.0)
+    detector = IdealDetector(
         pixel_scale=0.05,
         shape=(101, 101),
         quantum_efficiency=1.0,

@@ -2,12 +2,14 @@
 
 Public API conventions:
 
-- ``gen_<source>_count_rate(source, optical_path, *, ...)`` returns the
-  noiseless per-pixel photo-electron rate on the detector for one source.
-- ``sim_<source>(source, optical_path, prng_key, *, ...)`` returns a
+- ``<source>_rate(source, optical_path, *, ...)`` returns the noiseless
+  per-pixel photo-electron rate on the detector for one source.
+- ``<source>_readout(source, optical_path, prng_key, *, ...)`` returns a
   noisy detector readout (photon Poisson + QE binomial) for one source.
+- ``system_rate(scene, optical_path, *, ...)`` sums every per-source rate
+  map for a scene (the differentiable forward model).
 - ``system_readout(scene, optical_path, prng_key, *, ...)`` sums every
-  source in the scene into a single readout.
+  per-source Poisson-realised readout for a scene.
 
 All observation parameters (``start_time_jd``, ``exposure_time_s``,
 ``wavelength_nm``, ``bin_width_nm``, ``telescope_pa_deg``,
@@ -20,7 +22,7 @@ import jax
 import jax.numpy as jnp
 from hwoutils.conversions import arcsec_to_lambda_d, lambda_d_to_arcsec
 from hwoutils.transforms import ccw_rotation_matrix, resample_flux
-from skyscapes.background import ZodiSource
+from skyscapes.background import Zodi
 
 
 def pre_coro_bin_processing(flux, bin_center_nm, bin_width_nm, optical_path):
@@ -358,7 +360,7 @@ def disk_readout(
 
 
 def zodi_rate(
-    zodi: ZodiSource,
+    zodi: Zodi,
     optical_path,
     *,
     start_time_jd,
@@ -392,7 +394,7 @@ def zodi_rate(
 
 
 def zodi_readout(
-    zodi: ZodiSource,
+    zodi: Zodi,
     optical_path,
     prng_key,
     *,

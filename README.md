@@ -51,10 +51,10 @@ This keeps the pipeline transparent (you know exactly which sources contributed)
 ```python
 import jax
 from coronagraphoto import (
-    OpticalPath, PrimaryAperture, SimpleDetector,
+    OpticalPath, PrimaryAperture, IdealDetector,
     load_scene_from_exovista, sim_system,
 )
-from coronagraphoto.optical_elements import ConstantThroughputElement
+from coronagraphoto.optical_elements import ConstantThroughput
 from yippy import EqxCoronagraph
 
 # 1. Load a skyscapes.Scene (system + default zodi) from ExoVista.
@@ -64,9 +64,9 @@ scene = load_scene_from_exovista("path/to/exovista_system.fits")
 coronagraph = EqxCoronagraph("path/to/coronagraph_data")
 optical_path = OpticalPath(
     primary=PrimaryAperture(diameter_m=6.0),
-    attenuating_elements=(ConstantThroughputElement(throughput=0.9),),
+    attenuating_elements=(ConstantThroughput(throughput=0.9),),
     coronagraph=coronagraph,
-    detector=SimpleDetector(pixel_scale=0.01, shape=(512, 512)),
+    detector=IdealDetector(pixel_scale=0.01, shape=(512, 512)),
 )
 
 # 3. Simulate one detector readout.

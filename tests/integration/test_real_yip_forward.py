@@ -22,8 +22,8 @@ from yippy import EqxCoronagraph
 from coronagraphoto import OpticalPath, load_scene_from_exovista, system_readout
 from coronagraphoto.datasets import fetch_coronagraph
 from coronagraphoto.optical_elements import (
-    ConstantThroughputElement,
-    SimpleDetector,
+    ConstantThroughput,
+    IdealDetector,
     SimplePrimary,
 )
 
@@ -48,8 +48,8 @@ def real_optical_path():
 
     ny, nx = coro.psf_shape
     primary = SimplePrimary(diameter_m=8.0)
-    optics = ConstantThroughputElement(throughput=1.0)
-    detector = SimpleDetector(
+    optics = ConstantThroughput(throughput=1.0)
+    detector = IdealDetector(
         pixel_scale=0.05,
         shape=(ny, nx),
         quantum_efficiency=1.0,

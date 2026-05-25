@@ -41,11 +41,11 @@ class TestRadiometricPhotonBucket:
 
     def test_throughput_chain_multiplication(self):
         """Verify that throughput elements multiply correctly through the chain."""
-        from coronagraphoto.optical_elements import ConstantThroughputElement
+        from coronagraphoto.optical_elements import ConstantThroughput
 
-        t1 = ConstantThroughputElement(throughput=0.9)
-        t2 = ConstantThroughputElement(throughput=0.8)
-        t3 = ConstantThroughputElement(throughput=0.7)
+        t1 = ConstantThroughput(throughput=0.9)
+        t2 = ConstantThroughput(throughput=0.8)
+        t3 = ConstantThroughput(throughput=0.7)
 
         flux = 1000.0
         wl = 550.0
@@ -71,13 +71,11 @@ class TestConvolutionAccuracy:
 
     def test_interpolation_at_grid_points(self):
         """Interpolation at exact grid points must return the grid values."""
-        from coronagraphoto.optical_elements import LinearThroughputElement
+        from coronagraphoto.optical_elements import LinearThroughput
 
         wavelengths = jnp.array([400.0, 500.0, 600.0, 700.0])
         throughputs = jnp.array([0.7, 0.8, 0.9, 0.85])
-        element = LinearThroughputElement(
-            wavelengths_nm=wavelengths, throughputs=throughputs
-        )
+        element = LinearThroughput(wavelengths_nm=wavelengths, throughputs=throughputs)
 
         for wl, expected_t in zip(wavelengths, throughputs, strict=True):
             actual = element.get_throughput(float(wl))
@@ -110,10 +108,10 @@ class TestLeinertZodiValidation:
 
     def test_ayo_22_mag_reference(self):
         """AYO defaults to 22 mag/arcsec² at V-band."""
-        from skyscapes.background import ZodiSourceAYO
+        from skyscapes.background import AYOZodi
 
         wavelengths = jnp.array([500.0, 550.0, 600.0])
-        zodi = ZodiSourceAYO(wavelengths_nm=wavelengths)
+        zodi = AYOZodi(wavelengths_nm=wavelengths)
         assert zodi.reference_mag_arcsec2 == 22.0
         assert jnp.isclose(zodi.reference_wavelength_nm, 550.0)
 
@@ -153,9 +151,9 @@ class TestDetectorStatistics:
 
     def test_snr_scaling_law(self):
         """SNR must scale with sqrt(Time) in photon-limited regime."""
-        from coronagraphoto.optical_elements import SimpleDetector
+        from coronagraphoto.optical_elements import IdealDetector
 
-        det = SimpleDetector(pixel_scale=1.0, shape=(100, 100))
+        det = IdealDetector(pixel_scale=1.0, shape=(100, 100))
         flux = jnp.full((100, 100), 10000.0)
 
         img1 = det.readout_source_electrons(flux, 1.0, jax.random.PRNGKey(1))
@@ -168,9 +166,9 @@ class TestDetectorStatistics:
 
     def test_poisson_photon_counting(self):
         """Photon arrival must follow Poisson statistics."""
-        from coronagraphoto.optical_elements import SimpleDetector
+        from coronagraphoto.optical_elements import IdealDetector
 
-        det = SimpleDetector(pixel_scale=1.0, shape=(500, 500), quantum_efficiency=1.0)
+        det = IdealDetector(pixel_scale=1.0, shape=(500, 500), quantum_efficiency=1.0)
         image = det.readout_source_electrons(
             jnp.full((500, 500), 1000.0), 10.0, jax.random.PRNGKey(123)
         )

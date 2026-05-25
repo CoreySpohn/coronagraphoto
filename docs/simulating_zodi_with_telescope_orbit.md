@@ -7,7 +7,7 @@ generate a time series of the kind a paper figure or a mission yield
 calculation needs, the per-frame geometry has to be threaded in from an
 observatory model. This page shows the recommended composition using
 `orbix.observatory.ObservatoryL2Halo` for the observatory and
-`skyscapes.background.ZodiSourceLeinert` for the brightness model, and
+`skyscapes.background.LeinertZodi` for the brightness model, and
 ends with a short validation checklist.
 
 ## The composition
@@ -16,7 +16,7 @@ A single-epoch zodi simulation pulls together four pieces, each
 responsible for a distinct part of the calculation. The
 `ObservatoryL2Halo` instance provides the heliocentric position of the
 telescope and the per-target sky-geometry angles needed for the Leinert
-lookup, the `ZodiSourceLeinert` instance evaluates the surface
+lookup, the `LeinertZodi` instance evaluates the surface
 brightness from those angles, the optical path threads the brightness
 through the coronagraph's `sky_trans` map and the detector resampling,
 and `zodi_rate` returns the per-pixel count rate. Adding
@@ -31,11 +31,11 @@ to `zodi_rate`:
 
 ```python
 from orbix.observatory import ObservatoryL2Halo
-from skyscapes.background import ZodiSourceLeinert
+from skyscapes.background import LeinertZodi
 from coronagraphoto.simulation import zodi_rate
 
 obs = ObservatoryL2Halo.from_default()
-zodi = ZodiSourceLeinert(reference_mag_arcsec2=22.0)
+zodi = LeinertZodi(reference_mag_arcsec2=22.0)
 
 ecl_lat = float(obs.ecliptic_latitude_deg(mjd, ra_rad, dec_rad))
 helio_lon = float(obs.helio_ecliptic_longitude_deg(mjd, ra_rad, dec_rad))
@@ -53,7 +53,7 @@ rate = zodi_rate(
 
 The returned `rate` is an `(ny, nx)` array of photons per second on the
 detector. Multiplying by an exposure time and passing the result to
-`SimpleDetector.readout_source_electrons` yields a Poisson-sampled
+`IdealDetector.readout_source_electrons` yields a Poisson-sampled
 electron image, and `zodi_readout` provides both steps in one call.
 
 ## Year-long simulations
@@ -71,7 +71,7 @@ import jax.numpy as jnp
 import numpy as np
 
 obs = ObservatoryL2Halo.from_default(equinox_mjd=60575.25)
-zodi = ZodiSourceLeinert(reference_mag_arcsec2=22.0)
+zodi = LeinertZodi(reference_mag_arcsec2=22.0)
 prng_keys = jax.random.split(jax.random.PRNGKey(0), n_frames)
 mjds = 60575.25 + np.linspace(0.0, 365.25, n_frames)
 
@@ -145,7 +145,7 @@ The skyscapes [Local zodi + telescope geometry][skyscapes-zodi] doc
 covers the geometry side of this pipeline.
 {class}`orbix.observatory.ObservatoryL2Halo` documents the L2 halo
 orbit interpolator and the sky-geometry helpers used above.
-{class}`skyscapes.background.ZodiSourceLeinert` documents the
+{class}`skyscapes.background.LeinertZodi` documents the
 Leinert+1998 surface-brightness model.
 
 [skyscapes-zodi]: ../../../skyscapes/docs/local_zodi_geometry.md

@@ -39,18 +39,18 @@ See the [README](https://github.com/CoreySpohn/coronagraphoto#quick-start) for a
 ```python
 import jax
 from coronagraphoto import (
-    OpticalPath, PrimaryAperture, SimpleDetector,
+    OpticalPath, PrimaryAperture, IdealDetector,
     load_scene_from_exovista, system_readout,
 )
-from coronagraphoto.optical_elements import ConstantThroughputElement
+from coronagraphoto.optical_elements import ConstantThroughput
 from yippy import EqxCoronagraph
 
 scene = load_scene_from_exovista("path/to/exovista_system.fits")
 optical_path = OpticalPath(
     primary=PrimaryAperture(diameter_m=6.0),
-    attenuating_elements=(ConstantThroughputElement(throughput=0.9),),
+    attenuating_elements=(ConstantThroughput(throughput=0.9),),
     coronagraph=EqxCoronagraph("path/to/coronagraph_data"),
-    detector=SimpleDetector(pixel_scale=0.01, shape=(512, 512)),
+    detector=IdealDetector(pixel_scale=0.01, shape=(512, 512)),
 )
 image = system_readout(
     scene, optical_path, jax.random.PRNGKey(0),

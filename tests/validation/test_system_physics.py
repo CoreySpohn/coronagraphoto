@@ -17,13 +17,13 @@ import numpy as np
 import pytest
 from hwoutils import constants as const
 from hwoutils import conversions as conv
-from skyscapes.background import ZodiSourceAYO
-from skyscapes.scene import SpectrumStar as StarSource
+from skyscapes.background import AYOZodi
+from skyscapes.scene import Star as StarSource
 
 from coronagraphoto import OpticalPath
 from coronagraphoto.optical_elements import (
-    ConstantThroughputElement,
-    SimpleDetector,
+    ConstantThroughput,
+    IdealDetector,
     SimplePrimary,
 )
 from coronagraphoto.simulation import (
@@ -94,8 +94,8 @@ class MockCoronagraph(eqx.Module):
 def perfect_system():
     """Create an OpticalPath with 100% throughput and a transparent coronagraph."""
     primary = SimplePrimary(diameter_m=2.0)
-    optics = ConstantThroughputElement(throughput=1.0)
-    detector = SimpleDetector(
+    optics = ConstantThroughput(throughput=1.0)
+    detector = IdealDetector(
         pixel_scale=0.05,
         shape=(101, 101),
         quantum_efficiency=1.0,
@@ -107,7 +107,7 @@ def perfect_system():
 
 @pytest.fixture
 def standard_star():
-    """Create a 0 Mag (AB) StarSource (SpectrumStar) for testing."""
+    """Create a 0 Mag (AB) StarSource (Star) for testing."""
     return StarSource(
         Ms_kg=const.Msun2kg,
         dist_pc=10.0,
@@ -160,20 +160,20 @@ class TestEndToEndRadiometry:
         """Verify that throughput elements correctly reduce flux."""
         # Create system with 50% throughput
         primary = SimplePrimary(diameter_m=2.0)
-        optics = ConstantThroughputElement(throughput=0.5)
-        detector = SimpleDetector(
+        optics = ConstantThroughput(throughput=0.5)
+        detector = IdealDetector(
             pixel_scale=0.05, shape=(101, 101), quantum_efficiency=1.0
         )
         coro = MockCoronagraph(size=101, pixel_scale_lod=0.5)
         lossy_system = OpticalPath(primary, (optics,), coro, detector)
 
         # Perfect system
-        perfect_optics = ConstantThroughputElement(throughput=1.0)
+        perfect_optics = ConstantThroughput(throughput=1.0)
         perfect_system = OpticalPath(
             SimplePrimary(2.0),
             (perfect_optics,),
             MockCoronagraph(size=101, pixel_scale_lod=0.5),
-            SimpleDetector(pixel_scale=0.05, shape=(101, 101), quantum_efficiency=1.0),
+            IdealDetector(pixel_scale=0.05, shape=(101, 101), quantum_efficiency=1.0),
         )
 
         WAVELENGTH = 550.0
@@ -214,9 +214,9 @@ class TestSurfaceBrightness:
     """Verify extended source integration is correct."""
 
     def test_zodi_surface_brightness_integration(self, perfect_system):
-        """Verify ZodiSource generates correct counts/pixel for an extended source."""
+        """Verify Zodi generates correct counts/pixel for an extended source."""
         wavelengths = jnp.array([450.0, 550.0, 650.0])
-        zodi = ZodiSourceAYO(wavelengths, surface_brightness_mag=22.0)
+        zodi = AYOZodi(wavelengths, surface_brightness_mag=22.0)
 
         WAVELENGTH = 550.0
         WIDTH = 1.0
@@ -303,9 +303,9 @@ class TestPlanetFidelity:
         from orbix.kepler.shortcuts.grid import get_grid_solver
         from orbix.system.orbit import KeplerianOrbit
         from skyscapes.atmosphere import LambertianAtmosphere
-        from skyscapes.scene import Planet, SpectrumStar
+        from skyscapes.scene import Planet, Star
 
-        star = SpectrumStar(
+        star = Star(
             Ms_kg=const.Msun2kg,
             dist_pc=10.0,
             wavelengths_nm=jnp.array([400.0, 550.0, 700.0, 800.0]),
@@ -344,9 +344,9 @@ class TestPlanetFidelity:
         from orbix.kepler.shortcuts.grid import get_grid_solver
         from orbix.system.orbit import KeplerianOrbit
         from skyscapes.atmosphere import GridAtmosphere
-        from skyscapes.scene import Planet, SpectrumStar
+        from skyscapes.scene import Planet, Star
 
-        star = SpectrumStar(
+        star = Star(
             Ms_kg=const.Msun2kg,
             dist_pc=10.0,
             wavelengths_nm=jnp.array([400.0, 550.0, 700.0]),
@@ -464,17 +464,17 @@ class TestPlanetFidelity:
         future regression that would break this trace-time vectorisation
         (e.g. a Python branch on a traced time value).
 
-        Uses a local ``SimpleStar`` instead of the ``planet_setup``
-        fixture's ``SpectrumStar`` because the fixture's flux interpolant
+        Uses a local ``FlatStar`` instead of the ``planet_setup``
+        fixture's ``Star`` because the fixture's flux interpolant
         is built over ``times_jd=[0, 1]`` and extrapolates to NaN at the
         times we sweep here.
         """
         from orbix.kepler.shortcuts.grid import get_grid_solver
         from orbix.system.orbit import KeplerianOrbit
         from skyscapes.atmosphere import LambertianAtmosphere
-        from skyscapes.scene import Planet, SimpleStar
+        from skyscapes.scene import FlatStar, Planet
 
-        star = SimpleStar(
+        star = FlatStar(
             Ms_kg=const.Msun2kg,
             dist_pc=10.0,
             flux_phot_per_nm_m2=1e9,
@@ -546,7 +546,7 @@ class TestMaskPhysics:
         background (zodi) light reaches each coronagraph pixel. Setting
         it to zero in a region should zero out zodi flux there.
         """
-        zodi = ZodiSourceAYO(jnp.array([550.0]), surface_brightness_mag=20.0)
+        zodi = AYOZodi(jnp.array([550.0]), surface_brightness_mag=20.0)
         WAVELENGTH = 550.0
         BIN_WIDTH = 50.0
 
@@ -582,7 +582,7 @@ class TestMaskPhysics:
 class TestZodiTypeAgnosticDispatch:
     """Regression guard for nominal-union zodi dispatch.
 
-    ``zodi_rate`` must accept any concrete ``ZodiSource`` and
+    ``zodi_rate`` must accept any concrete ``Zodi`` and
     route it through the same code path (no type-based branching).
 
     AYO and PhotonFlux share an identical photon-flux model when
@@ -595,10 +595,10 @@ class TestZodiTypeAgnosticDispatch:
     """
 
     def test_gen_zodi_count_rate_is_zodi_type_agnostic(self, perfect_system):
-        """All three ZodiSource variants flow through zodi_rate."""
+        """All three Zodi variants flow through zodi_rate."""
         from skyscapes.background import (
-            ZodiSourceLeinert,
-            ZodiSourcePhotonFlux,
+            LeinertZodi,
+            PrecomputedZodi,
         )
 
         WAVELENGTH = 550.0
@@ -606,13 +606,13 @@ class TestZodiTypeAgnosticDispatch:
         wavelengths = jnp.array([WAVELENGTH])
         mag = 22.0
 
-        ayo = ZodiSourceAYO(wavelengths, surface_brightness_mag=mag)
-        phot = ZodiSourcePhotonFlux(
+        ayo = AYOZodi(wavelengths, surface_brightness_mag=mag)
+        phot = PrecomputedZodi(
             wavelengths,
             jnp.array([ayo.spec_flux_density(WAVELENGTH, 0.0)]),
             reference_mag_arcsec2=mag,
         )
-        leinert = ZodiSourceLeinert(reference_mag_arcsec2=mag)
+        leinert = LeinertZodi(reference_mag_arcsec2=mag)
 
         zodi_kwargs = dict(
             start_time_jd=0.0,
@@ -648,7 +648,7 @@ class TestDiskPipelineGuards:
     def test_gen_disk_count_rate_raises_on_missing_psf_datacube(self):
         """A coronagraph without a PSF datacube must fail loudly, not silently."""
         from skyscapes.disk import ExovistaDisk
-        from skyscapes.scene import SpectrumStar
+        from skyscapes.scene import Star
 
         from coronagraphoto.simulation import disk_rate
 
@@ -661,8 +661,8 @@ class TestDiskPipelineGuards:
             )
 
         primary = SimplePrimary(diameter_m=2.0)
-        optics = ConstantThroughputElement(throughput=1.0)
-        detector = SimpleDetector(
+        optics = ConstantThroughput(throughput=1.0)
+        detector = IdealDetector(
             pixel_scale=0.05,
             shape=(51, 51),
             quantum_efficiency=1.0,
@@ -677,7 +677,7 @@ class TestDiskPipelineGuards:
             wavelengths_nm=wl,
             contrast_cube=jnp.full((wl.size, 51, 51), 1e-9),
         )
-        star = SpectrumStar(
+        star = Star(
             Ms_kg=const.Msun2kg,
             dist_pc=10.0,
             wavelengths_nm=jnp.array([400.0, 550.0, 700.0]),

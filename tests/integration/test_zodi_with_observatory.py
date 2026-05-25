@@ -1,4 +1,4 @@
-"""Integration: ``zodi_rate`` x ``ObservatoryL2Halo`` x ``ZodiSourceLeinert``.
+"""Integration: ``zodi_rate`` x ``ObservatoryL2Halo`` x ``LeinertZodi``.
 
 Drives the full per-frame zodi-rate computation a paper figure / yield
 calculation would do, with the orbix L2 halo observatory feeding
@@ -22,12 +22,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from orbix.observatory import ObservatoryL2Halo
-from skyscapes.background import ZodiSourceLeinert
+from skyscapes.background import LeinertZodi
 
 from coronagraphoto import OpticalPath
 from coronagraphoto.optical_elements import (
-    ConstantThroughputElement,
-    SimpleDetector,
+    ConstantThroughput,
+    IdealDetector,
     SimplePrimary,
 )
 from coronagraphoto.simulation import zodi_rate
@@ -60,8 +60,8 @@ class _PerfectCoronagraph(eqx.Module):
 def optical_path():
     """8 m primary + perfect optics + mock coronagraph + flat detector."""
     primary = SimplePrimary(diameter_m=8.0)
-    optics = ConstantThroughputElement(throughput=1.0)
-    detector = SimpleDetector(
+    optics = ConstantThroughput(throughput=1.0)
+    detector = IdealDetector(
         pixel_scale=0.05,
         shape=(65, 65),
         quantum_efficiency=1.0,
@@ -80,7 +80,7 @@ def observatory():
 @pytest.fixture(scope="module")
 def zodi():
     """V-band 22 mag Leinert zodi source."""
-    return ZodiSourceLeinert(reference_mag_arcsec2=22.0)
+    return LeinertZodi(reference_mag_arcsec2=22.0)
 
 
 def _integrated_year(

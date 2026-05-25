@@ -11,7 +11,7 @@ from optixstuff import OpticalPath
 
 from coronagraphoto.loaders import load_scene_from_exovista
 from coronagraphoto.optical_elements import (
-    SimpleDetector,
+    IdealDetector,
     SimplePrimary,
 )
 from coronagraphoto.simulation import (
@@ -28,8 +28,8 @@ from coronagraphoto.simulation import (
 )
 
 __all__ = [
+    "IdealDetector",
     "OpticalPath",
-    "SimpleDetector",
     "SimplePrimary",
     "disk_rate",
     "disk_readout",

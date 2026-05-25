@@ -4,7 +4,7 @@ from collections.abc import Sequence
 
 import jax.numpy as jnp
 from skyscapes import Scene, from_exovista
-from skyscapes.background import ZodiSourceAYO
+from skyscapes.background import AYOZodi
 
 
 def load_scene_from_exovista(
@@ -16,7 +16,7 @@ def load_scene_from_exovista(
     """Load a full :class:`skyscapes.Scene` from an ExoVista FITS file.
 
     Delegates system loading to :func:`skyscapes.from_exovista` and adds
-    a default :class:`~skyscapes.background.ZodiSourceAYO` background using
+    a default :class:`~skyscapes.background.AYOZodi` background using
     the host star's wavelength grid.
 
     The earlier ``required_planets`` parameter was removed: variadic
@@ -42,7 +42,7 @@ def load_scene_from_exovista(
     )
 
     wavelengths_nm = jnp.asarray(system.star._wavelengths_nm)
-    zodi = ZodiSourceAYO(
+    zodi = AYOZodi(
         wavelengths_nm=wavelengths_nm,
         surface_brightness_mag=zodi_surface_brightness_mag,
     )
