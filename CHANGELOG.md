@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.1.0](https://github.com/CoreySpohn/coronagraphoto/compare/v3.0.0...v3.1.0) (2026-06-23)
+
+
+### Features
+
+* Add citation file and badge ([12b7734](https://github.com/CoreySpohn/coronagraphoto/commit/12b7734e3ba2616ae83e561051059c938beaa8a5))
+
 ## [3.0.0](https://github.com/CoreySpohn/coronagraphoto/compare/v2.3.1...v3.0.0) (2026-05-25)
 
 
