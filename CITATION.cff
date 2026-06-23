@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: coronagraphoto
+abstract: "coronagraphoto is an open-source Python library for simulating coronagraphic observations of exoplanetary systems. It bridges yield calculations and image generation for missions like the Habitable Worlds Observatory (HWO) by combining high-fidelity coronagraph models loaded via yippy with planetary system simulations from ExoVista. Built on JAX, coronagraphoto is fully JIT-compilable, differentiable, and GPU-accelerated for large-scale optimization and high-performance simulation."
+authors:
+  - family-names: Spohn
+    given-names: Corey
+    orcid: "https://orcid.org/0000-0002-3138-0240"
+    affiliation: "NASA Goddard Space Flight Center"
+repository-code: "https://github.com/CoreySpohn/coronagraphoto"
+license: MIT
+doi: "10.5281/zenodo.10950736"
