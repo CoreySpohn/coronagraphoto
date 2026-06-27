@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.2.0](https://github.com/CoreySpohn/coronagraphoto/compare/v3.1.0...v3.2.0) (2026-06-27)
+
+
+### Features
+
+* **speckle:** add speckle_rate/readout and system wiring ([1e5bfcb](https://github.com/CoreySpohn/coronagraphoto/commit/1e5bfcb7c6fd30cf7e2286238996bd64cd08f983))
+
 ## [3.1.0](https://github.com/CoreySpohn/coronagraphoto/compare/v3.0.0...v3.1.0) (2026-06-23)
 
 
