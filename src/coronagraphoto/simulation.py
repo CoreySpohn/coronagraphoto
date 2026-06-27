@@ -20,6 +20,7 @@ multi-roll observations).
 
 import jax
 import jax.numpy as jnp
+from hwoutils.constants import d2s
 from hwoutils.conversions import arcsec_to_lambda_d, lambda_d_to_arcsec
 from hwoutils.transforms import ccw_rotation_matrix, resample_flux
 from skyscapes.background import Zodi
@@ -421,6 +422,77 @@ def zodi_readout(
 
 
 # ---------------------------------------------------------------------------
+# Speckle
+# ---------------------------------------------------------------------------
+
+
+def speckle_rate(
+    speckle,
+    optical_path,
+    *,
+    start_time_jd,
+    wavelength_nm,
+    bin_width_nm,
+    star,
+):
+    """Generate the speckle count rate on the detector.
+
+    The speckle field returns a CONTRAST delta (fraction of host-star flux
+    per pixel) -- the stochastic wavefront-error residual that sits on top
+    of the deterministic ``stellar_intens`` floor already applied in
+    :func:`star_rate`. We multiply by the host-star flux to convert to a
+    photon rate, then resample to the detector. Structurally this mirrors
+    :func:`star_rate`, not :func:`disk_rate`: the field is already a
+    post-coronagraph focal-plane map, so there is no PSF convolution.
+
+    Evolution is driven by time, not a PRNG key: the elapsed seconds are
+    ``(start_time_jd - speckle.epoch_jd)``, so the rate is deterministic
+    and differentiable and temporal correlation survives across a roll
+    sequence. The realization's randomness is fixed at construction.
+
+    The speckle map is taken on the coronagraph plane
+    (``speckle.pixel_scale_lod``, which v1 requires to equal
+    ``optical_path.coronagraph.pixel_scale_lod``) and resampled to the
+    detector by :func:`post_coro_bin_processing`.
+    """
+    time_s = (start_time_jd - speckle.epoch_jd) * d2s
+    flux = star.spec_flux_density(wavelength_nm, start_time_jd)
+    flux = pre_coro_bin_processing(flux, wavelength_nm, bin_width_nm, optical_path)
+    contrast = speckle.realize(wavelength_nm=wavelength_nm, time_s=time_s)
+    image_rate_coro = contrast * flux
+    return post_coro_bin_processing(image_rate_coro, wavelength_nm, optical_path)
+
+
+def speckle_readout(
+    speckle,
+    optical_path,
+    prng_key,
+    *,
+    start_time_jd,
+    exposure_time_s,
+    wavelength_nm,
+    bin_width_nm,
+    star,
+):
+    """Process a speckle field through the provided optical path.
+
+    The PRNG key is used only for the photon Poisson draw; the speckle
+    realization itself is deterministic in time (see :func:`speckle_rate`).
+    """
+    image_rate_detector = speckle_rate(
+        speckle,
+        optical_path,
+        start_time_jd=start_time_jd,
+        wavelength_nm=wavelength_nm,
+        bin_width_nm=bin_width_nm,
+        star=star,
+    )
+    return optical_path.detector.readout_source_electrons(
+        image_rate_detector, exposure_time_s, prng_key
+    )
+
+
+# ---------------------------------------------------------------------------
 # Whole-scene orchestrator
 # ---------------------------------------------------------------------------
 
@@ -440,9 +512,10 @@ def system_rate(
 
     The differentiable companion to :func:`system_readout`. Returns the
     total rate map (electrons/s/pixel, no Poisson noise, no QE multiply)
-    summing star, every planet, the optional disk, and the optional zodi.
-    Use this for likelihood evaluation, retrievals, or any inference loop
-    that needs gradients through the full forward model.
+    summing star, every planet, the optional disk, the optional zodi, and
+    the optional speckle field on ``optical_path``. Use this for likelihood
+    evaluation, retrievals, or any inference loop that needs gradients
+    through the full forward model.
     """
     has_disk = scene.system.disk is not None
     has_zodi = scene.zodi is not None
@@ -491,6 +564,16 @@ def system_rate(
             solar_lon_deg=solar_lon_deg,
         )
 
+    if optical_path.speckle is not None:
+        total = total + speckle_rate(
+            optical_path.speckle,
+            optical_path,
+            start_time_jd=start_time_jd,
+            wavelength_nm=wavelength_nm,
+            bin_width_nm=bin_width_nm,
+            star=scene.system.star,
+        )
+
     return total
 
 
@@ -510,7 +593,9 @@ def system_readout(
     """Simulate a full :class:`~skyscapes.Scene` through the optical path.
 
     Sums per-source detector readouts. Each source consumes its own
-    independent PRNG subkey (see :mod:`jax.random` best practices).
+    independent PRNG subkey (see :mod:`jax.random` best practices). The
+    optional speckle field on ``optical_path`` is the last source and
+    consumes the final subkey, so scenes run without one are unaffected.
 
     The Python loop over ``scene.system.planets`` is intentionally
     unjitted -- it orchestrates JIT-cached per-Planet-type kernels (see
@@ -519,8 +604,11 @@ def system_readout(
     """
     has_disk = scene.system.disk is not None
     has_zodi = scene.zodi is not None
+    has_speckle = optical_path.speckle is not None
 
-    n_keys = 1 + len(scene.system.planets) + int(has_disk) + int(has_zodi)
+    n_keys = (
+        1 + len(scene.system.planets) + int(has_disk) + int(has_zodi) + int(has_speckle)
+    )
     keys = iter(jax.random.split(prng_key, n_keys))
 
     total = star_readout(
@@ -573,6 +661,18 @@ def system_readout(
             bin_width_nm=bin_width_nm,
             ecliptic_lat_deg=ecliptic_lat_deg,
             solar_lon_deg=solar_lon_deg,
+        )
+
+    if has_speckle:
+        total = total + speckle_readout(
+            optical_path.speckle,
+            optical_path,
+            next(keys),
+            start_time_jd=start_time_jd,
+            exposure_time_s=exposure_time_s,
+            wavelength_nm=wavelength_nm,
+            bin_width_nm=bin_width_nm,
+            star=scene.system.star,
         )
 
     return total
