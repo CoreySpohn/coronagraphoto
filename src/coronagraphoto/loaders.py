@@ -12,6 +12,7 @@ def load_scene_from_exovista(
     planet_indices: Sequence[int] | None = None,
     only_earths: bool = False,
     zodi_surface_brightness_mag: float = 22.0,
+    load_disk: bool = True,
 ) -> Scene:
     """Load a full :class:`skyscapes.Scene` from an ExoVista FITS file.
 
@@ -30,6 +31,9 @@ def load_scene_from_exovista(
             Earths.
         zodi_surface_brightness_mag: V-band surface brightness for the
             default zodi background. Default 22.0 (AYO standard).
+        load_disk: If False, skip the disk extension and set
+            ``System.disk`` to ``None``. Use this when the coronagraph
+            has no PSF datacube (the disk pipeline requires one).
 
     Returns:
         ``skyscapes.Scene`` with the loaded system and a default zodi
@@ -39,6 +43,7 @@ def load_scene_from_exovista(
         fits_file,
         planet_indices=planet_indices,
         only_earths=only_earths,
+        load_disk=load_disk,
     )
 
     wavelengths_nm = jnp.asarray(system.star._wavelengths_nm)
