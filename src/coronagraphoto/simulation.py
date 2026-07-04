@@ -134,7 +134,7 @@ def planet_rate(
     batches K planets sharing the same atmosphere class). The Python
     loop over a heterogeneous ``System.planets`` tuple lives in
     :func:`system_readout`; this function stays inside the per-Planet-type
-    JIT cache boundary (see ``brain/Planet Loop Architecture.md``).
+    JIT cache boundary.
     """
     # The new Planet API takes a 1-D time axis; squeeze T=1.
     source_positions_as = planet.position_arcsec(
@@ -598,9 +598,8 @@ def system_readout(
     consumes the final subkey, so scenes run without one are unaffected.
 
     The Python loop over ``scene.system.planets`` is intentionally
-    unjitted -- it orchestrates JIT-cached per-Planet-type kernels (see
-    ``brain/Planet Loop Architecture.md``). The expensive math is inside
-    each ``planet_readout`` call, not the loop.
+    unjitted -- it orchestrates JIT-cached per-Planet-type kernels. The
+    expensive math is inside each ``planet_readout`` call, not the loop.
     """
     has_disk = scene.system.disk is not None
     has_zodi = scene.zodi is not None
