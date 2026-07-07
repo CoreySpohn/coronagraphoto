@@ -234,11 +234,9 @@ class TestOrbitalMechanics:
     def test_circular_orbit_constant_radius(self):
         """A circular orbit should maintain constant angular separation."""
         from orbix.kepler.shortcuts.grid import get_grid_solver
-        from orbix.system.planets import Planets as OrbixPlanets
+        from orbix.orbit import KeplerianOrbit
 
-        planets = OrbixPlanets(
-            Ms_kg=jnp.atleast_1d(const.Msun2kg),
-            dist_pc=jnp.atleast_1d(10.0),
+        orbit = KeplerianOrbit(
             a_AU=jnp.array([1.0]),
             e=jnp.array([0.0]),
             i_rad=jnp.array([0.0]),
@@ -246,39 +244,30 @@ class TestOrbitalMechanics:
             w_rad=jnp.array([0.0]),
             M0_rad=jnp.array([0.0]),
             t0_d=jnp.array([0.0]),
-            Mp_Mearth=jnp.array([0.0]),
-            Rp_Rearth=jnp.array([1.0]),
-            Ag=jnp.array([0.2]),
         )
         solver = get_grid_solver(level="scalar", E=False, trig=True, jit=True)
 
         times = jnp.array([0.0, 91.3, 182.6, 273.9])
         seps = []
         for t in times:
-            alpha, _ = planets.alpha_dMag(solver, jnp.atleast_1d(t))
+            alpha = orbit.separation_arcsec(
+                solver,
+                jnp.atleast_1d(t),
+                Ms_kg=jnp.atleast_1d(const.Msun2kg),
+                dist_pc=jnp.atleast_1d(10.0),
+            )
             seps.append(float(alpha[0, 0]))
 
         assert np.std(seps) / np.mean(seps) < 0.01
 
     def test_kepler_third_law(self):
         """Verify P² ∝ a³ (Kepler's Third Law)."""
-        from orbix.system.planets import Planets as OrbixPlanets
+        from orbix.equations.orbit import mean_motion
 
-        planets = OrbixPlanets(
-            Ms_kg=jnp.atleast_1d(const.Msun2kg),
-            dist_pc=jnp.atleast_1d(10.0),
-            a_AU=jnp.array([1.0, 4.0]),
-            e=jnp.array([0.0, 0.0]),
-            i_rad=jnp.array([0.0, 0.0]),
-            W_rad=jnp.array([0.0, 0.0]),
-            w_rad=jnp.array([0.0, 0.0]),
-            M0_rad=jnp.array([0.0, 0.0]),
-            t0_d=jnp.array([0.0, 0.0]),
-            Mp_Mearth=jnp.array([0.0, 0.0]),
-            Rp_Rearth=jnp.array([1.0, 1.0]),
-            Ag=jnp.array([0.2, 0.2]),
-        )
+        a = jnp.array([1.0, 4.0])
+        mu = const.G * const.Msun2kg
+        n = mean_motion(a, mu)
 
-        period_ratio = float(planets.n_radpd[0]) / float(planets.n_radpd[1])
+        period_ratio = float(n[0]) / float(n[1])
         expected = np.sqrt(4.0**3)
         assert jnp.isclose(period_ratio, expected, rtol=1e-4)
