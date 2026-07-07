@@ -94,7 +94,7 @@ class TestLeinertZodiValidation:
 
     def test_ecliptic_pole_dimmer_than_plane(self):
         """The ecliptic pole must be dimmer than the ecliptic plane."""
-        from orbix.observatory.zodiacal import leinert_zodi_factor
+        from skyscapes.background.leinert import leinert_zodi_factor
 
         factor_plane = leinert_zodi_factor(ecliptic_lat_deg=0.0, solar_lon_deg=90.0)
         factor_pole = leinert_zodi_factor(ecliptic_lat_deg=90.0, solar_lon_deg=90.0)
@@ -102,7 +102,7 @@ class TestLeinertZodiValidation:
 
     def test_closer_to_sun_brighter(self):
         """Looking closer to the Sun should increase zodiacal brightness."""
-        from orbix.observatory.zodiacal import leinert_zodi_factor
+        from skyscapes.background.leinert import leinert_zodi_factor
 
         factor_close = leinert_zodi_factor(ecliptic_lat_deg=0.0, solar_lon_deg=30.0)
         factor_far = leinert_zodi_factor(ecliptic_lat_deg=0.0, solar_lon_deg=90.0)
