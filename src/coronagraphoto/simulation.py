@@ -18,6 +18,8 @@ keeps signatures discoverable when more parameters land later (IFS,
 multi-roll observations).
 """
 
+import math
+
 import jax
 import jax.numpy as jnp
 from hwoutils.constants import d2s
@@ -455,6 +457,16 @@ def speckle_rate(
     ``optical_path.coronagraph.pixel_scale_lod``) and resampled to the
     detector by :func:`post_coro_bin_processing`.
     """
+    coro_scale = optical_path.coronagraph.pixel_scale_lod
+    if not math.isclose(
+        float(speckle.pixel_scale_lod), float(coro_scale), rel_tol=1e-9, abs_tol=1e-12
+    ):
+        raise ValueError(
+            f"speckle.pixel_scale_lod ({float(speckle.pixel_scale_lod)}) must match "
+            f"the coronagraph pixel_scale_lod ({float(coro_scale)}): the speckle map "
+            "and the coronagraph must share a plate scale, else the resample to the "
+            "detector silently rescales the speckle geometry"
+        )
     time_s = (start_time_jd - speckle.epoch_jd) * d2s
     flux = star.spec_flux_density(wavelength_nm, start_time_jd)
     flux = pre_coro_bin_processing(flux, wavelength_nm, bin_width_nm, optical_path)

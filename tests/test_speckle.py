@@ -9,6 +9,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import optixstuff as ox
+import pytest
 from optixstuff.coronagraph import AbstractScalarCoronagraph
 
 from coronagraphoto import (
@@ -105,6 +106,16 @@ class TestSpeckleRate:
         assert m.shape == op.detector.shape
         assert jnp.all(m >= 0)
         assert jnp.all(jnp.isfinite(m))
+
+    def test_rejects_pixel_scale_mismatch(self):
+        """Reject a speckle map on a different plate scale than the coronagraph.
+
+        Otherwise the resample to the detector would silently rescale the
+        speckle geometry.
+        """
+        op = _optical_path(_MockSpeckle(pixel_scale_lod=0.25))  # coronagraph is 0.5
+        with pytest.raises(ValueError, match="pixel_scale_lod"):
+            speckle_rate(op.speckle, op, star=_MockStar(), **_OBS)
 
     def test_time_varying(self):
         """The realized map changes with observation time."""
