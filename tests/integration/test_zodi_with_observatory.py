@@ -112,8 +112,13 @@ def _integrated_year(
             solar_lon_deg=helio_lon,
         )
         rate_np = np.asarray(rate)
-        # NaN at unobservable epochs -> sum=NaN; skip those.
-        sums[i] = rate_np.sum() if np.isfinite(rate_np).all() else np.nan
+        # Observability is a geometric Sun-keepout gate, not a zodi-table
+        # artifact: the Leinert lookup now clamps near-Sun instead of
+        # returning NaN, so mask unobservable frames by solar elongation
+        # below the 45 deg Sun keepout minimum.
+        elong_deg = float(obs.solar_elongation_deg(float(mjd), ra_rad, dec_rad))
+        observable = elong_deg >= 45.0
+        sums[i] = rate_np.sum() if observable else np.nan
     return mjds - 60575.25, sums
 
 
@@ -121,8 +126,9 @@ def test_argmax_phase_shifts_by_ecliptic_longitude(observatory, zodi, optical_pa
     """Ecliptic-plane targets at +90 deg apart peak ~90 days apart.
 
     The conjunction date (helio_ecliptic_longitude_deg -> 0) shifts in
-    proportion to the target's ecliptic longitude, so the integrated
-    zodi count rate's annual maximum tracks the same calendar shift.
+    proportion to the target's ecliptic longitude. The observable maximum
+    sits at the Sun-keepout edge (the closest-to-conjunction observable
+    frame), so it tracks the same calendar shift.
     """
     # Target A: ecl_lon=0 (RA=0, Dec=0).
     days_a, sums_a = _integrated_year(observatory, zodi, optical_path, 0.0, 0.0)
@@ -138,20 +144,25 @@ def test_argmax_phase_shifts_by_ecliptic_longitude(observatory, zodi, optical_pa
 
 
 def test_ecliptic_target_brighter_than_high_latitude(observatory, zodi, optical_path):
-    """An ecliptic-plane target undergoes much larger annual modulation.
+    """An ecliptic-plane target's observable-peak zodi dominates a high-lat one.
 
-    At conjunction the ecliptic-plane target's zodi is many times
-    brighter than the high-latitude target's peak. Sanity check the
-    ratio at each target's argmax (away from any NaN unobservable
-    window).
+    Both targets are limited to similar minimum solar elongations by the
+    45 deg Sun keepout (~48 deg for the ecliptic-plane target, ~53 deg for
+    the high-latitude one), so the peak is taken at the keepout edge, not
+    at conjunction. There the ecliptic-plane target still dominates by
+    several times because it sits in the bright zodiacal plane while the
+    high-latitude target looks well above it. (Before the near-Sun clamp
+    fix this ratio was >10x, but that reflected the ecliptic target
+    reaching the unphysical ~15-30 deg Leinert-table edge, inside the Sun
+    keepout -- not an observable epoch.)
     """
     _, sums_eq = _integrated_year(observatory, zodi, optical_path, 0.0, 0.0)
     _, sums_hi = _integrated_year(observatory, zodi, optical_path, 0.0, 60.0)
     peak_eq = float(np.nanmax(sums_eq))
     peak_hi = float(np.nanmax(sums_hi))
-    assert peak_eq / peak_hi > 10.0, (
+    assert peak_eq / peak_hi > 3.0, (
         f"Ecliptic-plane peak ({peak_eq:.2e}) should dominate the "
-        f"high-latitude peak ({peak_hi:.2e}) by >10x; got "
+        f"high-latitude peak ({peak_hi:.2e}) by >3x at the keepout edge; got "
         f"{peak_eq / peak_hi:.2f}"
     )
 
