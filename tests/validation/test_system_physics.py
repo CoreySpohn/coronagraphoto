@@ -303,7 +303,7 @@ class TestPlanetFidelity:
     def planet_setup(self):
         """Build a scene.Planet at 5 AU (0.5 arcsec @ 10pc) with grey contrast."""
         from orbix.kepler.shortcuts.grid import get_grid_solver
-        from orbix.system.orbit import KeplerianOrbit
+        from orbix.orbit import KeplerianOrbit
         from skyscapes.physical_model import LambertianPhysicalModel
         from skyscapes.scene import Planet, Star
 
@@ -346,7 +346,7 @@ class TestPlanetFidelity:
         ignores wavelength entirely.
         """
         from orbix.kepler.shortcuts.grid import get_grid_solver
-        from orbix.system.orbit import KeplerianOrbit
+        from orbix.orbit import KeplerianOrbit
         from skyscapes.physical_model import GridPhysicalModel
         from skyscapes.scene import Planet, Star
 
@@ -478,7 +478,7 @@ class TestPlanetFidelity:
         times we sweep here.
         """
         from orbix.kepler.shortcuts.grid import get_grid_solver
-        from orbix.system.orbit import KeplerianOrbit
+        from orbix.orbit import KeplerianOrbit
         from skyscapes.physical_model import LambertianPhysicalModel
         from skyscapes.scene import FlatStar, Planet
 
