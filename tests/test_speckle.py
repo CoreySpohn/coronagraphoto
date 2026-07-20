@@ -6,11 +6,12 @@ star, and a star-only duck scene -- no fetched datasets needed.
 
 from __future__ import annotations
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optixstuff as ox
 import pytest
-from optixstuff.coronagraph import AbstractScalarCoronagraph
+from optixstuff.coronagraph import AbstractTableCoronagraph
 
 from coronagraphoto import (
     speckle_rate,
@@ -24,12 +25,15 @@ from coronagraphoto import (
 _EPOCH_JD = 2451545.0  # J2000
 
 
-class _MockCoro(AbstractScalarCoronagraph):
-    """Scalar coronagraph with a flat stellar-leakage floor."""
+class _MockCoro(AbstractTableCoronagraph):
+    """Table coronagraph with a flat stellar-leakage floor."""
 
     pixel_scale_lod: float = 0.5
     IWA: float = 2.0
     OWA: float = 30.0
+    psf_shape: tuple = (16, 16)
+    psf_datacube: object = None
+    sky_trans: jnp.ndarray = eqx.field(default_factory=lambda: jnp.ones((16, 16)))
 
     def throughput(self, sep, wl, *, time_s=0.0):
         return 0.5
@@ -45,6 +49,10 @@ class _MockCoro(AbstractScalarCoronagraph):
 
     def stellar_intens(self, stellar_diam_lod):
         return jnp.full((16, 16), 1e-9)
+
+    def create_psfs(self, x_lod, y_lod):
+        k = jnp.atleast_1d(jnp.asarray(x_lod)).shape[0]
+        return jnp.zeros((k, 16, 16))
 
 
 class _MockSpeckle(ox.AbstractSpeckleField):
@@ -107,15 +115,38 @@ class TestSpeckleRate:
         assert jnp.all(m >= 0)
         assert jnp.all(jnp.isfinite(m))
 
-    def test_rejects_pixel_scale_mismatch(self):
-        """Reject a speckle map on a different plate scale than the coronagraph.
+    def test_pixel_scale_sets_speckle_geometry(self):
+        """The detector resample keys on ``speckle.pixel_scale_lod`` itself.
 
-        Otherwise the resample to the detector would silently rescale the
-        speckle geometry.
+        The speckle plane no longer needs to share the coronagraph's
+        plate scale: the same speckle array declared at half the scale
+        must land at half the angular offset on the detector.
         """
-        op = _optical_path(_MockSpeckle(pixel_scale_lod=0.25))  # coronagraph is 0.5
-        with pytest.raises(ValueError, match="pixel_scale_lod"):
-            speckle_rate(op.speckle, op, star=_MockStar(), **_OBS)
+
+        class _BlobSpeckle(ox.AbstractSpeckleField):
+            """A resolved Gaussian blob offset +20 speckle pixels in x."""
+
+            pixel_scale_lod: float = 0.5
+            epoch_jd: float = _EPOCH_JD
+
+            def realize(self, *, wavelength_nm, time_s=0.0):
+                yy, xx = jnp.mgrid[:64, :64]
+                c = (64 - 1) / 2.0
+                r2 = (xx - c - 20.0) ** 2 + (yy - c) ** 2
+                return 1e-8 * jnp.exp(-r2 / (2.0 * 2.0**2))
+
+        def _com_x(scale):
+            op = ox.OpticalPath.from_default_setup(
+                _MockCoro(),  # coronagraph plate scale stays 0.5
+                detector_shape=(64, 64),
+                pixel_scale_arcsec=0.01,
+                speckle=_BlobSpeckle(pixel_scale_lod=scale),
+            )
+            m = speckle_rate(op.speckle, op, star=_MockStar(), **_OBS)
+            x = jnp.arange(m.shape[1]) - (m.shape[1] - 1) / 2.0
+            return float(jnp.sum(m * x[None, :]) / jnp.sum(m))
+
+        assert _com_x(0.5) == pytest.approx(2.0 * _com_x(0.25), rel=0.05)
 
     def test_time_varying(self):
         """The realized map changes with observation time."""

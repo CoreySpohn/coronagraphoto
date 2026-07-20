@@ -35,11 +35,9 @@ class TestSimulationFunctions:
     def test_helper_functions_exist(self):
         """Verify helper functions are importable."""
         from coronagraphoto.simulation import (
-            _convolve_quadrants,
-            post_coro_bin_processing,
+            _detector_sampling_lod,
             pre_coro_bin_processing,
         )
 
-        assert callable(_convolve_quadrants)
-        assert callable(post_coro_bin_processing)
+        assert callable(_detector_sampling_lod)
         assert callable(pre_coro_bin_processing)

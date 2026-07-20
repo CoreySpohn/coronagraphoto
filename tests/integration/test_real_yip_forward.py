@@ -21,6 +21,7 @@ from optixstuff import (
     IdealDetector,
     OpticalPath,
     SimplePrimary,
+    YippyCoronagraph,
 )
 from skyscapes.datasets import fetch_scene
 from yippy import EqxCoronagraph
@@ -45,7 +46,7 @@ def real_optical_path():
     same coverage runs in seconds.
     """
     yip_path = fetch_coronagraph()
-    coro = EqxCoronagraph(yip_path, ensure_psf_datacube=False)
+    coro = YippyCoronagraph(backend=EqxCoronagraph(yip_path, ensure_psf_datacube=False))
 
     ny, nx = coro.psf_shape
     primary = SimplePrimary(diameter_m=8.0)

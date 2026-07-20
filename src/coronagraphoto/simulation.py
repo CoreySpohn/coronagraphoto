@@ -18,8 +18,6 @@ keeps signatures discoverable when more parameters land later (IFS,
 multi-roll observations).
 """
 
-import math
-
 import jax
 import jax.numpy as jnp
 from hwoutils.constants import d2s
@@ -38,34 +36,20 @@ def pre_coro_bin_processing(flux, bin_center_nm, bin_width_nm, optical_path):
     return flux * optical_path.system_throughput(bin_center_nm)
 
 
-def _resample_to_detector(image_rate_coro, bin_center_nm, optical_path):
-    """Resample a coronagraph-plane image onto the detector pixel grid.
+def _detector_sampling_lod(bin_center_nm, optical_path):
+    """The detector grid expressed in coronagraph (lambda/D) units.
 
-    Pipeline geometry, not detector hardware: needs the coronagraph's
-    plate scale (lambda/D / px), the detector's plate scale (arcsec/px),
-    the wavelength, and the primary diameter to convert lambda/D to
-    arcsec.
+    The coronagraph contract is sampling-explicit and dimensionless:
+    every rate function requests maps directly at the detector grid,
+    converted to lambda/D at this wavelength. Chromatic magnification
+    is exactly this conversion changing with the bin center.
     """
-    inc_pixel_scale_arcsec = lambda_d_to_arcsec(
-        optical_path.coronagraph.pixel_scale_lod,
+    pixel_scale_lod = arcsec_to_lambda_d(
+        optical_path.detector.pixel_scale_arcsec,
         bin_center_nm,
         optical_path.primary.diameter_m,
     )
-    return resample_flux(
-        image_rate_coro,
-        inc_pixel_scale_arcsec,
-        optical_path.detector.pixel_scale_arcsec,
-        optical_path.detector.shape,
-        0.0,  # rotation is applied source-side, not detector-side
-    )
-
-
-def post_coro_bin_processing(image_rate_coro, bin_center_nm, optical_path):
-    """Process a bin through the post-coro elements of the optical path."""
-    image_rate_detector = _resample_to_detector(
-        image_rate_coro, bin_center_nm, optical_path
-    )
-    return jnp.clip(image_rate_detector, 0, None)
+    return pixel_scale_lod, optical_path.detector.shape
 
 
 # ---------------------------------------------------------------------------
@@ -87,8 +71,14 @@ def star_rate(
     )
     flux = star.spec_flux_density(wavelength_nm, start_time_jd)
     flux = pre_coro_bin_processing(flux, wavelength_nm, bin_width_nm, optical_path)
-    image_rate_coro = optical_path.coronagraph.stellar_intens(source_diam_lod) * flux
-    return post_coro_bin_processing(image_rate_coro, wavelength_nm, optical_path)
+    pixel_scale_lod, shape = _detector_sampling_lod(wavelength_nm, optical_path)
+    image_rate = flux * optical_path.coronagraph.stellar_map(
+        wavelength_nm,
+        source_diam_lod,
+        pixel_scale_lod=pixel_scale_lod,
+        shape=shape,
+    )
+    return jnp.clip(image_rate, 0, None)
 
 
 def star_readout(
@@ -162,11 +152,16 @@ def planet_rate(
     )[:, 0]  # (K,) -- drop T=1 axis
     flux = pre_coro_bin_processing(flux, wavelength_nm, bin_width_nm, optical_path)
 
-    psfs = optical_path.coronagraph.create_psfs(
-        source_positions_lod[0], source_positions_lod[1]
+    pixel_scale_lod, shape = _detector_sampling_lod(wavelength_nm, optical_path)
+    psfs = optical_path.coronagraph.source_psfs(
+        wavelength_nm,
+        source_positions_lod[0],
+        source_positions_lod[1],
+        pixel_scale_lod=pixel_scale_lod,
+        shape=shape,
     )
-    image_rate_coro = jnp.einsum("i,ijk->jk", flux, psfs)
-    return post_coro_bin_processing(image_rate_coro, wavelength_nm, optical_path)
+    image_rate = jnp.einsum("i,ijk->jk", flux, psfs)
+    return jnp.clip(image_rate, 0, None)
 
 
 def planet_readout(
@@ -203,49 +198,6 @@ def planet_readout(
 # ---------------------------------------------------------------------------
 
 
-def _convolve_quadrants(flux, psf_datacube):
-    """Convolve flux with a quarter-symmetric PSF datacube via fold-and-sum.
-
-    Handles padding dynamically to ensure all quadrants match the shape of the
-    first quadrant (which defines the PSF datacube shape).
-    """
-    ny, nx = flux.shape
-    cy, cx = (ny - 1) // 2, (nx - 1) // 2
-
-    # Q1: top-right (includes center pixel and axes) -> reference shape
-    q1 = flux[cy:, cx:]
-    target_h, target_w = q1.shape
-
-    # Q2: top-left -- flip X, pad inner-left + outer-right to target width
-    q2_raw = flux[cy:, :cx]
-    q2_flipped = q2_raw[:, ::-1]
-    pad_q2_right = max(0, target_w - (q2_flipped.shape[1] + 1))
-    q2 = jnp.pad(q2_flipped, ((0, 0), (1, pad_q2_right)))
-
-    # Q3: bottom-left -- flip both, pad inner-top, inner-left, outer-bottom/right
-    q3_raw = flux[:cy, :cx]
-    q3_flipped = q3_raw[::-1, ::-1]
-    pad_q3_bottom = max(0, target_h - (q3_flipped.shape[0] + 1))
-    pad_q3_right = max(0, target_w - (q3_flipped.shape[1] + 1))
-    q3 = jnp.pad(q3_flipped, ((1, pad_q3_bottom), (1, pad_q3_right)))
-
-    # Q4: bottom-right -- flip Y, pad inner-top + outer-bottom
-    q4_raw = flux[:cy, cx:]
-    q4_flipped = q4_raw[::-1, :]
-    pad_q4_bottom = max(0, target_h - (q4_flipped.shape[0] + 1))
-    q4 = jnp.pad(q4_flipped, ((1, pad_q4_bottom), (0, 0)))
-
-    flux_stack = jnp.stack([q1, q2, q3, q4])
-    partial_images = jnp.einsum("qij,ijxy->qxy", flux_stack, psf_datacube)
-
-    img_q1 = partial_images[0]
-    img_q2 = jnp.fliplr(partial_images[1])
-    img_q3 = jnp.flipud(jnp.fliplr(partial_images[2]))
-    img_q4 = jnp.flipud(partial_images[3])
-
-    return img_q1 + img_q2 + img_q3 + img_q4
-
-
 def disk_rate(
     disk,
     optical_path,
@@ -266,58 +218,35 @@ def disk_rate(
 
     ``incl_deg`` / ``pa_deg`` are the disk's intrinsic orientation in the
     sky frame; ``telescope_pa_deg`` is the telescope's roll. The disk is
-    rendered at its intrinsic geometry, then resample_flux rotates the
-    rendered image by ``-telescope_pa_deg`` into the detector frame.
+    rendered at its intrinsic geometry and the coronagraph's
+    ``extended_scene`` rotates it by ``-telescope_pa_deg`` into the
+    detector frame while rendering.
 
     Raises:
-        ValueError: if ``optical_path.coronagraph.psf_datacube`` is
-            ``None``.
+        ValueError: from the coronagraph if it cannot render an extended
+            scene (e.g. a table-backed coronagraph built without a PSF
+            datacube).
     """
-    if optical_path.coronagraph.psf_datacube is None:
-        raise ValueError(
-            "disk_rate requires a coronagraph with a PSF "
-            "datacube; got optical_path.coronagraph.psf_datacube=None. "
-            "The disk pipeline convolves the resampled disk image with "
-            "the per-source-position PSFs and cannot run without it."
-        )
-
     contrast = disk.surface_brightness(wavelength_nm, start_time_jd, incl_deg, pa_deg)
     star_flux = star.spec_flux_density(wavelength_nm, start_time_jd)
     flux = contrast * star_flux
     flux = pre_coro_bin_processing(flux, wavelength_nm, bin_width_nm, optical_path)
 
-    pixscale_tgt = lambda_d_to_arcsec(
-        optical_path.coronagraph.pixel_scale_lod,
+    map_pixel_scale_lod = arcsec_to_lambda_d(
+        disk.pixel_scale_arcsec,
         wavelength_nm,
         optical_path.primary.diameter_m,
     )
-    ny, nx = optical_path.coronagraph.psf_shape
-    flux = resample_flux(
+    pixel_scale_lod, shape = _detector_sampling_lod(wavelength_nm, optical_path)
+    image_rate = optical_path.coronagraph.extended_scene(
         flux,
-        disk.pixel_scale_arcsec,
-        pixscale_tgt,
-        (ny, nx),
-        -telescope_pa_deg,
+        map_pixel_scale_lod,
+        wavelength_nm,
+        pixel_scale_lod=pixel_scale_lod,
+        shape=shape,
+        rotation_deg=-telescope_pa_deg,
     )
-
-    psf_datacube = optical_path.coronagraph.psf_datacube
-    n_src_y, n_src_x = psf_datacube.shape[:2]
-    q_src_y = ny // 2 + 1
-    q_src_x = nx // 2 + 1
-    if n_src_y == ny and n_src_x == nx:
-        image_rate_coro = jnp.einsum("ij,ijxy->xy", flux, psf_datacube)
-    elif n_src_y == q_src_y and n_src_x == q_src_x:
-        image_rate_coro = _convolve_quadrants(flux, psf_datacube)
-    else:
-        raise ValueError(
-            "disk_rate: psf_datacube source-grid shape "
-            f"({n_src_y}, {n_src_x}) does not match either the full PSF "
-            f"shape ({ny}, {nx}) or the quarter PSF shape "
-            f"({q_src_y}, {q_src_x}). Coronagraphs must publish a full "
-            "or quarter datacube."
-        )
-
-    return post_coro_bin_processing(image_rate_coro, wavelength_nm, optical_path)
+    return jnp.clip(image_rate, 0, None)
 
 
 def disk_readout(
@@ -382,18 +311,16 @@ def zodi_rate(
     sb_per_arcsec2 = zodi.spec_flux_density(
         wavelength_nm, start_time_jd, ecliptic_lat_deg, solar_lon_deg
     )
-    pix_arcsec = lambda_d_to_arcsec(
-        optical_path.coronagraph.pixel_scale_lod,
-        wavelength_nm,
-        optical_path.primary.diameter_m,
-    )
-    flux_per_pixel = sb_per_arcsec2 * pix_arcsec**2
+    flux_per_pixel = sb_per_arcsec2 * optical_path.detector.pixel_scale_arcsec**2
 
-    flux_map = flux_per_pixel * optical_path.coronagraph.sky_trans
+    pixel_scale_lod, shape = _detector_sampling_lod(wavelength_nm, optical_path)
+    flux_map = flux_per_pixel * optical_path.coronagraph.background_transmission(
+        wavelength_nm, pixel_scale_lod=pixel_scale_lod, shape=shape
+    )
     flux_map = pre_coro_bin_processing(
         flux_map, wavelength_nm, bin_width_nm, optical_path
     )
-    return post_coro_bin_processing(flux_map, wavelength_nm, optical_path)
+    return jnp.clip(flux_map, 0, None)
 
 
 def zodi_readout(
@@ -452,27 +379,28 @@ def speckle_rate(
     and differentiable and temporal correlation survives across a roll
     sequence. The realization's randomness is fixed at construction.
 
-    The speckle map is taken on the coronagraph plane
-    (``speckle.pixel_scale_lod``, which v1 requires to equal
-    ``optical_path.coronagraph.pixel_scale_lod``) and resampled to the
-    detector by :func:`post_coro_bin_processing`.
+    The speckle map is taken on the plane declared by its own
+    ``speckle.pixel_scale_lod`` and resampled to the detector grid
+    directly, so it need not share a plate scale with the coronagraph.
     """
-    coro_scale = optical_path.coronagraph.pixel_scale_lod
-    if not math.isclose(
-        float(speckle.pixel_scale_lod), float(coro_scale), rel_tol=1e-9, abs_tol=1e-12
-    ):
-        raise ValueError(
-            f"speckle.pixel_scale_lod ({float(speckle.pixel_scale_lod)}) must match "
-            f"the coronagraph pixel_scale_lod ({float(coro_scale)}): the speckle map "
-            "and the coronagraph must share a plate scale, else the resample to the "
-            "detector silently rescales the speckle geometry"
-        )
     time_s = (start_time_jd - speckle.epoch_jd) * d2s
     flux = star.spec_flux_density(wavelength_nm, start_time_jd)
     flux = pre_coro_bin_processing(flux, wavelength_nm, bin_width_nm, optical_path)
     contrast = speckle.realize(wavelength_nm=wavelength_nm, time_s=time_s)
     image_rate_coro = contrast * flux
-    return post_coro_bin_processing(image_rate_coro, wavelength_nm, optical_path)
+    speckle_scale_arcsec = lambda_d_to_arcsec(
+        speckle.pixel_scale_lod,
+        wavelength_nm,
+        optical_path.primary.diameter_m,
+    )
+    image_rate = resample_flux(
+        image_rate_coro,
+        speckle_scale_arcsec,
+        optical_path.detector.pixel_scale_arcsec,
+        optical_path.detector.shape,
+        0.0,  # speckles are detector-fixed; rotation is applied source-side
+    )
+    return jnp.clip(image_rate, 0, None)
 
 
 def speckle_readout(

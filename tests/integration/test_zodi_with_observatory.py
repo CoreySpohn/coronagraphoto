@@ -17,7 +17,6 @@ This pins the orbix -> skyscapes -> coronagraphoto chain end-to-end.
 
 from __future__ import annotations
 
-import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -27,32 +26,59 @@ from optixstuff import (
     OpticalPath,
     SimplePrimary,
 )
+from optixstuff.coronagraph import AbstractTableCoronagraph
 from orbix.observatory import ObservatoryL2Halo
 from skyscapes.background import LeinertZodi
 
 from coronagraphoto.simulation import zodi_rate
 
 
-class _PerfectCoronagraph(eqx.Module):
+class _PerfectCoronagraph(AbstractTableCoronagraph):
     """Minimal mock coronagraph: full sky transmission, no PSF dependence.
 
-    ``zodi_rate`` only needs ``sky_trans`` (flat field) and the
-    detector pixel-scale conversion -- it does NOT convolve through the
-    PSF datacube. So this mock is enough for the zodi pipeline.
+    ``zodi_rate`` only needs ``background_transmission`` (served from
+    the flat ``sky_trans`` table) -- it does NOT convolve through the
+    PSF datacube. So this mock is enough for the zodi pipeline; the
+    stellar/PSF table members are zero stubs.
     """
 
     pixel_scale_lod: float
+    IWA: float
+    OWA: float
     psf_shape: tuple[int, int]
     sky_trans: jnp.ndarray
 
     def __init__(self, size: int = 65, pixel_scale_lod: float = 0.5):
         self.psf_shape = (size, size)
         self.pixel_scale_lod = pixel_scale_lod
+        self.IWA = 0.0
+        self.OWA = size * pixel_scale_lod / 2.0
         self.sky_trans = jnp.ones((size, size))
+
+    def stellar_intens(self, stellar_diam_lod):
+        """Zero stub (unused by the zodi pipeline)."""
+        return jnp.zeros(self.psf_shape)
+
+    def create_psfs(self, x_lod, y_lod):
+        """Zero stub (unused by the zodi pipeline)."""
+        k = jnp.atleast_1d(jnp.asarray(x_lod)).shape[0]
+        return jnp.zeros((k, *self.psf_shape))
+
+    def throughput(self, sep, wl, *, time_s=0.0):
+        return 1.0
+
+    def core_area(self, sep, wl, *, time_s=0.0):
+        return 1.0
+
+    def core_mean_intensity(self, sep, wl, *, time_s=0.0):
+        return 0.0
+
+    def occulter_transmission(self, sep, wl, *, time_s=0.0):
+        return 1.0
 
     @property
     def psf_datacube(self):
-        """Unused by ``zodi_rate`` but required by the protocol."""
+        """Unused by ``zodi_rate`` but part of the native-grid surface."""
         return None
 
 

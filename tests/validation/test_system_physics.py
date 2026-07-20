@@ -23,6 +23,7 @@ from optixstuff import (
     OpticalPath,
     SimplePrimary,
 )
+from optixstuff.coronagraph import AbstractTableCoronagraph
 from skyscapes.background import AYOZodi
 from skyscapes.scene import Star as StarSource
 
@@ -38,7 +39,7 @@ from coronagraphoto.simulation import (
 # =============================================================================
 
 
-class MockCoronagraph(eqx.Module):
+class MockCoronagraph(AbstractTableCoronagraph):
     """A 'Transparent' Coronagraph with Datacube support.
 
     Acts as a perfect lens:
@@ -46,10 +47,15 @@ class MockCoronagraph(eqx.Module):
     2. PSF = Gaussian centered exactly where requested (no aberrations)
     3. No complex optics or file loading required.
 
-    Includes an 'Identity' PSF Datacube for disk convolution tests.
+    Subclasses ``AbstractTableCoronagraph`` so the sampling-explicit
+    image contract (``stellar_map`` / ``source_psfs`` /
+    ``background_transmission`` / ``extended_scene``) is served from the
+    native-grid table SPI below.
     """
 
     pixel_scale_lod: float
+    IWA: float
+    OWA: float
     psf_shape: tuple[int, int]
     center_x: float
     center_y: float
@@ -67,8 +73,26 @@ class MockCoronagraph(eqx.Module):
         self.center_x = (size - 1) / 2.0
         self.center_y = (size - 1) / 2.0
         self.pixel_scale_lod = pixel_scale_lod
+        self.IWA = 0.0
+        self.OWA = size * pixel_scale_lod / 2.0
         self.sky_trans = jnp.ones((size, size))
         self.psf_datacube = None  # Not needed for point source tests
+
+    def throughput(self, separation_lod, wavelength_nm, *, time_s=0.0):
+        """Perfect lens: full core throughput."""
+        return 1.0
+
+    def core_area(self, separation_lod, wavelength_nm, *, time_s=0.0):
+        """Nominal unit photometric aperture."""
+        return 1.0
+
+    def core_mean_intensity(self, separation_lod, wavelength_nm, *, time_s=0.0):
+        """No stellar leakage floor."""
+        return 0.0
+
+    def occulter_transmission(self, separation_lod, wavelength_nm, *, time_s=0.0):
+        """Fully transparent to off-axis sources."""
+        return 1.0
 
     def create_psfs(self, x_lod: jnp.ndarray, y_lod: jnp.ndarray) -> jnp.ndarray:
         """Generate Gaussian PSFs at the specified lambda/D coordinates."""
@@ -662,13 +686,34 @@ class TestDiskPipelineGuards:
 
         from coronagraphoto.simulation import disk_rate
 
-        class _CoroNoDatacube(eqx.Module):
+        class _CoroNoDatacube(AbstractTableCoronagraph):
             pixel_scale_lod: float = 0.5
+            IWA: float = 0.0
+            OWA: float = 12.5
             psf_shape: tuple = (51, 51)
             psf_datacube: object = None
             sky_trans: jnp.ndarray = eqx.field(
                 default_factory=lambda: jnp.ones((51, 51))
             )
+
+            def stellar_intens(self, stellar_diam_lod):
+                return jnp.zeros((51, 51))
+
+            def create_psfs(self, x_lod, y_lod):
+                k = jnp.atleast_1d(jnp.asarray(x_lod)).shape[0]
+                return jnp.zeros((k, 51, 51))
+
+            def throughput(self, sep, wl, *, time_s=0.0):
+                return 1.0
+
+            def core_area(self, sep, wl, *, time_s=0.0):
+                return 1.0
+
+            def core_mean_intensity(self, sep, wl, *, time_s=0.0):
+                return 0.0
+
+            def occulter_transmission(self, sep, wl, *, time_s=0.0):
+                return 1.0
 
         primary = SimplePrimary(diameter_m=2.0)
         optics = ConstantThroughput(throughput=1.0)

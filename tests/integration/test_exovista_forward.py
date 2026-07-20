@@ -22,6 +22,7 @@ from optixstuff import (
     OpticalPath,
     SimplePrimary,
 )
+from optixstuff.coronagraph import AbstractTableCoronagraph
 from skyscapes.datasets import fetch_scene
 
 from coronagraphoto import load_scene_from_exovista, system_readout
@@ -29,10 +30,16 @@ from coronagraphoto import load_scene_from_exovista, system_readout
 pytestmark = [pytest.mark.slow, pytest.mark.integration]
 
 
-class _PerfectCoronagraph(eqx.Module):
-    """Mock coronagraph: Gaussian PSF, full sky transmission, quarter-grid datacube."""
+class _PerfectCoronagraph(AbstractTableCoronagraph):
+    """Mock coronagraph: Gaussian PSF, full sky transmission, quarter-grid datacube.
+
+    Subclasses ``AbstractTableCoronagraph`` so the sampling-explicit
+    image contract is served from the native-grid table SPI below.
+    """
 
     pixel_scale_lod: float
+    IWA: float
+    OWA: float
     psf_shape: tuple[int, int]
     center_x: float
     center_y: float
@@ -44,6 +51,8 @@ class _PerfectCoronagraph(eqx.Module):
         self.center_x = (size - 1) / 2.0
         self.center_y = (size - 1) / 2.0
         self.pixel_scale_lod = pixel_scale_lod
+        self.IWA = 0.0
+        self.OWA = size * pixel_scale_lod / 2.0
         self.sky_trans = jnp.ones((size, size))
 
         # Quarter-grid PSF datacube: one Gaussian PSF per source pixel in
@@ -77,6 +86,18 @@ class _PerfectCoronagraph(eqx.Module):
 
     def stellar_intens(self, diam_lod):
         return self.create_psfs(jnp.array([0.0]), jnp.array([0.0]))[0]
+
+    def throughput(self, sep, wl, *, time_s=0.0):
+        return 1.0
+
+    def core_area(self, sep, wl, *, time_s=0.0):
+        return 1.0
+
+    def core_mean_intensity(self, sep, wl, *, time_s=0.0):
+        return 0.0
+
+    def occulter_transmission(self, sep, wl, *, time_s=0.0):
+        return 1.0
 
 
 @pytest.fixture(scope="module")

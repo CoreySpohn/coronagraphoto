@@ -62,7 +62,7 @@ class TestConvolutionAccuracy:
     """Verify custom convolution kernels produce correct results."""
 
     def test_convolution_symmetry(self):
-        """A 180° rotated source should produce a 180° rotated output."""
+        """A 180 deg rotated source should produce a 180 deg rotated output."""
         size = 32
         image = jnp.zeros((size, size))
         image = image.at[size // 4, 3 * size // 4].set(100.0)
@@ -109,7 +109,7 @@ class TestLeinertZodiValidation:
         assert factor_close > factor_far
 
     def test_ayo_22_mag_reference(self):
-        """AYO defaults to 22 mag/arcsec² at V-band."""
+        """AYO defaults to 22 mag/arcsec^2 at V-band."""
         from skyscapes.background import AYOZodi
 
         wavelengths = jnp.array([500.0, 550.0, 600.0])
@@ -127,7 +127,7 @@ class TestDetectorStatistics:
     """Tier 5: Verify that noise models follow physical distributions."""
 
     def test_dark_current_poisson_statistics(self):
-        """Dark current must follow Poisson statistics: Variance ≈ Mean."""
+        """Dark current must follow Poisson statistics: Variance ~= Mean."""
         from optixstuff import dark_current
 
         key = jax.random.PRNGKey(42)
@@ -187,25 +187,12 @@ class TestDetectorStatistics:
 
 
 class TestAlgorithmicConservation:
-    """Tier 6: Verify custom algorithms do not leak flux."""
+    """Tier 6: Verify custom algorithms do not leak flux.
 
-    def test_convolve_quadrants_sum_preservation(self):
-        """Quarter-symmetric convolution must preserve total flux when PSF sums to 1."""
-        from coronagraphoto.simulation import _convolve_quadrants
-
-        size = 51
-        center = size // 2
-
-        flux = jnp.zeros((size, size))
-        flux = flux.at[center - 2 : center + 3, center - 2 : center + 3].set(4.0)
-
-        qsize = center + 1
-        psf_cube = jnp.zeros((qsize, qsize, size, size))
-        psf_cube = psf_cube.at[:, :, center, center].set(1.0)
-
-        output = _convolve_quadrants(flux, psf_cube)
-        assert jnp.sum(output) > 0
-        assert jnp.isfinite(jnp.sum(output))
+    The quarter-symmetric datacube convolution moved to optixstuff with
+    the ``extended_scene`` bridge; its conservation tests live in
+    ``optixstuff/tests/test_coronagraph_contract.py`` now.
+    """
 
 
 # =============================================================================
@@ -217,7 +204,7 @@ class TestOrbitalMechanics:
     """Tier 7: Verify planets obey Kepler's Laws."""
 
     def test_mean_anomaly_period(self):
-        """Mean anomaly should increase by 2π after one orbital period."""
+        """Mean anomaly should increase by 2*pi after one orbital period."""
         from orbix.equations.orbit import mean_anomaly_tp
 
         a_m = const.AU2m
@@ -261,7 +248,7 @@ class TestOrbitalMechanics:
         assert np.std(seps) / np.mean(seps) < 0.01
 
     def test_kepler_third_law(self):
-        """Verify P² ∝ a³ (Kepler's Third Law)."""
+        """Verify P^2 prop. to a^3 (Kepler's Third Law)."""
         from orbix.equations.orbit import mean_motion
 
         a = jnp.array([1.0, 4.0])
