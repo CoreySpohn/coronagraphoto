@@ -1,5 +1,19 @@
 # Changelog
 
+## [4.0.0](https://github.com/CoreySpohn/coronagraphoto/compare/v3.1.0...v4.0.0) (2026-07-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* **simulation:** rates render at detector sampling via the sampling-explicit coronagraph contract -- the detector grid is the only grid; speckle plane decoupled from the coronagraph plate scale
+
+### Features
+
+* **loaders:** pass load_disk through to skyscapes; rewrite README quick start for the rate/readout API ([7ce6676](https://github.com/CoreySpohn/coronagraphoto/commit/7ce6676a1cf9b4a51ebdb80fa0d77c8d28825305))
+* **simulation:** rates render at detector sampling via the sampling-explicit coronagraph contract -- the detector grid is the only grid; speckle plane decoupled from the coronagraph plate scale ([41d6f73](https://github.com/CoreySpohn/coronagraphoto/commit/41d6f7324ae500cbdec4ffab92cc505a0552845d))
+* **speckle:** add speckle_rate/readout and system wiring ([1e5bfcb](https://github.com/CoreySpohn/coronagraphoto/commit/1e5bfcb7c6fd30cf7e2286238996bd64cd08f983))
+* **speckle:** speckle_rate asserts the speckle/coronagraph plate-scale equality (was docstring-only) -- adversarial-review hardening ([14462a4](https://github.com/CoreySpohn/coronagraphoto/commit/14462a4593222b1c4c9e5d7614277b703b8b5aac))
+
 ## [3.1.0](https://github.com/CoreySpohn/coronagraphoto/compare/v3.0.0...v3.1.0) (2026-06-23)
 
 
