@@ -14,6 +14,7 @@ from __future__ import annotations
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from hwoutils.conversions import arcsec_to_lambda_d
 from optixstuff import (
@@ -25,7 +26,7 @@ from optixstuff import (
 from optixstuff.coronagraph import AbstractTableCoronagraph
 from skyscapes.datasets import fetch_scene
 
-from coronagraphoto import load_scene_from_exovista, system_readout
+from coronagraphoto import load_scene_from_exovista, system_rate, system_readout
 
 pytestmark = [pytest.mark.slow, pytest.mark.integration]
 
@@ -229,3 +230,83 @@ def test_exovista_scene_simulates_end_to_end(perfect_system):
         f"included; got disk-included={float(jnp.sum(image)):.3e}, "
         f"disk-stripped={float(jnp.sum(image_no_disk)):.3e}."
     )
+
+
+def test_system_rate_trace_decomposes_the_scene(perfect_system):
+    """``system_rate(trace=True)`` hands back one rate map per source.
+
+    The traced total must be the untraced total exactly (tracing may not
+    perturb the production path), the parts must cover exactly the sources
+    this scene has, and they must sum back to the total up to
+    floating-point associativity.
+    """
+    scene = load_scene_from_exovista(fetch_scene(), only_earths=True)
+    start_time_jd = jnp.asarray(float(scene.system.planets[0].orbit.t0_d[0]))
+    kwargs = dict(
+        wavelength_nm=550.0,
+        bin_width_nm=50.0,
+        telescope_pa_deg=0.0,
+        ecliptic_lat_deg=0.0,
+        solar_lon_deg=135.0,
+    )
+
+    untraced = system_rate(scene, perfect_system, start_time_jd=start_time_jd, **kwargs)
+    total, parts = system_rate(
+        scene, perfect_system, start_time_jd=start_time_jd, trace=True, **kwargs
+    )
+
+    # Tracing does not perturb the production path.
+    assert jnp.array_equal(total, untraced)
+
+    # Exactly the sources this scene has: star + planets + disk + zodi, and
+    # no speckle key, because this optical path carries no speckle field.
+    expected = {"star", "planets", "disk", "zodi"}
+    assert set(parts) == expected
+    assert perfect_system.speckle is None
+
+    for name, part in parts.items():
+        assert part.shape == perfect_system.detector.shape, name
+        assert bool(jnp.all(jnp.isfinite(part))), name
+        assert float(jnp.min(part)) >= 0.0, name
+
+    # The parts reconstruct the total. Summed in float64 so the tolerance
+    # measures the library's associativity, not the checker's.
+    summed = sum(np.asarray(v, dtype=np.float64) for v in parts.values())
+    total64 = np.asarray(total, dtype=np.float64)
+    np.testing.assert_allclose(summed, total64, rtol=1e-6)
+
+
+def test_system_rate_trace_is_static_and_costs_two_kernels(perfect_system):
+    """``trace`` is a compile-time switch, so it costs exactly two kernels.
+
+    Observation scalars are passed as arrays on purpose: under
+    ``filter_jit`` a Python float is a non-array and therefore static, so
+    passing floats here would recompile on every epoch and mask the
+    property under test.
+    """
+    scene = load_scene_from_exovista(fetch_scene(), only_earths=True)
+    t0 = float(scene.system.planets[0].orbit.t0_d[0])
+    kwargs = dict(
+        wavelength_nm=550.0,
+        bin_width_nm=50.0,
+        telescope_pa_deg=0.0,
+        ecliptic_lat_deg=0.0,
+        solar_lon_deg=135.0,
+    )
+    jitted = eqx.filter_jit(system_rate)
+
+    for offset in (0.0, 10.0, 20.0):
+        start_time_jd = jnp.asarray(t0 + offset)
+        untraced = jitted(scene, perfect_system, start_time_jd=start_time_jd, **kwargs)
+        total, parts = jitted(
+            scene,
+            perfect_system,
+            start_time_jd=start_time_jd,
+            trace=True,
+            **kwargs,
+        )
+        assert jnp.array_equal(total, untraced)
+        assert set(parts) == {"star", "planets", "disk", "zodi"}
+
+    # Three epochs x both trace values is two kernels, not six.
+    assert jitted._cached._cache_size() == 2

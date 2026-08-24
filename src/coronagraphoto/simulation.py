@@ -451,6 +451,7 @@ def system_rate(
     telescope_pa_deg,
     ecliptic_lat_deg,
     solar_lon_deg,
+    trace=False,
 ):
     """Sum of deterministic per-source count rates for a :class:`~skyscapes.Scene`.
 
@@ -461,20 +462,42 @@ def system_rate(
     the optional speckle field on ``optical_path``. Use this for likelihood
     evaluation, retrievals, or any inference loop that needs gradients
     through the full forward model.
+
+    With ``trace=True`` the return becomes ``(total, parts)``, where
+    ``parts`` maps a source name to that source's own rate map, in the same
+    units and on the same detector grid as ``total``. Keys are present only
+    for the sources this scene actually has: ``"star"`` always, ``"planets"``
+    when the system has any (summed over every planet batch), and ``"disk"``,
+    ``"zodi"``, ``"speckle"`` when those are configured. The parts sum to
+    ``total`` up to floating-point associativity, so a per-source
+    decomposition costs one call instead of one call per source.
+
+    Every traced field is already on the path to ``total``, so tracing
+    never recomputes the forward model. The cost is output memory, roughly
+    one extra result-sized array per source, plus a few percent of
+    arithmetic where materialising the parts blocks kernel fusion. Inside
+    an enclosing ``jit``, parts the caller does not use are dead-code
+    eliminated exactly. ``trace`` is static, so each value compiles its
+    own kernel.
     """
     has_disk = scene.system.disk is not None
     has_zodi = scene.zodi is not None
+    parts = {}
 
-    total = star_rate(
+    contribution = star_rate(
         scene.system.star,
         optical_path,
         start_time_jd=start_time_jd,
         wavelength_nm=wavelength_nm,
         bin_width_nm=bin_width_nm,
     )
+    total = contribution
+    if trace:
+        parts["star"] = contribution
 
+    planets = None
     for planet in scene.system.planets:
-        total = total + planet_rate(
+        contribution = planet_rate(
             planet,
             optical_path,
             start_time_jd=start_time_jd,
@@ -484,9 +507,14 @@ def system_rate(
             star=scene.system.star,
             trig_solver=scene.system.trig_solver,
         )
+        total = total + contribution
+        if trace:
+            planets = contribution if planets is None else planets + contribution
+    if trace and planets is not None:
+        parts["planets"] = planets
 
     if has_disk:
-        total = total + disk_rate(
+        contribution = disk_rate(
             scene.system.disk,
             optical_path,
             start_time_jd=start_time_jd,
@@ -497,9 +525,12 @@ def system_rate(
             incl_deg=jnp.asarray(scene.system.midplane_inc_deg),
             pa_deg=jnp.asarray(scene.system.midplane_pa_deg),
         )
+        total = total + contribution
+        if trace:
+            parts["disk"] = contribution
 
     if has_zodi:
-        total = total + zodi_rate(
+        contribution = zodi_rate(
             scene.zodi,
             optical_path,
             start_time_jd=start_time_jd,
@@ -508,9 +539,12 @@ def system_rate(
             ecliptic_lat_deg=ecliptic_lat_deg,
             solar_lon_deg=solar_lon_deg,
         )
+        total = total + contribution
+        if trace:
+            parts["zodi"] = contribution
 
     if optical_path.speckle is not None:
-        total = total + speckle_rate(
+        contribution = speckle_rate(
             optical_path.speckle,
             optical_path,
             start_time_jd=start_time_jd,
@@ -518,8 +552,13 @@ def system_rate(
             bin_width_nm=bin_width_nm,
             star=scene.system.star,
         )
+        total = total + contribution
+        if trace:
+            parts["speckle"] = contribution
 
-    return total
+    if not trace:
+        return total
+    return total, parts
 
 
 def system_readout(
