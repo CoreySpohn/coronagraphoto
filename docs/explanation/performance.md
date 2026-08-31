@@ -31,9 +31,7 @@ array rather than being memcopied into the compiled binary.
 @eqx.filter_jit
 def simulate_frame(mjd, wavelength_nm, key):
     rate = planet_rate(planet, optical_path, ...)
-    return optical_path.detector.readout_source_electrons(
-        rate, EXPOSURE_S, key
-    )
+    return optical_path.detector.readout_source_electrons(rate, EXPOSURE_S, key)
 ```
 
 ```python
@@ -41,9 +39,7 @@ def simulate_frame(mjd, wavelength_nm, key):
 @eqx.filter_jit
 def simulate_frame(optical_path, planet, mjd, wavelength_nm, key):
     rate = planet_rate(planet, optical_path, ...)
-    return optical_path.detector.readout_source_electrons(
-        rate, EXPOSURE_S, key
-    )
+    return optical_path.detector.readout_source_electrons(rate, EXPOSURE_S, key)
 ```
 
 ## Measured impact
@@ -83,6 +79,7 @@ set the report environment variable before the first compile:
 
 ```python
 import os
+
 os.environ["JAX_CAPTURED_CONSTANTS_REPORT_FRAMES"] = "-1"
 ```
 

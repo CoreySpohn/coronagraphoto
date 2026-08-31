@@ -56,7 +56,10 @@ post-processing, and analysis live in sibling libraries.
 import jax
 from coronagraphoto import system_readout
 from optixstuff import (
-    OpticalPath, SimplePrimary, IdealDetector, ConstantThroughput,
+    OpticalPath,
+    SimplePrimary,
+    IdealDetector,
+    ConstantThroughput,
 )
 from skyscapes import from_exovista
 from yippy import EqxCoronagraph
@@ -69,12 +72,16 @@ optical_path = OpticalPath(
     detector=IdealDetector(pixel_scale_arcsec=0.01, shape=(512, 512)),
 )
 image = system_readout(
-    scene, optical_path, jax.random.PRNGKey(0),
+    scene,
+    optical_path,
+    jax.random.PRNGKey(0),
     start_time_jd=2_460_000.0,
     exposure_time_s=3600.0,
-    wavelength_nm=550.0, bin_width_nm=50.0,
+    wavelength_nm=550.0,
+    bin_width_nm=50.0,
     telescope_pa_deg=0.0,
-    ecliptic_lat_deg=0.0, solar_lon_deg=135.0,
+    ecliptic_lat_deg=0.0,
+    solar_lon_deg=135.0,
 )
 ```
 
