@@ -58,18 +58,22 @@ import jax
 import equinox as eqx
 from coronagraphoto import system_rate
 
+
 # Differentiable rate pipeline -- gradient flows end-to-end
 @eqx.filter_jit
 def total_electrons(wavelength_nm, scene, optical_path):
     rate_map = system_rate(
-        scene, optical_path,
+        scene,
+        optical_path,
         start_time_jd=2_460_000.0,
         wavelength_nm=wavelength_nm,
         bin_width_nm=50.0,
         telescope_pa_deg=0.0,
-        ecliptic_lat_deg=0.0, solar_lon_deg=135.0,
+        ecliptic_lat_deg=0.0,
+        solar_lon_deg=135.0,
     )
     return rate_map.sum() * EXPOSURE_S
+
 
 grad_fn = eqx.filter_grad(total_electrons)
 ```
@@ -101,10 +105,16 @@ import jax
 
 key = jax.random.PRNGKey(0)
 image = system_readout(
-    scene, optical_path, key,
-    start_time_jd=..., exposure_time_s=..., wavelength_nm=...,
-    bin_width_nm=..., telescope_pa_deg=...,
-    ecliptic_lat_deg=..., solar_lon_deg=...,
+    scene,
+    optical_path,
+    key,
+    start_time_jd=...,
+    exposure_time_s=...,
+    wavelength_nm=...,
+    bin_width_nm=...,
+    telescope_pa_deg=...,
+    ecliptic_lat_deg=...,
+    solar_lon_deg=...,
 )
 ```
 
