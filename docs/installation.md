@@ -39,8 +39,9 @@ loaded:
 
 ```python
 import jax
-print(jax.default_backend())             # 'gpu'
-print(jax.config.read("jax_enable_x64")) # True if you enabled it
+
+print(jax.default_backend())  # 'gpu'
+print(jax.config.read("jax_enable_x64"))  # True if you enabled it
 ```
 
 If `default_backend()` reports `gpu` but the CUDA plugin warned about
@@ -81,6 +82,7 @@ get the workspace-editable versions.
 
 ```python
 import coronagraphoto
+
 print(coronagraphoto.__version__)
 ```
 
