@@ -99,11 +99,15 @@ sibling libraries' constructors, then pass them in:
 ```python
 # Scene-building lives in skyscapes
 from skyscapes import from_exovista
+
 scene = from_exovista("path/to/exovista_system.fits")
 
 # Optical-path building lives in optixstuff
 from optixstuff import (
-    OpticalPath, SimplePrimary, ConstantThroughput, IdealDetector,
+    OpticalPath,
+    SimplePrimary,
+    ConstantThroughput,
+    IdealDetector,
 )
 from yippy import EqxCoronagraph
 
@@ -116,8 +120,10 @@ optical_path = OpticalPath(
 
 # coronagraphoto is what turns these into a 2D image
 from coronagraphoto import system_rate, system_readout
+
 rate_map = system_rate(scene, optical_path, ...)
 import jax
+
 image = system_readout(scene, optical_path, jax.random.PRNGKey(0), ...)
 ```
 
