@@ -3,9 +3,13 @@
 Public API conventions:
 
 - ``<source>_rate(source, optical_path, *, ...)`` returns the noiseless
-  per-pixel photo-electron rate on the detector for one source.
+  per-pixel photon rate incident on the detector for one source (photons/s;
+  detector QE is not applied).
 - ``<source>_readout(source, optical_path, prng_key, *, ...)`` returns a
   noisy detector readout (photon Poisson + QE binomial) for one source.
+  The readout applies the detector's operating-point QE, one value for the
+  call; a caller integrating a band whose QE varies across it applies the
+  QE per wavelength bin (for example from ``detector.get_qe``).
 - ``system_rate(scene, optical_path, *, ...)`` sums every per-source rate
   map for a scene (the differentiable forward model).
 - ``system_readout(scene, optical_path, prng_key, *, ...)`` sums every
@@ -451,7 +455,8 @@ def system_rate(
     """Sum of deterministic per-source count rates for a :class:`~skyscapes.Scene`.
 
     The differentiable companion to :func:`system_readout`. Returns the
-    total rate map (electrons/s/pixel, no Poisson noise, no QE multiply)
+    total rate map (photons/s/pixel incident on the detector, no Poisson
+    noise; detector QE is applied at readout by :func:`system_readout`)
     summing star, every planet, the optional disk, the optional zodi, and
     the optional speckle field on ``optical_path``. Use this for likelihood
     evaluation, retrievals, or any inference loop that needs gradients
