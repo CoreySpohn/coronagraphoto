@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.1.0](https://github.com/CoreySpohn/coronagraphoto/compare/v4.0.0...v4.1.0) (2026-10-13)
+
+
+### Features
+
+* **simulation:** return per-source rate maps from system_rate under trace ([c937b18](https://github.com/CoreySpohn/coronagraphoto/commit/c937b1815dccd8c53db5bbed80a0f49d936a19e7))
+
 ## [4.0.0](https://github.com/CoreySpohn/coronagraphoto/compare/v3.1.0...v4.0.0) (2026-07-20)
 
 
