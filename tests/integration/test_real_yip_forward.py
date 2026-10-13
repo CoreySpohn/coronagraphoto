@@ -29,7 +29,11 @@ from yippy import EqxCoronagraph
 from coronagraphoto import load_scene_from_exovista, system_readout
 from coronagraphoto.datasets import fetch_coronagraph
 
-pytestmark = [pytest.mark.slow, pytest.mark.integration]
+pytestmark = [
+    pytest.mark.slow,
+    pytest.mark.integration,
+    pytest.mark.usefixtures("exovista_precision"),
+]
 
 
 @pytest.fixture(scope="module")

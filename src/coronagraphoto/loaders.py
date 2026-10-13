@@ -20,6 +20,11 @@ def load_scene_from_exovista(
     a default :class:`~skyscapes.background.AYOZodi` background using
     the host star's wavelength grid.
 
+    Enable ``jax.config.update("jax_enable_x64", True)`` before loading:
+    imported absolute Julian Dates need float64 precision. Recent ExoVista
+    scenes retain time-dependent planet contrasts and spot metadata; the
+    latter does not yet add resolved stellar-surface propagation.
+
     The earlier ``required_planets`` parameter was removed: variadic
     planet tuples make the "pad to fixed shape" semantics unnecessary,
     and the underlying ``skyscapes.from_exovista`` no longer accepts it.

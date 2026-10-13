@@ -8,6 +8,13 @@ from coronagraphoto.datasets import fetch_all, fetch_coronagraph, fetch_scene
 __all__ = ["fetch_all", "fetch_coronagraph", "fetch_scene"]
 
 
+@pytest.fixture(scope="module")
+def exovista_precision():
+    """Preserve subday precision for imported absolute Julian Dates."""
+    with jax.enable_x64(True):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # Pytest fixtures
 # ---------------------------------------------------------------------------

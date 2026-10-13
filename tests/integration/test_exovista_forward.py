@@ -28,7 +28,11 @@ from skyscapes.datasets import fetch_scene
 
 from coronagraphoto import load_scene_from_exovista, system_rate, system_readout
 
-pytestmark = [pytest.mark.slow, pytest.mark.integration]
+pytestmark = [
+    pytest.mark.slow,
+    pytest.mark.integration,
+    pytest.mark.usefixtures("exovista_precision"),
+]
 
 
 class _PerfectCoronagraph(AbstractTableCoronagraph):

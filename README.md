@@ -52,6 +52,9 @@ This keeps the pipeline transparent (you know exactly which sources contributed)
 
 ```python
 import jax
+
+jax.config.update("jax_enable_x64", True)  # Preserve absolute Julian Date precision.
+
 from optixstuff import ConstantThroughput, IdealDetector, OpticalPath, SimplePrimary
 from yippy import EqxCoronagraph
 
