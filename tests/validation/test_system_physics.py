@@ -467,7 +467,7 @@ class TestPlanetFidelity:
         """0.5 arcsec separation maps to the correct pixel offset.
 
         At 0.05 arcsec/pixel, 0.5 arcsec = 10 pixels from center (50, 50).
-        Planet at M0=0 lands at +X direction.
+        Planet at its node with Omega=0 lands due north, along detector +y.
         """
         planet, star, solver = planet_setup
         img = planet_rate(
@@ -481,10 +481,11 @@ class TestPlanetFidelity:
             trig_solver=solver,
         )
         y, x = jnp.unravel_index(jnp.argmax(img), img.shape)
-        assert abs(int(x) - 60) <= 2, (
-            f"Planet at wrong X position. Got x={x}, expected ~60."
+        # Omega=0 is north; zero-roll FITS frames put north on +row.
+        assert abs(int(x) - 50) <= 2, f"Planet shifted in X. Got x={x}, expected ~50."
+        assert abs(int(y) - 60) <= 2, (
+            f"Planet at wrong Y position. Got y={y}, expected ~60."
         )
-        assert abs(int(y) - 50) <= 2, f"Planet shifted in Y. Got y={y}, expected ~50."
 
     def test_planet_count_rate_vmap_over_time(self, perfect_system):
         """Multi-time API is just ``jax.vmap`` over ``start_time_jd``.

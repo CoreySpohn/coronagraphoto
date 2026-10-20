@@ -11,6 +11,36 @@ whole-scene aggregator `system`):
 
 This page explains when to reach for which.
 
+## Image orientation and roll
+
+Both families return detector frames with +row along detector +y and +column
+along detector +x, displayed with `imshow(origin="lower")`.
+`telescope_pa_deg = theta` is the sky position angle of detector +y, measured
+north through east (the `PA_APER` convention used by Roman CGI corgidrp).
+At zero PA, detector +y is north and detector +x is west: the FITS display
+convention shows north up and east left.
+
+For sky offsets $E = \Delta\alpha^*$ (east) and $N = \Delta\delta$ (north),
+the detector offsets in the same angular units are
+
+$$
+x = -E\cos\theta + N\sin\theta, \qquad
+y = N\cos\theta + E\sin\theta.
+$$
+
+These are projections onto detector +x and +y, whose east/north components
+are $(-\cos\theta, \sin\theta)$ and $(\sin\theta, \cos\theta)$.
+Thus a source at sky PA theta lands along detector +y. At theta = 90 degrees,
+east lands along +row and north along +column.
+
+Planet offsets are first mapped to the FITS sky plane $(-E, N)$, then rotated
+clockwise by theta. Disk images from skyscapes already have +column west and
++row north, so `extended_scene` applies that same clockwise rotation via
+`rotation_deg=-telescope_pa_deg`. Its resampler defines positive angles as
+counterclockwise with `origin="lower"`; +90 degrees sends north toward the
+left (east on the zero-roll sky image). No additional disk reflection is
+needed. Planet and disk features therefore stay aligned at every roll.
+
 ## The mathematics
 
 For a single source $S$ through the optical path $\mathcal{O}$, the

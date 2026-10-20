@@ -20,6 +20,13 @@ whether Poisson noise has been applied. See
 [rate vs readout](explanation/rate_vs_readout) for when to reach for
 each.
 
+Rows increase along detector +y and columns along detector +x. The parameter
+`telescope_pa_deg` gives the sky position angle of detector +y, measured north
+through east. At zero PA, images follow the FITS display convention:
+`imshow(image, origin="lower")` shows north up and east left (+column west).
+At PA 90 degrees, east is +row and north is +column. Planets and disks share
+this transformation; see [image orientation and roll](explanation/rate_vs_readout.md#image-orientation-and-roll).
+
 ## Where coronagraphoto sits in the stack
 
 ```mermaid

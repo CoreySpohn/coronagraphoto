@@ -20,6 +20,21 @@ All observation parameters (``start_time_jd``, ``exposure_time_s``,
 ``ecliptic_lat_deg``, ``solar_lon_deg``) are kwarg-only. The convention
 keeps signatures discoverable when more parameters land later (IFS,
 multi-roll observations).
+
+Detector frames have +row = detector +y and +column = detector +x;
+display with ``imshow(origin="lower")``. ``telescope_pa_deg = theta`` is
+the sky position angle of detector +y, measured north through east (the
+Roman CGI corgidrp ``PA_APER`` convention). At theta = 0, +y is north and
++x is west: the FITS display convention, north up and east left.
+
+For sky offsets (E, N) = (Delta alpha*, Delta delta), the detector offsets
+are ``x = -E cos(theta) + N sin(theta)`` and
+``y = N cos(theta) + E sin(theta)``. These project onto detector basis
+vectors (-cos(theta), sin(theta)) and (sin(theta), cos(theta)) in the
+east/north sky plane. At theta = 90 degrees, east is +row and north is
++column. Planets are reflected into the FITS sky plane (-E, N), then
+rotated clockwise by theta. Disk images already use that FITS sky plane
+and receive the same clockwise rotation, so planets and disks stay aligned.
 """
 
 import jax
@@ -131,13 +146,20 @@ def planet_rate(
     loop over a heterogeneous ``System.planets`` tuple lives in
     :func:`system_readout`; this function stays inside the per-Planet-type
     JIT cache boundary.
+
+    ``telescope_pa_deg`` is the sky PA of detector +y, north through east.
+    Sky offsets (E, N) map to detector x = -E cos(theta) + N sin(theta),
+    y = N cos(theta) + E sin(theta). ``source_psfs(x_lod, y_lod)`` places
+    +x along increasing column and +y along increasing row. At zero PA,
+    east is left and north is up with ``imshow(origin="lower")``.
     """
     # The new Planet API takes a 1-D time axis; squeeze T=1.
     source_positions_as = planet.position_arcsec(
         trig_solver, jnp.atleast_1d(start_time_jd), star=star
     )[:, :, 0]  # (2, K)
 
-    # A positive telescope PA corresponds to a CW rotation of the sky.
+    # Sky (east, north) -> FITS (west, north), then rotate into detector axes.
+    source_positions_as = source_positions_as.at[0].multiply(-1)
     rotation_matrix = ccw_rotation_matrix(-telescope_pa_deg)
     source_positions_as = rotation_matrix @ source_positions_as
 
@@ -181,7 +203,11 @@ def planet_readout(
     star,
     trig_solver,
 ):
-    """Process a per-batch Planet through the optical path."""
+    """Process a per-batch Planet through the optical path.
+
+    Detector axes and ``telescope_pa_deg`` follow :func:`planet_rate`:
+    the PA is that of detector +y on the sky, north through east.
+    """
     image_rate_detector = planet_rate(
         planet,
         optical_path,
@@ -221,10 +247,13 @@ def disk_rate(
     photon flux density per pixel before resampling and PSF convolution.
 
     ``incl_deg`` / ``pa_deg`` are the disk's intrinsic orientation in the
-    sky frame; ``telescope_pa_deg`` is the telescope's roll. The disk is
-    rendered at its intrinsic geometry and the coronagraph's
-    ``extended_scene`` rotates it by ``-telescope_pa_deg`` into the
-    detector frame while rendering.
+    sky frame; ``telescope_pa_deg`` is the sky PA of detector +y, north
+    through east. The input disk image follows the FITS sky convention
+    (+row north, +column west). ``extended_scene`` uses positive angles
+    for CCW image rotations with ``origin="lower"``, so rotating by
+    ``-telescope_pa_deg`` gives x = -E cos(theta) + N sin(theta),
+    y = N cos(theta) + E sin(theta), just as for :func:`planet_rate`.
+    Output +row is detector +y and +column is detector +x.
 
     Raises:
         ValueError: from the coronagraph if it cannot render an extended
@@ -248,6 +277,7 @@ def disk_rate(
         wavelength_nm,
         pixel_scale_lod=pixel_scale_lod,
         shape=shape,
+        # FITS sky pixels already encode x=-E; the detector rotation is CW.
         rotation_deg=-telescope_pa_deg,
     )
     return jnp.clip(image_rate, 0, None)
@@ -273,6 +303,8 @@ def disk_readout(
     orientation; ``system_readout`` pulls them from
     ``scene.system.midplane_inc_deg`` / ``midplane_pa_deg`` so every
     disk component in the System renders at the same midplane.
+    Detector axes and the sky PA of detector +y (``telescope_pa_deg``)
+    follow :func:`disk_rate`.
     """
     image_rate_detector = disk_rate(
         disk,
@@ -463,6 +495,10 @@ def system_rate(
     evaluation, retrievals, or any inference loop that needs gradients
     through the full forward model.
 
+    ``telescope_pa_deg`` is the sky PA of detector +y, north through east;
+    output +row/+column are detector +y/+x. At zero PA, display with
+    ``origin="lower"`` for north up and east left.
+
     With ``trace=True`` the return becomes ``(total, parts)``, where
     ``parts`` maps a source name to that source's own rate map, in the same
     units and on the same detector grid as ``total``. Keys are present only
@@ -580,6 +616,10 @@ def system_readout(
     independent PRNG subkey (see :mod:`jax.random` best practices). The
     optional speckle field on ``optical_path`` is the last source and
     consumes the final subkey, so scenes run without one are unaffected.
+
+    ``telescope_pa_deg`` is the sky PA of detector +y, north through east;
+    output +row/+column are detector +y/+x. At zero PA, display with
+    ``origin="lower"`` for north up and east left.
 
     The Python loop over ``scene.system.planets`` is intentionally
     unjitted -- it orchestrates JIT-cached per-Planet-type kernels. The

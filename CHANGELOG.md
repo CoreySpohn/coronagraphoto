@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Detector frames follow the FITS display convention: at
+  `telescope_pa_deg = 0`, rows increase north and columns increase west.
+  Display with `imshow(origin="lower")` for north up and east left.
+- `telescope_pa_deg` is the sky position angle of detector +y, measured
+  north through east. Planet images are mirrored left-right compared with
+  earlier releases at zero roll; at nonzero roll planets and disks now
+  rotate together.
+- Require `orbix>=3.0.0` and `skyscapes>=2.1.0` for consistent sky coordinates
+  and FITS-oriented disk images.
+
 ## [4.1.0](https://github.com/CoreySpohn/coronagraphoto/compare/v4.0.0...v4.1.0) (2026-10-13)
 
 

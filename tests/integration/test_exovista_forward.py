@@ -61,13 +61,14 @@ class _PerfectCoronagraph(AbstractTableCoronagraph):
         self.sky_trans = jnp.ones((size, size))
 
         # Quarter-grid PSF datacube: one Gaussian PSF per source pixel in
-        # the quarter grid (lower-right quadrant including the center
-        # row + column). disk_rate's quarter-grid branch
-        # (_convolve_quadrants) consumes this shape.
+        # the +row/+column quarter grid, measured from the image center.
+        # extended_scene's fold-and-sum expects index (0, 0) on axis.
         q_y = size // 2 + 1
         q_x = size // 2 + 1
 
         def _one_psf(src_y, src_x):
+            src_y = self.center_y + src_y
+            src_x = self.center_x + src_x
             sigma = 1.5
             yy, xx = jnp.mgrid[:size, :size]
             g = jnp.exp(-((xx - src_x) ** 2 + (yy - src_y) ** 2) / (2 * sigma**2))
@@ -171,7 +172,8 @@ def test_exovista_scene_simulates_end_to_end(perfect_system):
     dec_arcsec = float(predicted_pos_arcsec[1, 0, 0])
 
     # arcsec -> lambda/D (same conversion as planet_rate).
-    pos_as = jnp.array([[ra_arcsec], [dec_arcsec]])
+    # At zero telescope PA, FITS detector columns increase west, opposite RA.
+    pos_as = jnp.array([[-ra_arcsec], [dec_arcsec]])
     diam_m = float(perfect_system.primary.diameter_m)
     pos_lod = arcsec_to_lambda_d(pos_as, wavelength_nm, diam_m)
     x_lod = float(pos_lod[0, 0])

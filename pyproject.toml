@@ -25,9 +25,9 @@ dependencies = [
   "lod_unit",
   "numpy",
   "optixstuff>=3.0.0",
-  "orbix",
+  "orbix>=3.0.0",
   "yippy",
-  "skyscapes",
+  "skyscapes>=2.1.0",
 ]
 [project.optional-dependencies]
 dev = ["pre-commit"]

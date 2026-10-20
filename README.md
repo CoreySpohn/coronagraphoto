@@ -109,6 +109,14 @@ rate = system_rate(
 
 For broadband / IFS simulations, `jax.vmap` over `wavelength_nm` (and sum or stack the result) -- the kwarg-only signature is designed so the wavelength axis is a clean vmap target.
 
+Detector rows increase along detector +y and columns along detector +x.
+`telescope_pa_deg` is the sky position angle of detector +y, measured north
+through east. At zero PA, `imshow(image, origin="lower")` shows north up and
+east left (the FITS display convention, with +column west). At PA 90 degrees,
+east lands along +row and north along +column. Planets and disk images use
+the same sky-to-detector transformation; see
+[image orientation](docs/explanation/rate_vs_readout.md#image-orientation-and-roll).
+
 ### Speckles
 
 Time-varying residual-speckle fields plug in through `OpticalPath.speckle` (any `optixstuff.AbstractSpeckleField`). When set, `system_rate` / `system_readout` add the speckle contribution automatically: the field's `realize(wavelength_nm=..., time_s=...)` contrast map is multiplied by the host-star flux and resampled to the detector, with evolution driven deterministically by time so that temporal correlation survives across a roll sequence.
