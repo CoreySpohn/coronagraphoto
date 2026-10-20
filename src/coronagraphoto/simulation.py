@@ -247,7 +247,9 @@ def disk_rate(
     photon flux density per pixel before resampling and PSF convolution.
 
     ``incl_deg`` / ``pa_deg`` are the disk's intrinsic orientation in the
-    sky frame; ``telescope_pa_deg`` is the sky PA of detector +y, north
+    sky frame, in the skyscapes convention: ``pa_deg`` turns the line of
+    nodes from +x (east) toward +y (north), so the astronomical major-axis
+    PA is ``90 - pa_deg``. ``telescope_pa_deg`` is the sky PA of detector +y, north
     through east. The input disk image follows the FITS sky convention
     (+row north, +column west). ``extended_scene`` uses positive angles
     for CCW image rotations with ``origin="lower"``, so rotating by

@@ -8,9 +8,13 @@
   `telescope_pa_deg = 0`, rows increase north and columns increase west.
   Display with `imshow(origin="lower")` for north up and east left.
 - `telescope_pa_deg` is the sky position angle of detector +y, measured
-  north through east. Planet images are mirrored left-right compared with
-  earlier releases at zero roll; at nonzero roll planets and disks now
-  rotate together.
+  north through east. A source at sky offset (E, N) lands at detector
+  x = -E cos(theta) + N sin(theta), y = N cos(theta) + E sin(theta);
+  planets and disks share this mapping. With the earlier orbix and
+  skyscapes releases, planets built from orbital elements arrived as
+  (north, east) and were placed a quarter-turn away from this;
+  ExoVista planets and cubes already arrived as (west, north) and keep
+  their zero-roll placement.
 - Require `orbix>=3.0.0` and `skyscapes>=2.1.0` for consistent sky coordinates
   and FITS-oriented disk images.
 
