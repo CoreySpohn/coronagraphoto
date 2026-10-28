@@ -18,6 +18,18 @@
 - Require `orbix>=3.0.0` and `skyscapes>=2.1.0` for consistent sky coordinates
   and FITS-oriented disk images.
 
+## [4.2.0](https://github.com/CoreySpohn/coronagraphoto/compare/v4.1.0...v4.2.0) (2026-10-28)
+
+
+### Bug Fixes
+
+* **simulation:** place sources in the FITS display convention and define telescope_pa_deg as the sky PA of detector +y ([1573619](https://github.com/CoreySpohn/coronagraphoto/commit/15736199fdbdff61a8d4db6951722ca6c0aacc7f))
+
+
+### Documentation
+
+* **simulation:** state the skyscapes disk pa_deg convention and the per-source placement change ([252fdcb](https://github.com/CoreySpohn/coronagraphoto/commit/252fdcb4a92901eb3ede49cf5306bcfcc08c9370))
+
 ## [4.1.0](https://github.com/CoreySpohn/coronagraphoto/compare/v4.0.0...v4.1.0) (2026-10-13)
 
 
