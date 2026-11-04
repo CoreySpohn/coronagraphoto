@@ -167,3 +167,6 @@ input/
 scripts/
 output/
 examples/
+.claude/
+.jax_cache/
+.ruff_cache/
