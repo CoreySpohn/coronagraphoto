@@ -17,15 +17,11 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Astronomy",
 ]
 dependencies = [
-  "astropy",
-  "equinox",
   "hwoutils",
-  "interpax",
   "jax",
-  "lod_unit",
-  "numpy",
   "optixstuff>=3.0.0",
   "orbix>=3.0.0",
+  "pooch",
   "yippy",
   "skyscapes>=2.1.0",
 ]
@@ -36,11 +32,23 @@ docs = [
   "myst-nb",
   "sphinx-book-theme",
   "sphinx-autoapi",
-  "sphinx_autodoc_typehints",
   "sphinxcontrib-mermaid",
   "ipython",
 ]
-test = ["nox", "pytest", "hypothesis", "pytest-cov", "pooch"]
+test = [
+  "pytest",
+  "hypothesis",
+  "pytest-cov",
+  "pytest-xdist",
+  "pytest-testmon",
+  "pytest-markdown-docs",
+  "pytest-timeout",
+  "pytest-fail-slow",
+  "equinox",
+  "lod_unit",
+  "numpy",
+  "packaging",
+]
 
 [project.urls]
 Homepage = "https://github.com/CoreySpohn/coronagraphoto"
@@ -67,5 +75,28 @@ convention = "google"
 [tool.pytest.ini_options]
 markers = [
     "slow: tests that take longer than a few seconds (deselect with -m 'not slow')",
+    "medium: tests with a 30-second default time budget",
     "integration: end-to-end tests against real fixtures (deselect with -m 'not integration')",
 ]
+
+[tool.testbudget]
+library = "coronagraphoto"
+mode = "report"
+unit_s = 5
+medium_s = 30
+slow_s = 300
+
+[tool.deptry]
+known_first_party = ["coronagraphoto"]
+optional_dependencies_dev_groups = ["dev", "docs", "test"]
+
+[tool.deptry.per_rule_ignores]
+# optixstuff supplies the duck-typed OpticalPath consumed by the simulation API.
+# orbix's floor preserves the sky-coordinate convention of loaded skyscapes scenes.
+DEP002 = ["optixstuff", "orbix"]
+
+[tool.ty.environment]
+python-version = "3.11"
+
+[tool.ty.src]
+include = ["src/coronagraphoto"]
