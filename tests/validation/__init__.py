@@ -4,6 +4,6 @@
 These tests go beyond software correctness to verify:
 - Radiometric fidelity (photons in = photons out)
 - Numerical stability (interpolation, convolution accuracy)
-- Optical physics (λ/D scaling, geometric transformations)
+- Optical physics (lambda/D scaling, geometric transformations)
 - Scientific validation (external benchmark comparison)
 """

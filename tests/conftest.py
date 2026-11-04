@@ -1,11 +1,24 @@
 """Shared pytest fixtures and data utilities for coronagraphoto tests."""
 
+import importlib.util
+import os
+
 import jax
 import pytest
+from hypothesis import settings
 
 from coronagraphoto.datasets import fetch_all, fetch_coronagraph, fetch_scene
 
 __all__ = ["fetch_all", "fetch_coronagraph", "fetch_scene"]
+
+# Released hwoutils versions may not include the optional budget plugin yet.
+pytest_plugins = []
+if importlib.util.find_spec("hwoutils.testbudget") is not None:
+    pytest_plugins.append("hwoutils.testbudget.plugin")
+
+settings.register_profile("quick", max_examples=25, deadline=None)
+settings.register_profile("nightly", max_examples=200, deadline=None)
+settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "quick"))
 
 
 @pytest.fixture(scope="module")
