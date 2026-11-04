@@ -73,6 +73,17 @@ select = ["B", "D", "E", "F", "I", "UP", "RUF"]
 convention = "google"
 
 [tool.pytest.ini_options]
+filterwarnings = [
+  "error",
+  # HITRAN HAPI uses non-raw regex strings that Python 3.12 flags at compilation.
+  'ignore:invalid escape sequence:SyntaxWarning:.*[/\\]hapi[/\\]hapi$',
+  # ExoJAX also uses non-raw regex strings and docstrings on Python 3.12.
+  'ignore:invalid escape sequence:SyntaxWarning:.*[/\\]exojax[/\\]',
+  # Vaex regex strings and docstring examples contain Python 3.12 escapes.
+  'ignore:invalid escape sequence:SyntaxWarning:.*[/\\]vaex[/\\]',
+  # ExoJAX redirects the HAPI import to /dev/null without closing its stream.
+  'ignore:unclosed file <_io\.TextIOWrapper name=.*/dev/null.*:ResourceWarning:exojax\.database\._common\.hitranapi$',
+]
 markers = [
     "slow: tests that take longer than a few seconds (deselect with -m 'not slow')",
     "medium: tests with a 30-second default time budget",
