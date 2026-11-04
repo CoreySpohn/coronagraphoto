@@ -26,7 +26,9 @@ inputs. Move every container that owns a heavy array --- `optical_path`,
 function signature. The PSF datacube then flows in as a normal input
 array rather than being memcopied into the compiled binary.
 
-```python
+Requires a configured planet, optical path, and exposure parameters.
+
+```python notest
 # Avoid: optical_path closed over from outer scope.
 @eqx.filter_jit
 def simulate_frame(mjd, wavelength_nm, key):
@@ -34,7 +36,9 @@ def simulate_frame(mjd, wavelength_nm, key):
     return optical_path.detector.readout_source_electrons(rate, EXPOSURE_S, key)
 ```
 
-```python
+Requires a configured planet, optical path, and exposure parameters.
+
+```python notest
 # Prefer: every JAX-array-bearing object is an argument.
 @eqx.filter_jit
 def simulate_frame(optical_path, planet, mjd, wavelength_nm, key):

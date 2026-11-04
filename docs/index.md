@@ -59,7 +59,9 @@ post-processing, and analysis live in sibling libraries.
 
 ## A 30-line example
 
-```python
+Requires user-supplied ExoVista and coronagraph data.
+
+```python notest
 import jax
 from coronagraphoto import system_readout
 from optixstuff import (
@@ -126,5 +128,5 @@ simulating_zodi_with_telescope_orbit
 :caption: API Reference
 :hidden:
 
-autoapi/coronagraphoto/index
+autoapi/index
 ```

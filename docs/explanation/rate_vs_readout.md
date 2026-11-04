@@ -83,7 +83,9 @@ pipeline. Examples:
 - **Yield calculator forward model** -- the deterministic
   rate-summed-over-targets that downstream optimisers query.
 
-```python
+Requires a configured scene, optical path, and exposure duration.
+
+```python notest
 import jax
 import equinox as eqx
 from coronagraphoto import system_rate
@@ -129,7 +131,9 @@ family. Examples:
 - **Comparing post-processing algorithms** -- the algorithm should see
   realistic noise, not the noiseless rate.
 
-```python
+Requires a configured scene, optical path, and observation parameters.
+
+```python notest
 from coronagraphoto import system_readout
 import jax
 

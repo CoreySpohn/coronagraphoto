@@ -28,7 +28,9 @@ helpers as described in the skyscapes
 to `zodi_rate`:
 
 
-```python
+Requires target coordinates and a configured optical path.
+
+```python notest
 from orbix.observatory import ObservatoryL2Halo
 from skyscapes.background import LeinertZodi
 from coronagraphoto import zodi_rate
@@ -66,7 +68,9 @@ Poisson realisations are uncorrelated, and any frame whose Leinert
 lookup falls in the out-of-range region returns `NaN`, which downstream
 code uses as the "target unobservable this epoch" gate:
 
-```python
+Requires a configured optical path, target coordinates, and exposure parameters.
+
+```python notest
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -148,4 +152,4 @@ orbit interpolator and the sky-geometry helpers used above.
 {class}`skyscapes.background.LeinertZodi` documents the
 Leinert+1998 surface-brightness model.
 
-[skyscapes-zodi]: ../../../skyscapes/docs/explanation/local_zodi_geometry.md
+[skyscapes-zodi]: https://skyscapes.readthedocs.io/en/latest/explanation/local_zodi_geometry.html

@@ -14,6 +14,7 @@ extensions = [
     "myst_nb",
     "autoapi.extension",
     "sphinx.ext.autodoc",
+    "sphinx.ext.napoleon",
     "sphinx.ext.intersphinx",
     "sphinx.ext.viewcode",
     "sphinx.ext.mathjax",
@@ -34,13 +35,14 @@ intersphinx_mapping = {
 templates_path = ["_templates"]
 exclude_patterns = ["_build", ".build", "Thumbs.db", ".DS_Store", "jupyter_execute"]
 
-language = "Python"
+language = "en"
 
 autoapi_dirs = ["../src"]
 autoapi_ignore = ["**/*version.py"]
 autodoc_typehints = "description"
 
 myst_enable_extensions = ["amsmath", "dollarmath"]
+myst_heading_anchors = 3
 myst_fence_as_directive = ["mermaid"]
 
 # -- Options for HTML output -------------------------------------------------

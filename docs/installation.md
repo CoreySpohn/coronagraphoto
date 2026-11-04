@@ -30,7 +30,9 @@ for details.
 Colab images come with their own (often outdated) JAX. On every Colab
 session, force a matched install **before any other JAX-using import**:
 
-```python
+Requires a Colab notebook with a CUDA-capable runtime.
+
+```python notest
 %pip install --upgrade --quiet "jax[cuda12]"
 ```
 
@@ -81,9 +83,9 @@ get the workspace-editable versions.
 ## Verifying the install
 
 ```python
-import coronagraphoto
+from importlib.metadata import version
 
-print(coronagraphoto.__version__)
+print(version("coronagraphoto"))
 ```
 
 The first JAX import takes 10-20 s on cold cache as XLA initializes.

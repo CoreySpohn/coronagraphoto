@@ -8,7 +8,7 @@
   <a href="https://coronagraphoto.readthedocs.io"><img src="https://readthedocs.org/projects/coronagraphoto/badge/?version=latest&style=flat-square" alt="Documentation Status"/></a>
   <a href="https://github.com/coreyspohn/coronagraphoto/blob/main/LICENSE"><img src="https://img.shields.io/github/license/coreyspohn/coronagraphoto?style=flat-square" alt="License"/></a>
   <a href="https://pypi.org/project/coronagraphoto/"><img src="https://img.shields.io/pypi/pyversions/coronagraphoto?style=flat-square" alt="Python"/></a>
-  <a href="https://github.com/coreyspohn/coronagraphoto/actions/workflows/tests.yml"><img src="https://img.shields.io/github/actions/workflow/status/coreyspohn/coronagraphoto/tests.yml?branch=main&logo=github&style=flat-square&label=tests" alt="Tests"/></a>
+  <a href="https://github.com/coreyspohn/coronagraphoto/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/coreyspohn/coronagraphoto/ci.yml?branch=main&logo=github&style=flat-square&label=tests" alt="Tests"/></a>
   <a href="https://github.com/pre-commit/pre-commit"><img src="https://img.shields.io/badge/pre--commit-enabled-brightgreen?style=flat-square&logo=pre-commit" alt="pre-commit"/></a>
   <a href="https://doi.org/10.5281/zenodo.10950736"><img src="https://img.shields.io/badge/DOI-10.5281%2Fzenodo.10950736-blue?style=flat-square" alt="DOI"/></a>
 </p>
@@ -50,7 +50,9 @@ This keeps the pipeline transparent (you know exactly which sources contributed)
 
 ## Quick start
 
-```python
+Requires downloaded ExoVista and coronagraph data and a configured optical path.
+
+```python notest
 import jax
 
 jax.config.update("jax_enable_x64", True)  # Preserve absolute Julian Date precision.

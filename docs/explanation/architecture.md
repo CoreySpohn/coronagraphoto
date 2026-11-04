@@ -96,7 +96,9 @@ coronagraphoto consumes types from siblings; it does NOT re-export them
 into a flat namespace. Build your `Scene` and `OpticalPath` using the
 sibling libraries' constructors, then pass them in:
 
-```python
+Requires user-supplied scene and coronagraph data and observation parameters.
+
+```python notest
 # Scene-building lives in skyscapes
 from skyscapes import from_exovista
 
