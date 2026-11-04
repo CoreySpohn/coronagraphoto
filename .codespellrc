@@ -1,0 +1,4 @@
+[codespell]
+skip = .git,*.ipynb,uv.lock,*/_build,*.fits
+# lod is the lambda-over-diameter unit imported from lod_unit.
+ignore-words-list = lod
