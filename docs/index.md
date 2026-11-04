@@ -100,6 +100,7 @@ image = system_readout(
 :hidden:
 
 installation
+dependency-floors
 ```
 
 <!-- TODO(post-1.0): write tutorials/01_first_simulation and re-add to toctree. -->
