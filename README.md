@@ -4,12 +4,11 @@
 </p>
 
 <p align="center">
-  <a href="https://pypi.org/project/coronagraphoto/"><img src="https://img.shields.io/pypi/v/coronagraphoto.svg?style=flat-square" alt="PyPI"/></a>
+  <a href="https://pypi.org/project/coronagraphoto/"><img src="https://img.shields.io/pypi/v/coronagraphoto.svg?style=flat-square&logo=pypi" alt="PyPI"/></a>
   <a href="https://coronagraphoto.readthedocs.io"><img src="https://readthedocs.org/projects/coronagraphoto/badge/?version=latest&style=flat-square" alt="Documentation Status"/></a>
-  <a href="https://github.com/coreyspohn/coronagraphoto/blob/main/LICENSE"><img src="https://img.shields.io/github/license/coreyspohn/coronagraphoto?style=flat-square" alt="License"/></a>
-  <a href="https://pypi.org/project/coronagraphoto/"><img src="https://img.shields.io/pypi/pyversions/coronagraphoto?style=flat-square" alt="Python"/></a>
-  <a href="https://github.com/coreyspohn/coronagraphoto/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/coreyspohn/coronagraphoto/ci.yml?branch=main&logo=github&style=flat-square&label=tests" alt="Tests"/></a>
-  <a href="https://github.com/pre-commit/pre-commit"><img src="https://img.shields.io/badge/pre--commit-enabled-brightgreen?style=flat-square&logo=pre-commit" alt="pre-commit"/></a>
+  <a href="https://github.com/CoreySpohn/coronagraphoto/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/CoreySpohn/coronagraphoto/ci.yml?branch=main&style=flat-square&logo=github&label=tests" alt="Tests"/></a>
+  <a href="https://github.com/CoreySpohn/coronagraphoto/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square" alt="License"/></a>
+  <a href="https://github.com/CoreySpohn/coronagraphoto/blob/main/pyproject.toml"><img src="https://img.shields.io/badge/python-3.12%2B-blue.svg?style=flat-square&logo=python" alt="Python 3.12+"/></a>
   <a href="https://doi.org/10.5281/zenodo.10950736"><img src="https://img.shields.io/badge/DOI-10.5281%2Fzenodo.10950736-blue?style=flat-square" alt="DOI"/></a>
 </p>
 
