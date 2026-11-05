@@ -31,7 +31,6 @@ The canary uses the same overrides as CI.
 | Docs | ipython | 8.18.1 |
 | Test | pytest | 7.3.2 |
 | Test | hypothesis | 6.79.1 |
-| Test | pytest-cov | 1.0 |
 | Test | pytest-xdist | 2.5 |
 | Test | pytest-testmon | 2.0.7 |
 | Test | pytest-markdown-docs | 0.5.0 |

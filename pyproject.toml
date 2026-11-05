@@ -38,7 +38,6 @@ docs = [
 test = [
   "pytest>=7.3.2",
   "hypothesis>=6.79.1",
-  "pytest-cov>=1.0",
   "pytest-xdist>=2.5",
   "pytest-testmon>=2.0.7",
   "pytest-markdown-docs>=0.5.0",
