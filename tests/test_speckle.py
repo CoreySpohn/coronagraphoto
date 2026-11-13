@@ -180,12 +180,12 @@ class TestSpeckleRate:
         """A gradient flows through the rate with respect to time."""
         op = _optical_path(_MockSpeckle())
 
-        def total(t_jd):
+        def total(time_jd):
             return speckle_rate(
                 op.speckle,
                 op,
                 star=_MockStar(),
-                start_time_jd=t_jd,
+                start_time_jd=time_jd,
                 wavelength_nm=550.0,
                 bin_width_nm=10.0,
             ).sum()
