@@ -63,17 +63,16 @@ Requires user-supplied ExoVista and coronagraph data.
 
 ```python notest
 import jax
-from coronagraphoto import system_readout
+from coronagraphoto import load_scene_from_exovista, system_readout
 from optixstuff import (
     OpticalPath,
     SimplePrimary,
     IdealDetector,
     ConstantThroughput,
 )
-from skyscapes import from_exovista
 from yippy import EqxCoronagraph
 
-scene = from_exovista("path/to/exovista_system.fits")
+scene = load_scene_from_exovista("path/to/exovista_system.fits")
 optical_path = OpticalPath(
     primary=SimplePrimary(diameter_m=6.0),
     attenuating_elements=(ConstantThroughput(throughput=0.9),),
@@ -84,7 +83,7 @@ image = system_readout(
     scene,
     optical_path,
     jax.random.PRNGKey(0),
-    start_time_jd=2_460_000.0,
+    start_time_d=scene.system.epoch.days(2_460_000.0),
     exposure_time_s=3600.0,
     wavelength_nm=550.0,
     bin_width_nm=50.0,

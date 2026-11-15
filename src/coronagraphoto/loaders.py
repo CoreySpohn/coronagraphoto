@@ -21,7 +21,7 @@ def load_scene_from_exovista(
     the host star's wavelength grid.
 
     Enable ``jax.config.update("jax_enable_x64", True)`` before loading:
-    imported absolute Julian Dates need float64 precision. Recent ExoVista
+    imported orbital state vectors need float64 precision. Recent ExoVista
     scenes retain time-dependent planet contrasts and spot metadata; the
     latter does not yet add resolved stellar-surface propagation.
 

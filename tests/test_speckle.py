@@ -1,7 +1,7 @@
 """Tests for speckle_rate / speckle_readout and their system wiring.
 
 Self-contained: a scalar mock coronagraph, a mock speckle field, a duck
-star, and a star-only duck scene -- no fetched datasets needed.
+star, and a star-only scene -- no fetched datasets needed.
 """
 
 from __future__ import annotations
@@ -11,7 +11,10 @@ import jax
 import jax.numpy as jnp
 import optixstuff as ox
 import pytest
+from hwoutils.epoch import Epoch
 from optixstuff.coronagraph import AbstractTableCoronagraph
+from skyscapes import Scene
+from skyscapes.scene import System
 
 from coronagraphoto import (
     speckle_rate,
@@ -22,7 +25,7 @@ from coronagraphoto import (
     system_readout,
 )
 
-_EPOCH_JD = 2451545.0  # J2000
+_EPOCH_D = 0.0
 
 
 class _MockCoro(AbstractTableCoronagraph):
@@ -59,7 +62,7 @@ class _MockSpeckle(ox.AbstractSpeckleField):
     """Incoherent-halo delta with a mild, deterministic time modulation."""
 
     pixel_scale_lod: float = 0.5
-    epoch_jd: float = _EPOCH_JD
+    epoch_d: float = _EPOCH_D
 
     def realize(self, *, wavelength_nm, time_s=0.0):
         scale = 1.0 + 0.5 * jnp.cos(jnp.asarray(time_s, dtype=float))
@@ -73,23 +76,28 @@ class _MockStar:
         self._flux = flux
         self.diameter_arcsec = diameter_arcsec
 
-    def spec_flux_density(self, wavelength_nm, start_time_jd):
+    def spec_flux_density(self, wavelength_nm, start_time_d, *, dist_pc):
         return jnp.asarray(self._flux)
 
 
-class _System:
-    def __init__(self, star):
-        self.star = star
-        self.planets = ()
-        self.disk = None
-
-
-class _Scene:
-    """Star-only duck scene (no planets / disk / zodi)."""
-
-    def __init__(self, star):
-        self.system = _System(star)
-        self.zodi = None
+def _scene(star):
+    return Scene(
+        System.from_classical(
+            star,
+            (),
+            star_mass_Msun=1.0,
+            planet_mass_Msun=jnp.empty(0),
+            dist_pc=10.0,
+            epoch=Epoch(2451545.0),
+            a_AU=jnp.empty(0),
+            e=0.0,
+            i_rad=0.0,
+            W_rad=0.0,
+            w_rad=0.0,
+            M0_rad=0.0,
+        ),
+        zodi=None,
+    )
 
 
 def _optical_path(speckle=None):
@@ -101,7 +109,7 @@ def _optical_path(speckle=None):
     )
 
 
-_OBS = dict(start_time_jd=_EPOCH_JD + 100.0, wavelength_nm=550.0, bin_width_nm=10.0)
+_OBS = dict(start_time_d=_EPOCH_D + 100.0, wavelength_nm=550.0, bin_width_nm=10.0)
 
 
 class TestSpeckleRate:
@@ -110,7 +118,7 @@ class TestSpeckleRate:
     def test_shape_and_nonnegative(self):
         """The rate map is detector-shaped, finite, and non-negative."""
         op = _optical_path(_MockSpeckle())
-        m = speckle_rate(op.speckle, op, star=_MockStar(), **_OBS)
+        m = speckle_rate(op.speckle, op, dist_pc=10.0, star=_MockStar(), **_OBS)
         assert m.shape == op.detector.shape
         assert jnp.all(m >= 0)
         assert jnp.all(jnp.isfinite(m))
@@ -127,7 +135,7 @@ class TestSpeckleRate:
             """A resolved Gaussian blob offset +20 speckle pixels in x."""
 
             pixel_scale_lod: float = 0.5
-            epoch_jd: float = _EPOCH_JD
+            epoch_d: float = _EPOCH_D
 
             def realize(self, *, wavelength_nm, time_s=0.0):
                 yy, xx = jnp.mgrid[:64, :64]
@@ -142,7 +150,7 @@ class TestSpeckleRate:
                 pixel_scale_arcsec=0.01,
                 speckle=_BlobSpeckle(pixel_scale_lod=scale),
             )
-            m = speckle_rate(op.speckle, op, star=_MockStar(), **_OBS)
+            m = speckle_rate(op.speckle, op, dist_pc=10.0, star=_MockStar(), **_OBS)
             x = jnp.arange(m.shape[1]) - (m.shape[1] - 1) / 2.0
             return float(jnp.sum(m * x[None, :]) / jnp.sum(m))
 
@@ -154,16 +162,18 @@ class TestSpeckleRate:
         a = speckle_rate(
             op.speckle,
             op,
+            dist_pc=10.0,
             star=_MockStar(),
-            start_time_jd=_EPOCH_JD,
+            start_time_d=_EPOCH_D,
             wavelength_nm=550.0,
             bin_width_nm=10.0,
         )
         b = speckle_rate(
             op.speckle,
             op,
+            dist_pc=10.0,
             star=_MockStar(),
-            start_time_jd=_EPOCH_JD + 0.5,
+            start_time_d=_EPOCH_D + 0.5,
             wavelength_nm=550.0,
             bin_width_nm=10.0,
         )
@@ -172,25 +182,30 @@ class TestSpeckleRate:
     def test_scales_linearly_with_star_flux(self):
         """Doubling the host-star flux doubles the speckle rate."""
         op = _optical_path(_MockSpeckle())
-        m1 = speckle_rate(op.speckle, op, star=_MockStar(flux=100.0), **_OBS)
-        m2 = speckle_rate(op.speckle, op, star=_MockStar(flux=200.0), **_OBS)
+        m1 = speckle_rate(
+            op.speckle, op, dist_pc=10.0, star=_MockStar(flux=100.0), **_OBS
+        )
+        m2 = speckle_rate(
+            op.speckle, op, dist_pc=10.0, star=_MockStar(flux=200.0), **_OBS
+        )
         assert jnp.allclose(m2, 2.0 * m1, rtol=1e-5)
 
     def test_differentiable_in_time(self):
         """A gradient flows through the rate with respect to time."""
         op = _optical_path(_MockSpeckle())
 
-        def total(time_jd):
+        def total(time_d):
             return speckle_rate(
                 op.speckle,
                 op,
+                dist_pc=10.0,
                 star=_MockStar(),
-                start_time_jd=time_jd,
+                start_time_d=time_d,
                 wavelength_nm=550.0,
                 bin_width_nm=10.0,
             ).sum()
 
-        g = jax.grad(total)(_EPOCH_JD + 100.0)
+        g = jax.grad(total)(_EPOCH_D + 100.0)
         assert jnp.isfinite(g)
 
 
@@ -202,7 +217,13 @@ class TestSpeckleReadout:
         op = _optical_path(_MockSpeckle())
         key = jax.random.PRNGKey(0)
         m = speckle_readout(
-            op.speckle, op, key, exposure_time_s=3600.0, star=_MockStar(), **_OBS
+            op.speckle,
+            op,
+            key,
+            dist_pc=10.0,
+            exposure_time_s=3600.0,
+            star=_MockStar(),
+            **_OBS,
         )
         assert m.shape == op.detector.shape
         assert jnp.all(m >= 0)
@@ -213,7 +234,7 @@ class TestSystemWiring:
 
     def test_system_rate_adds_speckle(self):
         """system_rate with a speckle path equals the no-speckle sum plus it."""
-        scene = _Scene(_MockStar())
+        scene = _scene(_MockStar())
         op_none = _optical_path(None)
         op_spk = _optical_path(_MockSpeckle())
         sys_args = dict(
@@ -221,14 +242,16 @@ class TestSystemWiring:
         )
         base = system_rate(scene, op_none, **sys_args)
         withspk = system_rate(scene, op_spk, **sys_args)
-        spk = speckle_rate(op_spk.speckle, op_spk, star=scene.system.star, **_OBS)
+        spk = speckle_rate(
+            op_spk.speckle, op_spk, dist_pc=10.0, star=scene.system.star, **_OBS
+        )
         assert jnp.allclose(withspk, base + spk, rtol=1e-6, atol=0.0)
         # And the speckle field genuinely contributes.
         assert float(jnp.max(jnp.abs(withspk - base))) > 0.0
 
     def test_system_rate_no_speckle_is_star_only(self):
         """A speckle-free star-only scene reduces to star_rate."""
-        scene = _Scene(_MockStar())
+        scene = _scene(_MockStar())
         op_none = _optical_path(None)
         base = system_rate(
             scene,
@@ -238,12 +261,12 @@ class TestSystemWiring:
             solar_lon_deg=0.0,
             **_OBS,
         )
-        star_only = star_rate(scene.system.star, op_none, **_OBS)
+        star_only = star_rate(scene.system.star, op_none, dist_pc=10.0, **_OBS)
         assert jnp.allclose(base, star_only)
 
     def test_system_readout_keysplit_unchanged_without_speckle(self):
         """A speckle-free path must reproduce the pre-speckle key arithmetic."""
-        scene = _Scene(_MockStar())
+        scene = _scene(_MockStar())
         op_none = _optical_path(None)
         key = jax.random.PRNGKey(3)
         sys_out = system_readout(
@@ -259,13 +282,13 @@ class TestSystemWiring:
         # Star-only, no speckle -> exactly one subkey, consumed by the star.
         k0 = jax.random.split(key, 1)[0]
         star_out = star_readout(
-            scene.system.star, op_none, k0, exposure_time_s=3600.0, **_OBS
+            scene.system.star, op_none, k0, dist_pc=10.0, exposure_time_s=3600.0, **_OBS
         )
         assert jnp.array_equal(sys_out, star_out)
 
     def test_system_readout_runs_with_speckle(self):
         """system_readout runs end-to-end with a speckle field attached."""
-        scene = _Scene(_MockStar())
+        scene = _scene(_MockStar())
         op_spk = _optical_path(_MockSpeckle())
         out = system_readout(
             scene,

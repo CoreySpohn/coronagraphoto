@@ -97,7 +97,7 @@ def total_electrons(wavelength_nm, scene, optical_path):
     rate_map = system_rate(
         scene,
         optical_path,
-        start_time_jd=2_460_000.0,
+        start_time_d=0.0,  # Days from scene.system.epoch.
         wavelength_nm=wavelength_nm,
         bin_width_nm=50.0,
         telescope_pa_deg=0.0,
@@ -142,7 +142,7 @@ image = system_readout(
     scene,
     optical_path,
     key,
-    start_time_jd=...,
+    start_time_d=...,
     exposure_time_s=...,
     wavelength_nm=...,
     bin_width_nm=...,

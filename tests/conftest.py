@@ -7,7 +7,14 @@ import jax
 import pytest
 from hypothesis import settings
 
-from coronagraphoto.datasets import fetch_all, fetch_coronagraph, fetch_scene
+# Keep lazily cached dependency tables and evaluation arrays at one precision.
+jax.config.update("jax_enable_x64", True)
+
+from coronagraphoto.datasets import (  # noqa: E402
+    fetch_all,
+    fetch_coronagraph,
+    fetch_scene,
+)
 
 __all__ = ["fetch_all", "fetch_coronagraph", "fetch_scene"]
 
@@ -23,7 +30,7 @@ settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "quick"))
 
 @pytest.fixture(scope="module")
 def exovista_precision():
-    """Preserve subday precision for imported absolute Julian Dates."""
+    """Preserve precision when constructing imported orbital states."""
     with jax.enable_x64(True):
         yield
 

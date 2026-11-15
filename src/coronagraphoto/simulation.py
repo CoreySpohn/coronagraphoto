@@ -15,7 +15,8 @@ Public API conventions:
 - ``system_readout(scene, optical_path, prng_key, *, ...)`` sums every
   per-source Poisson-realised readout for a scene.
 
-All observation parameters (``start_time_jd``, ``exposure_time_s``,
+Times are days from the scene epoch. All observation parameters
+(``start_time_d``, ``exposure_time_s``,
 ``wavelength_nm``, ``bin_width_nm``, ``telescope_pa_deg``,
 ``ecliptic_lat_deg``, ``solar_lon_deg``) are kwarg-only. The convention
 keeps signatures discoverable when more parameters land later (IFS,
@@ -80,15 +81,19 @@ def star_rate(
     star,
     optical_path,
     *,
-    start_time_jd,
+    start_time_d,
+    dist_pc,
     wavelength_nm,
     bin_width_nm,
 ):
     """Generate the star count rate on the detector."""
+    diameter = star.diameter_arcsec
+    if callable(diameter):
+        diameter = diameter(dist_pc=dist_pc)
     source_diam_lod = arcsec_to_lambda_d(
-        star.diameter_arcsec, wavelength_nm, optical_path.primary.diameter_m
+        diameter, wavelength_nm, optical_path.primary.diameter_m
     )
-    flux = star.spec_flux_density(wavelength_nm, start_time_jd)
+    flux = star.spec_flux_density(wavelength_nm, start_time_d, dist_pc=dist_pc)
     flux = pre_coro_bin_processing(flux, wavelength_nm, bin_width_nm, optical_path)
     pixel_scale_lod, shape = _detector_sampling_lod(wavelength_nm, optical_path)
     image_rate = flux * optical_path.coronagraph.stellar_map(
@@ -105,7 +110,8 @@ def star_readout(
     optical_path,
     prng_key,
     *,
-    start_time_jd,
+    start_time_d,
+    dist_pc,
     exposure_time_s,
     wavelength_nm,
     bin_width_nm,
@@ -114,7 +120,8 @@ def star_readout(
     image_rate_detector = star_rate(
         star,
         optical_path,
-        start_time_jd=start_time_jd,
+        start_time_d=start_time_d,
+        dist_pc=dist_pc,
         wavelength_nm=wavelength_nm,
         bin_width_nm=bin_width_nm,
     )
@@ -128,36 +135,38 @@ def star_readout(
 # ---------------------------------------------------------------------------
 
 
-def planet_rate(
-    planet,
+def _planet_batches(system, time_d, wavelength_nm):
+    """Scene-order positions (2, K) and fluxes (K,) for each tuple entry.
+
+    Solve once, then slice the scene-order outputs by photometric batch size.
+    """
+    if not system.planets:
+        return ()
+    times = jnp.atleast_1d(time_d)
+    ephemeris = system.ephemeris(times)
+    positions = system.positions(times, ephemeris=ephemeris)[:, :, 0]
+    fluxes = system.planet_flux_densities(wavelength_nm, times, ephemeris=ephemeris)[
+        :, 0
+    ]
+    batches = []
+    start = 0
+    for planet in system.planets:
+        stop = start + planet.n_planets
+        batches.append((positions[:, start:stop], fluxes[start:stop]))
+        start = stop
+    return tuple(batches)
+
+
+def _planet_image_rate(
+    source_positions_as,
+    flux,
     optical_path,
     *,
-    start_time_jd,
     wavelength_nm,
     bin_width_nm,
     telescope_pa_deg,
-    star,
-    trig_solver,
 ):
-    """Generate the per-batch planet count rate on the detector.
-
-    Operates on a single ``skyscapes.scene.Planet`` (which internally
-    batches K planets sharing the same atmosphere class). The Python
-    loop over a heterogeneous ``System.planets`` tuple lives in
-    :func:`system_readout`; this function stays inside the per-Planet-type
-    JIT cache boundary.
-
-    ``telescope_pa_deg`` is the sky PA of detector +y, north through east.
-    Sky offsets (E, N) map to detector x = -E cos(theta) + N sin(theta),
-    y = N cos(theta) + E sin(theta). ``source_psfs(x_lod, y_lod)`` places
-    +x along increasing column and +y along increasing row. At zero PA,
-    east is left and north is up with ``imshow(origin="lower")``.
-    """
-    # The new Planet API takes a 1-D time axis; squeeze T=1.
-    source_positions_as = planet.position_arcsec(
-        trig_solver, jnp.atleast_1d(start_time_jd), star=star
-    )[:, :, 0]  # (2, K)
-
+    """Render positions (2, K) and photon flux densities (K,) for one batch."""
     # Sky (east, north) -> FITS (west, north), then rotate into detector axes.
     source_positions_as = source_positions_as.at[0].multiply(-1)
     rotation_matrix = ccw_rotation_matrix(-telescope_pa_deg)
@@ -167,15 +176,6 @@ def planet_rate(
         source_positions_as, wavelength_nm, optical_path.primary.diameter_m
     )
 
-    # ``wavelength_nm`` stays scalar -- the underlying atmosphere reflectivity
-    # code expects a scalar and broadcasts internally. ``start_time_jd`` is
-    # promoted to (1,) because the orbit propagator needs a T axis.
-    flux = planet.spec_flux_density(
-        trig_solver,
-        wavelength_nm,
-        jnp.atleast_1d(start_time_jd),
-        star=star,
-    )[:, 0]  # (K,) -- drop T=1 axis
     flux = pre_coro_bin_processing(flux, wavelength_nm, bin_width_nm, optical_path)
 
     pixel_scale_lod, shape = _detector_sampling_lod(wavelength_nm, optical_path)
@@ -190,33 +190,58 @@ def planet_rate(
     return jnp.clip(image_rate, 0, None)
 
 
+def planet_rate(
+    system,
+    optical_path,
+    *,
+    start_time_d,
+    wavelength_nm,
+    bin_width_nm,
+    telescope_pa_deg,
+):
+    """Render all planets in a scene System, sharing one ephemeris.
+
+    ``start_time_d`` is days from ``system.epoch``. Positions and fluxes
+    retain flattened scene order across heterogeneous photometric batches.
+    ``telescope_pa_deg`` is the sky PA of detector +y, north through east;
+    at zero PA east is left and north is up with ``imshow(origin="lower")``.
+    """
+    total = jnp.zeros(optical_path.detector.shape)
+    for positions, flux in _planet_batches(system, start_time_d, wavelength_nm):
+        total = total + _planet_image_rate(
+            positions,
+            flux,
+            optical_path,
+            wavelength_nm=wavelength_nm,
+            bin_width_nm=bin_width_nm,
+            telescope_pa_deg=telescope_pa_deg,
+        )
+    return total
+
+
 def planet_readout(
-    planet,
+    system,
     optical_path,
     prng_key,
     *,
-    start_time_jd,
+    start_time_d,
     exposure_time_s,
     wavelength_nm,
     bin_width_nm,
     telescope_pa_deg,
-    star,
-    trig_solver,
 ):
-    """Process a per-batch Planet through the optical path.
+    """Process all planets in a scene System through the optical path.
 
     Detector axes and ``telescope_pa_deg`` follow :func:`planet_rate`:
     the PA is that of detector +y on the sky, north through east.
     """
     image_rate_detector = planet_rate(
-        planet,
+        system,
         optical_path,
-        start_time_jd=start_time_jd,
+        start_time_d=start_time_d,
         wavelength_nm=wavelength_nm,
         bin_width_nm=bin_width_nm,
         telescope_pa_deg=telescope_pa_deg,
-        star=star,
-        trig_solver=trig_solver,
     )
     return optical_path.detector.readout_source_electrons(
         image_rate_detector, exposure_time_s, prng_key
@@ -232,7 +257,8 @@ def disk_rate(
     disk,
     optical_path,
     *,
-    start_time_jd,
+    start_time_d,
+    dist_pc,
     wavelength_nm,
     bin_width_nm,
     telescope_pa_deg,
@@ -262,8 +288,10 @@ def disk_rate(
             scene (e.g. a table-backed coronagraph built without a PSF
             datacube).
     """
-    contrast = disk.surface_brightness(wavelength_nm, start_time_jd, incl_deg, pa_deg)
-    star_flux = star.spec_flux_density(wavelength_nm, start_time_jd)
+    contrast = disk.surface_brightness(
+        wavelength_nm, start_time_d, incl_deg, pa_deg, dist_pc=dist_pc
+    )
+    star_flux = star.spec_flux_density(wavelength_nm, start_time_d, dist_pc=dist_pc)
     flux = contrast * star_flux
     flux = pre_coro_bin_processing(flux, wavelength_nm, bin_width_nm, optical_path)
 
@@ -290,7 +318,8 @@ def disk_readout(
     optical_path,
     prng_key,
     *,
-    start_time_jd,
+    start_time_d,
+    dist_pc,
     exposure_time_s,
     wavelength_nm,
     bin_width_nm,
@@ -311,7 +340,8 @@ def disk_readout(
     image_rate_detector = disk_rate(
         disk,
         optical_path,
-        start_time_jd=start_time_jd,
+        start_time_d=start_time_d,
+        dist_pc=dist_pc,
         wavelength_nm=wavelength_nm,
         bin_width_nm=bin_width_nm,
         telescope_pa_deg=telescope_pa_deg,
@@ -333,7 +363,7 @@ def zodi_rate(
     zodi: Zodi,
     optical_path,
     *,
-    start_time_jd,
+    start_time_d,
     wavelength_nm,
     bin_width_nm,
     ecliptic_lat_deg,
@@ -347,7 +377,7 @@ def zodi_rate(
     normalised PSF returns itself).
     """
     sb_per_arcsec2 = zodi.spec_flux_density(
-        wavelength_nm, start_time_jd, ecliptic_lat_deg, solar_lon_deg
+        wavelength_nm, start_time_d, ecliptic_lat_deg, solar_lon_deg
     )
     flux_per_pixel = sb_per_arcsec2 * optical_path.detector.pixel_scale_arcsec**2
 
@@ -366,7 +396,7 @@ def zodi_readout(
     optical_path,
     prng_key,
     *,
-    start_time_jd,
+    start_time_d,
     exposure_time_s,
     wavelength_nm,
     bin_width_nm,
@@ -377,7 +407,7 @@ def zodi_readout(
     image_rate_detector = zodi_rate(
         zodi,
         optical_path,
-        start_time_jd=start_time_jd,
+        start_time_d=start_time_d,
         wavelength_nm=wavelength_nm,
         bin_width_nm=bin_width_nm,
         ecliptic_lat_deg=ecliptic_lat_deg,
@@ -397,7 +427,8 @@ def speckle_rate(
     speckle,
     optical_path,
     *,
-    start_time_jd,
+    start_time_d,
+    dist_pc,
     wavelength_nm,
     bin_width_nm,
     star,
@@ -413,7 +444,7 @@ def speckle_rate(
     post-coronagraph focal-plane map, so there is no PSF convolution.
 
     Evolution is driven by time, not a PRNG key: the elapsed seconds are
-    ``(start_time_jd - speckle.epoch_jd)``, so the rate is deterministic
+    ``(start_time_d - speckle.epoch_d) * d2s``, so the rate is deterministic
     and differentiable and temporal correlation survives across a roll
     sequence. The realization's randomness is fixed at construction.
 
@@ -421,8 +452,8 @@ def speckle_rate(
     ``speckle.pixel_scale_lod`` and resampled to the detector grid
     directly, so it need not share a plate scale with the coronagraph.
     """
-    time_s = (start_time_jd - speckle.epoch_jd) * d2s
-    flux = star.spec_flux_density(wavelength_nm, start_time_jd)
+    time_s = (start_time_d - speckle.epoch_d) * d2s
+    flux = star.spec_flux_density(wavelength_nm, start_time_d, dist_pc=dist_pc)
     flux = pre_coro_bin_processing(flux, wavelength_nm, bin_width_nm, optical_path)
     contrast = speckle.realize(wavelength_nm=wavelength_nm, time_s=time_s)
     image_rate_coro = contrast * flux
@@ -446,7 +477,8 @@ def speckle_readout(
     optical_path,
     prng_key,
     *,
-    start_time_jd,
+    start_time_d,
+    dist_pc,
     exposure_time_s,
     wavelength_nm,
     bin_width_nm,
@@ -460,7 +492,8 @@ def speckle_readout(
     image_rate_detector = speckle_rate(
         speckle,
         optical_path,
-        start_time_jd=start_time_jd,
+        start_time_d=start_time_d,
+        dist_pc=dist_pc,
         wavelength_nm=wavelength_nm,
         bin_width_nm=bin_width_nm,
         star=star,
@@ -479,7 +512,7 @@ def system_rate(
     scene,
     optical_path,
     *,
-    start_time_jd,
+    start_time_d,
     wavelength_nm,
     bin_width_nm,
     telescope_pa_deg,
@@ -525,7 +558,8 @@ def system_rate(
     contribution = star_rate(
         scene.system.star,
         optical_path,
-        start_time_jd=start_time_jd,
+        dist_pc=scene.system.dist_pc,
+        start_time_d=start_time_d,
         wavelength_nm=wavelength_nm,
         bin_width_nm=bin_width_nm,
     )
@@ -534,16 +568,14 @@ def system_rate(
         parts["star"] = contribution
 
     planets = None
-    for planet in scene.system.planets:
-        contribution = planet_rate(
-            planet,
+    for positions, flux in _planet_batches(scene.system, start_time_d, wavelength_nm):
+        contribution = _planet_image_rate(
+            positions,
+            flux,
             optical_path,
-            start_time_jd=start_time_jd,
             wavelength_nm=wavelength_nm,
             bin_width_nm=bin_width_nm,
             telescope_pa_deg=telescope_pa_deg,
-            star=scene.system.star,
-            trig_solver=scene.system.trig_solver,
         )
         total = total + contribution
         if trace:
@@ -555,11 +587,12 @@ def system_rate(
         contribution = disk_rate(
             scene.system.disk,
             optical_path,
-            start_time_jd=start_time_jd,
+            start_time_d=start_time_d,
             wavelength_nm=wavelength_nm,
             bin_width_nm=bin_width_nm,
             telescope_pa_deg=telescope_pa_deg,
             star=scene.system.star,
+            dist_pc=scene.system.dist_pc,
             incl_deg=jnp.asarray(scene.system.midplane_inc_deg),
             pa_deg=jnp.asarray(scene.system.midplane_pa_deg),
         )
@@ -571,7 +604,7 @@ def system_rate(
         contribution = zodi_rate(
             scene.zodi,
             optical_path,
-            start_time_jd=start_time_jd,
+            start_time_d=start_time_d,
             wavelength_nm=wavelength_nm,
             bin_width_nm=bin_width_nm,
             ecliptic_lat_deg=ecliptic_lat_deg,
@@ -585,10 +618,11 @@ def system_rate(
         contribution = speckle_rate(
             optical_path.speckle,
             optical_path,
-            start_time_jd=start_time_jd,
+            start_time_d=start_time_d,
             wavelength_nm=wavelength_nm,
             bin_width_nm=bin_width_nm,
             star=scene.system.star,
+            dist_pc=scene.system.dist_pc,
         )
         total = total + contribution
         if trace:
@@ -604,7 +638,7 @@ def system_readout(
     optical_path,
     prng_key,
     *,
-    start_time_jd,
+    start_time_d,
     exposure_time_s,
     wavelength_nm,
     bin_width_nm,
@@ -623,9 +657,8 @@ def system_readout(
     output +row/+column are detector +y/+x. At zero PA, display with
     ``origin="lower"`` for north up and east left.
 
-    The Python loop over ``scene.system.planets`` is intentionally
-    unjitted -- it orchestrates JIT-cached per-Planet-type kernels. The
-    expensive math is inside each ``planet_readout`` call, not the loop.
+    Planet positions and fluxes share one scene ephemeris; independent
+    photon draws retain the photometric tuple batch boundaries.
     """
     has_disk = scene.system.disk is not None
     has_zodi = scene.zodi is not None
@@ -640,24 +673,24 @@ def system_readout(
         scene.system.star,
         optical_path,
         next(keys),
-        start_time_jd=start_time_jd,
+        dist_pc=scene.system.dist_pc,
+        start_time_d=start_time_d,
         exposure_time_s=exposure_time_s,
         wavelength_nm=wavelength_nm,
         bin_width_nm=bin_width_nm,
     )
 
-    for planet in scene.system.planets:
-        total = total + planet_readout(
-            planet,
+    for positions, flux in _planet_batches(scene.system, start_time_d, wavelength_nm):
+        rate = _planet_image_rate(
+            positions,
+            flux,
             optical_path,
-            next(keys),
-            start_time_jd=start_time_jd,
-            exposure_time_s=exposure_time_s,
             wavelength_nm=wavelength_nm,
             bin_width_nm=bin_width_nm,
             telescope_pa_deg=telescope_pa_deg,
-            star=scene.system.star,
-            trig_solver=scene.system.trig_solver,
+        )
+        total = total + optical_path.detector.readout_source_electrons(
+            rate, exposure_time_s, next(keys)
         )
 
     if has_disk:
@@ -665,12 +698,13 @@ def system_readout(
             scene.system.disk,
             optical_path,
             next(keys),
-            start_time_jd=start_time_jd,
+            start_time_d=start_time_d,
             exposure_time_s=exposure_time_s,
             wavelength_nm=wavelength_nm,
             bin_width_nm=bin_width_nm,
             telescope_pa_deg=telescope_pa_deg,
             star=scene.system.star,
+            dist_pc=scene.system.dist_pc,
             incl_deg=jnp.asarray(scene.system.midplane_inc_deg),
             pa_deg=jnp.asarray(scene.system.midplane_pa_deg),
         )
@@ -680,7 +714,7 @@ def system_readout(
             scene.zodi,
             optical_path,
             next(keys),
-            start_time_jd=start_time_jd,
+            start_time_d=start_time_d,
             exposure_time_s=exposure_time_s,
             wavelength_nm=wavelength_nm,
             bin_width_nm=bin_width_nm,
@@ -693,11 +727,12 @@ def system_readout(
             optical_path.speckle,
             optical_path,
             next(keys),
-            start_time_jd=start_time_jd,
+            start_time_d=start_time_d,
             exposure_time_s=exposure_time_s,
             wavelength_nm=wavelength_nm,
             bin_width_nm=bin_width_nm,
             star=scene.system.star,
+            dist_pc=scene.system.dist_pc,
         )
 
     return total

@@ -54,7 +54,7 @@ Requires downloaded ExoVista and coronagraph data and a configured optical path.
 ```python notest
 import jax
 
-jax.config.update("jax_enable_x64", True)  # Preserve absolute Julian Date precision.
+jax.config.update("jax_enable_x64", True)  # Preserve orbital state-vector precision.
 
 from optixstuff import ConstantThroughput, IdealDetector, OpticalPath, SimplePrimary
 from yippy import EqxCoronagraph
@@ -84,7 +84,7 @@ image = system_readout(
     scene,
     optical_path,
     jax.random.PRNGKey(0),
-    start_time_jd=2_452_000.0,
+    start_time_d=scene.system.epoch.days(2_452_000.0),
     exposure_time_s=3600.0,
     wavelength_nm=550.0,
     bin_width_nm=50.0,
@@ -99,7 +99,7 @@ from coronagraphoto import system_rate
 rate = system_rate(
     scene,
     optical_path,
-    start_time_jd=2_452_000.0,
+    start_time_d=scene.system.epoch.days(2_452_000.0),
     wavelength_nm=550.0,
     bin_width_nm=50.0,
     telescope_pa_deg=0.0,

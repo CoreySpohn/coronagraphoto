@@ -131,7 +131,7 @@ def _integrated_year(
         rate = zodi_rate(
             zodi,
             optical_path,
-            start_time_jd=float(mjd),
+            start_time_d=float(mjd) - 60575.25,
             wavelength_nm=wavelength_nm,
             bin_width_nm=bin_width_nm,
             ecliptic_lat_deg=ecl_lat,

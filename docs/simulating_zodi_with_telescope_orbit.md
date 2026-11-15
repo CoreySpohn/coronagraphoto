@@ -31,6 +31,7 @@ to `zodi_rate`:
 Requires target coordinates and a configured optical path.
 
 ```python notest
+from hwoutils.epoch import Epoch
 from orbix.observatory import ObservatoryL2Halo
 from skyscapes.background import LeinertZodi
 from coronagraphoto import zodi_rate
@@ -38,15 +39,16 @@ from coronagraphoto import zodi_rate
 obs = ObservatoryL2Halo.from_default()
 zodi = LeinertZodi(reference_mag_arcsec2=22.0)
 
+epoch = Epoch(2_460_575.0, 0.75)
 mjd = 60575.25
-start_time_jd = mjd + 2_400_000.5
+start_time_d = epoch.days(mjd + 2_400_000.5)
 ecl_lat = float(obs.ecliptic_latitude_deg(mjd, ra_rad, dec_rad))
 helio_lon = float(obs.helio_ecliptic_longitude_deg(mjd, ra_rad, dec_rad))
 
 rate = zodi_rate(
     zodi,
     optical_path,
-    start_time_jd=start_time_jd,
+    start_time_d=start_time_d,
     wavelength_nm=550.0,
     bin_width_nm=50.0,
     ecliptic_lat_deg=ecl_lat,
@@ -91,7 +93,7 @@ for i, mjd in enumerate(mjds):
         zodi,
         optical_path,
         prng_keys[i],
-        start_time_jd=float(mjd) + 2_400_000.5,
+        start_time_d=epoch.days(float(mjd) + 2_400_000.5),
         exposure_time_s=exposure_s,
         wavelength_nm=wavelength_nm,
         bin_width_nm=bin_width_nm,

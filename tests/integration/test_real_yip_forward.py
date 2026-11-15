@@ -76,13 +76,13 @@ def test_exovista_scene_simulates_end_to_end_with_real_yip(real_optical_path):
     scene = load_scene_from_exovista(fits_file, only_earths=True)
     scene = eqx.tree_at(lambda s: s.system.disk, scene, None)
 
-    start_time_jd = float(scene.system.planets[0].orbit.t0_d[0])
+    start_time_d = float(scene.system.dynamics.orbits.epoch_d[0])
     wavelength_nm = 550.0
     image = system_readout(
         scene,
         real_optical_path,
         jax.random.PRNGKey(0),
-        start_time_jd=start_time_jd,
+        start_time_d=start_time_d,
         exposure_time_s=3600.0,
         wavelength_nm=wavelength_nm,
         bin_width_nm=50.0,

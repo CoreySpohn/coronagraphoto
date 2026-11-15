@@ -131,13 +131,13 @@ def test_exovista_scene_simulates_end_to_end(perfect_system):
     fits_file = fetch_scene()
     scene = load_scene_from_exovista(fits_file, only_earths=True)
 
-    start_time_jd = float(scene.system.planets[0].orbit.t0_d[0])
+    start_time_d = float(scene.system.dynamics.orbits.epoch_d[0])
     wavelength_nm = 550.0
     image = system_readout(
         scene,
         perfect_system,
         jax.random.PRNGKey(0),
-        start_time_jd=start_time_jd,
+        start_time_d=start_time_d,
         exposure_time_s=3600.0,
         wavelength_nm=wavelength_nm,
         bin_width_nm=50.0,
@@ -166,7 +166,7 @@ def test_exovista_scene_simulates_end_to_end(perfect_system):
     # detectable. The reference PSF is generated via the same
     # ``create_psfs`` call used inside ``planet_rate``, exercising
     # the full arcsec -> lambda/D -> coro-pixel chain.
-    predicted_pos_arcsec = scene.system.positions(jnp.array([start_time_jd]))
+    predicted_pos_arcsec = scene.system.positions(jnp.array([start_time_d]))
     # Shape (2, K_total=1, T=1). Take planet 0 at the single epoch.
     ra_arcsec = float(predicted_pos_arcsec[0, 0, 0])
     dec_arcsec = float(predicted_pos_arcsec[1, 0, 0])
@@ -223,7 +223,7 @@ def test_exovista_scene_simulates_end_to_end(perfect_system):
         scene_no_disk,
         perfect_system,
         jax.random.PRNGKey(0),
-        start_time_jd=start_time_jd,
+        start_time_d=start_time_d,
         exposure_time_s=3600.0,
         wavelength_nm=wavelength_nm,
         bin_width_nm=50.0,
@@ -247,7 +247,7 @@ def test_system_rate_trace_decomposes_the_scene(perfect_system):
     floating-point associativity.
     """
     scene = load_scene_from_exovista(fetch_scene(), only_earths=True)
-    start_time_jd = jnp.asarray(float(scene.system.planets[0].orbit.t0_d[0]))
+    start_time_d = jnp.asarray(float(scene.system.dynamics.orbits.epoch_d[0]))
     kwargs = dict(
         wavelength_nm=550.0,
         bin_width_nm=50.0,
@@ -256,9 +256,9 @@ def test_system_rate_trace_decomposes_the_scene(perfect_system):
         solar_lon_deg=135.0,
     )
 
-    untraced = system_rate(scene, perfect_system, start_time_jd=start_time_jd, **kwargs)
+    untraced = system_rate(scene, perfect_system, start_time_d=start_time_d, **kwargs)
     total, parts = system_rate(
-        scene, perfect_system, start_time_jd=start_time_jd, trace=True, **kwargs
+        scene, perfect_system, start_time_d=start_time_d, trace=True, **kwargs
     )
 
     # Tracing does not perturb the production path.
@@ -291,7 +291,7 @@ def test_system_rate_trace_is_static_and_costs_two_kernels(perfect_system):
     property under test.
     """
     scene = load_scene_from_exovista(fetch_scene(), only_earths=True)
-    t0 = float(scene.system.planets[0].orbit.t0_d[0])
+    t0 = float(scene.system.dynamics.orbits.epoch_d[0])
     kwargs = dict(
         wavelength_nm=550.0,
         bin_width_nm=50.0,
@@ -302,12 +302,12 @@ def test_system_rate_trace_is_static_and_costs_two_kernels(perfect_system):
     jitted = eqx.filter_jit(system_rate)
 
     for offset in (0.0, 10.0, 20.0):
-        start_time_jd = jnp.asarray(t0 + offset)
-        untraced = jitted(scene, perfect_system, start_time_jd=start_time_jd, **kwargs)
+        start_time_d = jnp.asarray(t0 + offset)
+        untraced = jitted(scene, perfect_system, start_time_d=start_time_d, **kwargs)
         total, parts = jitted(
             scene,
             perfect_system,
-            start_time_jd=start_time_jd,
+            start_time_d=start_time_d,
             trace=True,
             **kwargs,
         )

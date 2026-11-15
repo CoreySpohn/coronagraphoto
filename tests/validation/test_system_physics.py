@@ -15,8 +15,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils import constants as const
 from hwoutils import conversions as conv
+from hwoutils.constants import Mearth2kg, Msun2kg
+from hwoutils.epoch import Epoch
 from optixstuff import (
     ConstantThroughput,
     IdealDetector,
@@ -133,10 +134,8 @@ def perfect_system():
 def standard_star():
     """Create a 0 Mag (AB) StarSource (Star) for testing."""
     return StarSource(
-        Ms_kg=const.Msun2kg,
-        dist_pc=10.0,
         wavelengths_nm=jnp.array([400.0, 550.0, 700.0, 800.0]),
-        times_jd=jnp.array([0.0, 1.0]),
+        times_d=jnp.array([0.0, 1.0]),
         flux_density_jy=jnp.full((4, 2), 3631.0),
         diameter_arcsec=0.0,
     )
@@ -157,20 +156,21 @@ class TestEndToEndRadiometry:
         """Verify star_rate produces the exact analytic photon count."""
         WAVELENGTH = 550.0
         BANDWIDTH = 50.0
-        TIME_JD = 0.5
+        TIME_D = 0.5
 
         image_rate = star_rate(
             standard_star,
             perfect_system,
-            start_time_jd=TIME_JD,
+            start_time_d=TIME_D,
             wavelength_nm=WAVELENGTH,
             bin_width_nm=BANDWIDTH,
+            dist_pc=10.0,
         )
 
         total_simulated_rate = jnp.sum(image_rate)
 
         # Analytic: Flux * Area * Bandwidth
-        flux_density = standard_star.spec_flux_density(WAVELENGTH, TIME_JD)
+        flux_density = standard_star.spec_flux_density(WAVELENGTH, TIME_D)
         area = np.pi * (perfect_system.primary.diameter_m / 2) ** 2
         expected_rate = flux_density * area * BANDWIDTH
 
@@ -204,24 +204,26 @@ class TestEndToEndRadiometry:
 
         WAVELENGTH = 550.0
         BANDWIDTH = 50.0
-        TIME_JD = 0.5
+        TIME_D = 0.5
 
         rate_lossy = jnp.sum(
             star_rate(
                 standard_star,
                 lossy_system,
-                start_time_jd=TIME_JD,
+                start_time_d=TIME_D,
                 wavelength_nm=WAVELENGTH,
                 bin_width_nm=BANDWIDTH,
+                dist_pc=10.0,
             )
         )
         rate_perfect = jnp.sum(
             star_rate(
                 standard_star,
                 perfect_system,
-                start_time_jd=TIME_JD,
+                start_time_d=TIME_D,
                 wavelength_nm=WAVELENGTH,
                 bin_width_nm=BANDWIDTH,
+                dist_pc=10.0,
             )
         )
 
@@ -250,7 +252,7 @@ class TestSurfaceBrightness:
         image_rate = zodi_rate(
             zodi,
             perfect_system,
-            start_time_jd=0.0,
+            start_time_d=0.0,
             wavelength_nm=WAVELENGTH,
             bin_width_nm=WIDTH,
             ecliptic_lat_deg=0.0,
@@ -295,10 +297,11 @@ class TestDetectorNoiseIntegration:
             standard_star,
             perfect_system,
             key,
-            start_time_jd=0.5,
+            start_time_d=0.5,
             exposure_time_s=exposure_time_s,
             wavelength_nm=550.0,
             bin_width_nm=50.0,
+            dist_pc=10.0,
         )
 
         total_counts = jnp.sum(img)
@@ -326,38 +329,38 @@ class TestPlanetFidelity:
     @pytest.fixture
     def planet_setup(self):
         """Build a scene.Planet at 5 AU (0.5 arcsec @ 10pc) with grey contrast."""
-        from orbix.kepler.shortcuts.grid import get_grid_solver
-        from orbix.orbit import KeplerianOrbit
         from skyscapes.physical_model import LambertianPhysicalModel
-        from skyscapes.scene import Planet, Star
+        from skyscapes.scene import Planet, Star, System
 
         star = Star(
-            Ms_kg=const.Msun2kg,
-            dist_pc=10.0,
             wavelengths_nm=jnp.array([400.0, 550.0, 700.0, 800.0]),
-            times_jd=jnp.array([0.0, 1.0]),
+            times_d=jnp.array([0.0, 1.0]),
             flux_density_jy=jnp.full((4, 2), 3631.0),
             diameter_arcsec=0.0,
         )
-        orbit = KeplerianOrbit(
+
+        # Grey physical model with Ag chosen so flux at M0=0 is non-trivial.
+        physical_model = LambertianPhysicalModel(Ag=jnp.array([0.3]))
+        planet = Planet(
+            Rp_Rearth=jnp.array([1.0]),
+            physical_model=physical_model,
+        )
+        system = System.from_classical(
+            star,
+            (planet,),
+            star_mass_Msun=1.0,
+            planet_mass_Msun=Mearth2kg / Msun2kg,
+            dist_pc=10.0,
+            epoch=Epoch(2451545.0),
             a_AU=jnp.array([5.0]),
             e=jnp.array([0.0]),
             W_rad=jnp.array([0.0]),
             i_rad=jnp.array([0.0]),
             w_rad=jnp.array([0.0]),
             M0_rad=jnp.array([0.0]),
-            t0_d=jnp.array([0.0]),
+            epoch_d=jnp.array([0.0]),
         )
-        # Grey physical model with Ag chosen so flux at M0=0 is non-trivial.
-        physical_model = LambertianPhysicalModel(Ag=jnp.array([0.3]))
-        planet = Planet(
-            Rp_Rearth=jnp.array([1.0]),
-            Mp_Mearth=jnp.array([1.0]),
-            orbit=orbit,
-            physical_model=physical_model,
-        )
-        solver = get_grid_solver(level="scalar", E=False, trig=True, jit=True)
-        return planet, star, solver
+        return system
 
     def test_planet_runs_with_wavelength_dependent_physical_model(self, perfect_system):
         """Regression: ``planet_rate`` must accept scalar wavelength.
@@ -369,28 +372,16 @@ class TestPlanetFidelity:
         path didn't catch it because :class:`LambertianPhysicalModel`
         ignores wavelength entirely.
         """
-        from orbix.kepler.shortcuts.grid import get_grid_solver
-        from orbix.orbit import KeplerianOrbit
         from skyscapes.physical_model import GridPhysicalModel
-        from skyscapes.scene import Planet, Star
+        from skyscapes.scene import Planet, Star, System
 
         star = Star(
-            Ms_kg=const.Msun2kg,
-            dist_pc=10.0,
             wavelengths_nm=jnp.array([400.0, 550.0, 700.0]),
-            times_jd=jnp.array([0.0, 1.0]),
+            times_d=jnp.array([0.0, 1.0]),
             flux_density_jy=jnp.full((3, 2), 3631.0),
             diameter_arcsec=0.0,
         )
-        orbit = KeplerianOrbit(
-            a_AU=jnp.array([5.0]),
-            e=jnp.array([0.0]),
-            W_rad=jnp.array([0.0]),
-            i_rad=jnp.array([0.0]),
-            w_rad=jnp.array([0.0]),
-            M0_rad=jnp.array([0.0]),
-            t0_d=jnp.array([0.0]),
-        )
+
         # GridPhysicalModel is wavelength-dependent (interpolates per planet
         # across wavelengths and phase angles); shape-broken models
         # would crash here even though Lambertian-based tests pass.
@@ -404,21 +395,31 @@ class TestPlanetFidelity:
         )
         planet = Planet(
             Rp_Rearth=jnp.array([1.0]),
-            Mp_Mearth=jnp.array([1.0]),
-            orbit=orbit,
             physical_model=physical_model,
         )
-        solver = get_grid_solver(level="scalar", E=False, trig=True, jit=True)
+        system = System.from_classical(
+            star,
+            (planet,),
+            star_mass_Msun=1.0,
+            planet_mass_Msun=Mearth2kg / Msun2kg,
+            dist_pc=10.0,
+            epoch=Epoch(2451545.0),
+            a_AU=jnp.array([5.0]),
+            e=jnp.array([0.0]),
+            W_rad=jnp.array([0.0]),
+            i_rad=jnp.array([0.0]),
+            w_rad=jnp.array([0.0]),
+            M0_rad=jnp.array([0.0]),
+            epoch_d=jnp.array([0.0]),
+        )
 
         img = planet_rate(
-            planet,
+            system,
             perfect_system,
-            start_time_jd=0.0,
+            start_time_d=0.0,
             wavelength_nm=550.0,
             bin_width_nm=50.0,
             telescope_pa_deg=0.0,
-            star=star,
-            trig_solver=solver,
         )
         assert img.shape == perfect_system.detector.shape
         assert bool(jnp.all(jnp.isfinite(img)))
@@ -431,29 +432,25 @@ class TestPlanetFidelity:
         scale arcsec -> lambda/D correctly so the pixel location is
         wavelength-invariant.
         """
-        planet, star, solver = planet_setup
+        system = planet_setup
 
         img_blue = planet_rate(
-            planet,
+            system,
             perfect_system,
-            start_time_jd=0.0,
+            start_time_d=0.0,
             wavelength_nm=400.0,
             bin_width_nm=50.0,
             telescope_pa_deg=0.0,
-            star=star,
-            trig_solver=solver,
         )
         yb, xb = jnp.unravel_index(jnp.argmax(img_blue), img_blue.shape)
 
         img_red = planet_rate(
-            planet,
+            system,
             perfect_system,
-            start_time_jd=0.0,
+            start_time_d=0.0,
             wavelength_nm=800.0,
             bin_width_nm=50.0,
             telescope_pa_deg=0.0,
-            star=star,
-            trig_solver=solver,
         )
         yr, xr = jnp.unravel_index(jnp.argmax(img_red), img_red.shape)
 
@@ -469,16 +466,14 @@ class TestPlanetFidelity:
         At 0.05 arcsec/pixel, 0.5 arcsec = 10 pixels from center (50, 50).
         Planet at its node with Omega=0 lands due north, along detector +y.
         """
-        planet, star, solver = planet_setup
+        system = planet_setup
         img = planet_rate(
-            planet,
+            system,
             perfect_system,
-            start_time_jd=0.0,
+            start_time_d=0.0,
             wavelength_nm=550.0,
             bin_width_nm=50.0,
             telescope_pa_deg=0.0,
-            star=star,
-            trig_solver=solver,
         )
         y, x = jnp.unravel_index(jnp.argmax(img), img.shape)
         # Omega=0 is north; zero-roll FITS frames put north on +row.
@@ -488,47 +483,47 @@ class TestPlanetFidelity:
         )
 
     def test_planet_count_rate_vmap_over_time(self, perfect_system):
-        """Multi-time API is just ``jax.vmap`` over ``start_time_jd``.
+        """Multi-time API is just ``jax.vmap`` over ``start_time_d``.
 
         ``planet_rate`` is single-time, but the function is
         pure JAX with no time-dependent control flow, so
-        vmapping over ``start_time_jd`` returns a stack of per-epoch images
+        vmapping over ``start_time_d`` returns a stack of per-epoch images
         with the orbit propagated independently at each time. Catches any
         future regression that would break this trace-time vectorisation
         (e.g. a Python branch on a traced time value).
 
         Uses a local ``FlatStar`` instead of the ``planet_setup``
         fixture's ``Star`` because the fixture's flux interpolant
-        is built over ``times_jd=[0, 1]`` and extrapolates to NaN at the
+        is built over ``times_d=[0, 1]`` and extrapolates to NaN at the
         times we sweep here.
         """
-        from orbix.kepler.shortcuts.grid import get_grid_solver
-        from orbix.orbit import KeplerianOrbit
         from skyscapes.physical_model import LambertianPhysicalModel
-        from skyscapes.scene import FlatStar, Planet
+        from skyscapes.scene import FlatStar, Planet, System
 
         star = FlatStar(
-            Ms_kg=const.Msun2kg,
-            dist_pc=10.0,
             flux_phot_per_nm_m2=1e9,
         )
-        orbit = KeplerianOrbit(
+
+        physical_model = LambertianPhysicalModel(Ag=jnp.array([0.3]))
+        planet = Planet(
+            Rp_Rearth=jnp.array([1.0]),
+            physical_model=physical_model,
+        )
+        system = System.from_classical(
+            star,
+            (planet,),
+            star_mass_Msun=1.0,
+            planet_mass_Msun=Mearth2kg / Msun2kg,
+            dist_pc=10.0,
+            epoch=Epoch(2451545.0),
             a_AU=jnp.array([5.0]),
             e=jnp.array([0.0]),
             W_rad=jnp.array([0.0]),
             i_rad=jnp.array([0.0]),
             w_rad=jnp.array([0.0]),
             M0_rad=jnp.array([0.0]),
-            t0_d=jnp.array([0.0]),
+            epoch_d=jnp.array([0.0]),
         )
-        physical_model = LambertianPhysicalModel(Ag=jnp.array([0.3]))
-        planet = Planet(
-            Rp_Rearth=jnp.array([1.0]),
-            Mp_Mearth=jnp.array([1.0]),
-            orbit=orbit,
-            physical_model=physical_model,
-        )
-        solver = get_grid_solver(level="scalar", E=False, trig=True, jit=True)
 
         # Pick four times across roughly half an orbit. With a=5 AU around
         # a 1 Msun star, P ~ 11.18 yr ~ 4083 d, so 1500 d spans ~37% of an
@@ -537,14 +532,12 @@ class TestPlanetFidelity:
 
         def at_time(t):
             return planet_rate(
-                planet,
+                system,
                 perfect_system,
-                start_time_jd=t,
+                start_time_d=t,
                 wavelength_nm=550.0,
                 bin_width_nm=50.0,
                 telescope_pa_deg=0.0,
-                star=star,
-                trig_solver=solver,
             )
 
         images = jax.vmap(at_time)(times)
@@ -586,7 +579,7 @@ class TestMaskPhysics:
         BIN_WIDTH = 50.0
 
         zodi_kwargs = dict(
-            start_time_jd=0.0,
+            start_time_d=0.0,
             wavelength_nm=WAVELENGTH,
             bin_width_nm=BIN_WIDTH,
             ecliptic_lat_deg=0.0,
@@ -650,7 +643,7 @@ class TestZodiTypeAgnosticDispatch:
         leinert = LeinertZodi(reference_mag_arcsec2=mag)
 
         zodi_kwargs = dict(
-            start_time_jd=0.0,
+            start_time_d=0.0,
             wavelength_nm=WAVELENGTH,
             bin_width_nm=BIN_WIDTH,
             ecliptic_lat_deg=0.0,
@@ -734,10 +727,8 @@ class TestDiskPipelineGuards:
             contrast_cube=jnp.full((wl.size, 51, 51), 1e-9),
         )
         star = Star(
-            Ms_kg=const.Msun2kg,
-            dist_pc=10.0,
             wavelengths_nm=jnp.array([400.0, 550.0, 700.0]),
-            times_jd=jnp.array([0.0, 1.0]),
+            times_d=jnp.array([0.0, 1.0]),
             flux_density_jy=jnp.full((3, 2), 3631.0),
             diameter_arcsec=0.0,
         )
@@ -746,11 +737,12 @@ class TestDiskPipelineGuards:
             disk_rate(
                 disk,
                 path,
-                start_time_jd=0.0,
+                start_time_d=0.0,
                 wavelength_nm=550.0,
                 bin_width_nm=50.0,
                 telescope_pa_deg=0.0,
                 star=star,
                 incl_deg=0.0,
                 pa_deg=0.0,
+                dist_pc=10.0,
             )
