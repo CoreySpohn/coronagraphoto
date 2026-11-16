@@ -1,146 +1,86 @@
-"""Integration Tests with Real Coronagraph Data.
+"""YIP adapter integration using a small synthetic FITS package."""
 
-These tests verify that coronagraphoto can load and interact with real
-coronagraph data from yippy. They focus on testing the data loading and
-basic attribute access rather than full simulation chain (which has
-known JAX/numpy compatibility issues).
+from dataclasses import replace
 
-Tests are marked slow and require network access.
-"""
-
+import equinox as eqx
+import jax.numpy as jnp
 import numpy as np
 import pytest
-from lod_unit import lod
-from yippy import Coronagraph
+from conftest import make_path, make_system, write_yip
+from hwoutils.constants import arcsec2rad
+from hwoutils.grids import PixelGrid, SkyOrientation, resample
+from hwoutils.spectral import Band
+from optixstuff import YippyCoronagraph
+from skyscapes.background import PrecomputedZodi
+from skyscapes.scene import BlackbodyStar, FlatStar
+from yippy import Coronagraph, EqxCoronagraph
 
-from coronagraphoto.datasets import fetch_coronagraph
-
-# Mark all tests as slow (network access) and integration
-pytestmark = [pytest.mark.slow, pytest.mark.integration]
-
-
-@pytest.fixture(scope="module")
-def coro_path():
-    """Fetch coronagraph path once per module."""
-    return fetch_coronagraph()
+from coronagraphoto import image_rates
 
 
-@pytest.fixture(scope="module")
-def real_coronagraph(coro_path):
-    """Load the real eac1_aavc_512 coronagraph from cached data."""
-    return Coronagraph(coro_path)
+@pytest.mark.parametrize("distinct_products", [False, True])
+def test_yip_image_absolute_photon_fraction(tmp_path, distinct_products):
+    """Fails if a YIP per-pixel fraction is interpreted as a density.
 
+    Gaussian omitted tails <2e-8 at this offset; float32 YIP interpolation
+    adds <2e-6 relative. A pixel-area error changes the result by a factor 4.
+    """
+    host = Coronagraph(write_yip(tmp_path / "yip", distinct_products=distinct_products))
+    if distinct_products:
+        # The legacy loader assigns the stellar header to the off-axis product.
+        # Restore its independent synthetic geometry before building the adapter.
+        host.offax.grid = make_path(n=24, step=0.5).coronagraph.grid
+        host.grid = host.offax.grid
+    coro = YippyCoronagraph(
+        backend=EqxCoronagraph(yippy_coro=host, ensure_psf_datacube=False)
+    )
+    path = make_path(n=24, step=0.5, detector_n=28, detector_step=0.5)
+    path = eqx.tree_at(lambda p: p.coronagraph, path, coro)
+    # Exactly a measured source offset: 1 lod north at the reference wavelength.
+    stellar = coro.stellar_intens(0.1)
+    star = FlatStar(
+        flux_phot_per_nm_m2=1e6,
+        diameter_arcsec=0.1 * stellar.grid.frame.lod_to_arcsec(550.0),
+    )
+    if distinct_products:
+        star = BlackbodyStar(teff_K=5772.0, radius_m=6.957e8)
+        stellar = coro.stellar_intens(
+            star.diameter_arcsec(dist_pc=10.0) / stellar.grid.frame.lod_to_arcsec(550.0)
+        )
+    phi_star = star.photon_flux_density(550.0, 0.0, dist_pc=10.0)
+    system = make_system(
+        star=star, separation_arcsec=float(coro.grid.frame.lod_to_arcsec(550.0))
+    )
+    zodi = PrecomputedZodi(jnp.array([500.0, 600.0]), jnp.full(2, 1e12))
+    rates = image_rates(
+        system,
+        path,
+        (Band(549.5, 550.5),),
+        time_d=0.0,
+        pointing=SkyOrientation(90),
+        quadrature_order=1,
+        zodi=zodi,
+    )
+    np.testing.assert_allclose(
+        rates.planet.sum(), 40 * 0.4 * phi_star * 1e-10 * 0.3, rtol=2e-6
+    )
 
-class TestCoronagraphLoading:
-    """Tests for loading and inspecting real coronagraph data."""
-
-    def test_coronagraph_path_exists(self, coro_path):
-        """Verify the coronagraph path points to a valid directory."""
-        import os
-
-        assert os.path.isdir(coro_path), f"Coronagraph path not found: {coro_path}"
-
-    def test_coronagraph_loads_successfully(self, real_coronagraph):
-        """Verify coronagraph data loads without errors."""
-        assert real_coronagraph is not None
-
-    def test_coronagraph_has_stellar_intens(self, real_coronagraph):
-        """Verify coronagraph has stellar intensity interface."""
-        assert hasattr(real_coronagraph, "stellar_intens")
-
-    def test_coronagraph_has_create_psfs(self, real_coronagraph):
-        """Verify coronagraph has off-axis PSF creation interface."""
-        assert hasattr(real_coronagraph, "offax")
-        assert hasattr(real_coronagraph.offax, "create_psfs")
-
-    def test_coronagraph_has_pixel_scale(self, real_coronagraph):
-        """Verify coronagraph has pixel scale attribute."""
-        assert hasattr(real_coronagraph, "pixel_scale_arcsec")
-        # Should be around 0.25 lod/pixel for aavc
-        assert 0.1 < real_coronagraph.pixel_scale_arcsec.value < 1.0
-
-
-class TestStellarIntensity:
-    """Tests for stellar intensity (on-axis) PSF retrieval."""
-
-    def test_stellar_intens_point_source(self, real_coronagraph):
-        """Verify stellar intensity works for point source (0 diameter)."""
-        psf = real_coronagraph.stellar_intens(0.0 * lod)
-        assert psf is not None
-        assert psf.ndim == 2, f"Expected 2D PSF, got {psf.ndim}D"
-        assert psf.shape[0] > 0 and psf.shape[1] > 0
-
-    def test_stellar_intens_is_normalized(self, real_coronagraph):
-        """Verify stellar PSF is approximately normalized."""
-        psf = real_coronagraph.stellar_intens(0.0 * lod)
-        total = np.sum(psf)
-        # Coronagraph PSFs suppress starlight, so sum should be << 1
-        # but still positive
-        assert total > 0, "PSF sum is zero or negative"
-        assert total < 1.0, f"PSF sum {total} > 1 (not suppressed?)"
-
-    def test_stellar_intens_small_diameter(self, real_coronagraph):
-        """Verify stellar intensity works for small (non-zero) diameter."""
-        psf = real_coronagraph.stellar_intens(0.01 * lod)
-        assert psf is not None
-        assert np.all(np.isfinite(psf)), "PSF contains non-finite values"
-
-    def test_stellar_intens_larger_diameter(self, real_coronagraph):
-        """Verify stellar intensity works for larger resolved source."""
-        psf = real_coronagraph.stellar_intens(0.1 * lod)
-        assert psf is not None
-        # Larger star should leak more light through
-        psf_point = real_coronagraph.stellar_intens(0.0 * lod)
-        assert np.sum(psf) >= np.sum(psf_point) * 0.9  # Allow some tolerance
-
-
-class TestOffAxisPSFs:
-    """Tests for off-axis (planet) PSF creation."""
-
-    def test_create_psfs_at_single_position(self, real_coronagraph):
-        """Verify PSF creation works for single off-axis position."""
-        x_lod = np.array([5.0]) * lod
-        y_lod = np.array([0.0]) * lod
-        psfs = real_coronagraph.offax.create_psfs(x_lod, y_lod)
-        assert psfs is not None
-        assert psfs.ndim == 3, f"Expected batch of 2D PSFs, got {psfs.ndim}D"
-        assert psfs.shape[0] == 1, "Expected 1 PSF"
-
-    def test_create_psfs_at_multiple_positions(self, real_coronagraph):
-        """Verify PSF creation works for multiple positions."""
-        x_lod = np.array([3.0, 5.0, 10.0]) * lod
-        y_lod = np.array([0.0, 0.0, 0.0]) * lod
-        psfs = real_coronagraph.offax.create_psfs(x_lod, y_lod)
-        assert psfs.shape[0] == 3, f"Expected 3 PSFs, got {psfs.shape[0]}"
-
-    def test_offaxis_psfs_are_normalized(self, real_coronagraph):
-        """Verify off-axis PSFs are approximately normalized."""
-        x_lod = np.array([5.0]) * lod
-        y_lod = np.array([0.0]) * lod
-        psfs = real_coronagraph.offax.create_psfs(x_lod, y_lod)
-        total = np.sum(psfs[0])
-        # Off-axis PSFs should preserve most flux (high throughput region)
-        assert total > 0.1, f"PSF sum {total} too low (expected > 0.1)"
-        assert total < 1.5, f"PSF sum {total} too high (expected < 1.5)"
-
-
-class TestCoronagraphProperties:
-    """Tests for coronagraph properties and curves."""
-
-    def test_has_iwa(self, real_coronagraph):
-        """Verify coronagraph has inner working angle."""
-        assert hasattr(real_coronagraph, "IWA")
-        # Should be a few lambda/D
-        assert real_coronagraph.IWA.value > 0
-
-    def test_has_owa(self, real_coronagraph):
-        """Verify coronagraph has outer working angle."""
-        assert hasattr(real_coronagraph, "OWA")
-        # OWA should be larger than IWA
-        assert real_coronagraph.OWA > real_coronagraph.IWA
-
-    def test_has_throughput_curve(self, real_coronagraph):
-        """Verify coronagraph has throughput curve."""
-        assert hasattr(real_coronagraph, "throughput")
-        # Should be callable or have values
-        assert real_coronagraph.throughput is not None
+    # Use native products directly as an independent geometry oracle. A finite
+    # diameter and spatial gradients expose both diameter and frame conversion.
+    grid = PixelGrid.regular(
+        (28, 28),
+        float(path.detector.pixel_scale_arcsec),
+        "arcsec",
+        orientation=SkyOrientation(90),
+    )
+    for product, term, scale in (
+        (stellar, rates.star_leakage[0, 0], 40 * 0.4 * phi_star),
+        (
+            coro.sky_trans,
+            rates.local_zodi[0, 0],
+            40 * 0.4 * 1e12 * grid.pixel_area * arcsec2rad**2,
+        ),
+    ):
+        angular = replace(product.grid.to_arcsec(550.0), orientation=grid.orientation)
+        expected = resample(replace(product, grid=angular), grid).data * scale
+        np.testing.assert_allclose(term, expected, rtol=2e-6, atol=1e-16)

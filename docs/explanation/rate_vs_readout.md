@@ -1,183 +1,55 @@
-# Rate vs readout
+# Photon rates, electron rates and observations
 
-coronagraphoto exposes two parallel families of simulation functions
-for every source type (`star`, `planet`, `disk`, `zodi`, and the
-whole-scene aggregator `system`):
+`image_rates(system, optical_path, bands, *, time_d, pointing,
+quadrature_order=4, zodi=None, speckle=None, ecliptic_latitude_deg=0.0,
+solar_longitude_deg=135.0)` returns `PhotonRates`. Each field is an integrand
+in photons/s/nm/pixel with shape `(W,Q,ny,nx)`. Integrate it with
+`rates.integrate(Quadrature.build(bands, None, quadrature_order))` for photons/s.
 
-| Family | Returns | Stochastic? | Differentiable? |
-|---|---|---|---|
-| `*_rate` | Per-pixel count rate (e/s/pixel) | No | Yes (through the whole forward model) |
-| `*_readout` | Per-pixel electron count (e) for one exposure | Yes (Poisson + binomial QE) | No |
+`image_electrons` takes exactly the same arguments and returns `ElectronRates`
+in electrons/s/pixel, shape `(W,ny,nx)`. It applies the detector's yield at
+each wavelength node before accumulation. For small images its result equals
+`optical_path.detector.electrons(image_rates(...), quadrature)`; the streaming
+form avoids retaining the node image cube.
 
-This page explains when to reach for which.
+`observe(key, system, optical_path, bands, plan, *, time_d, pointing, ...)`
+accepts the same optional keywords. It calls `detector.draw` on the electron
+rates and returns `Image(data, detector_grid, ("band",), "per_pixel", "electrons")`.
+The observation holds the instantaneous scene at `time_d` throughout the
+`FramePlan`. The detector owns source noise, dark current, CIC, excess noise
+and read noise. It is called once per observation, so those noise terms are
+not multiplied by the number of sources. Reusing a key reproduces the image.
+
+Use deterministic rates for gradients and likelihood means; discrete noisy
+draws are not differentiable physical forward models. Access individual
+sources through record fields and `.total()` for their sum. `zodi=None`
+disables local zodi. `speckle=None` uses `optical_path.speckle`; construct a
+path without that field to disable an attached speckle model.
 
 ## Image orientation and roll
 
-Both families return detector frames with +row along detector +y and +column
-along detector +x, displayed with `imshow(origin="lower")`.
-`telescope_pa_deg = theta` is the sky position angle of detector +y, measured
-north through east (the `PA_APER` convention used by Roman CGI corgidrp).
-At zero PA, detector +y is north and detector +x is west: the FITS display
-convention shows north up and east left.
+`pointing=SkyOrientation(pa_y_deg, parity=-1)` is shared by the detector grid,
+planet placement and disk rendering. PA is north through east for detector
++y. At PA zero, +column points west and +row north. At PA 90, north points
+right and east up. The shared grid supplies the geometric centre, including
+half-integer centres for even arrays.
 
-For sky offsets $E = \Delta\alpha^*$ (east) and $N = \Delta\delta$ (north),
-the detector offsets in the same angular units are
+Planets use the orbit engine's east/north offsets through
+`pointing.sky_to_detector`. The disk is evaluated directly on that sky grid;
+there is no additional image rotation or alternative disk PA conversion.
+Stored disks keep their native sky geometry. Parametric disks use
+`System.midplane_position_angle_deg`, also north through east.
 
-$$
-x = -E\cos\theta + N\sin\theta, \qquad
-y = N\cos\theta + E\sin\theta.
-$$
+## Spectral and spatial sampling
 
-These are projections onto detector +x and +y, whose east/north components
-are $(-\cos\theta, \sin\theta)$ and $(\sin\theta, \cos\theta)$.
-Thus a source at sky PA theta lands along detector +y. At theta = 90 degrees,
-east lands along +row and north along +column.
+Bands are positive `hwoutils.spectral.Band` intervals in nm. The reader uses
+an unsplit Gauss-Legendre rule; supply band boundaries at sharp spectral
+breaks and test convergence in `quadrature_order`. The photon record does not
+include integration weights. Their nm unit enters exactly once in integration.
 
-Planet offsets are first mapped to the FITS sky plane $(-E, N)$, then rotated
-clockwise by theta. Disk images from skyscapes already have +column west and
-+row north, so `extended_scene` applies that same clockwise rotation via
-`rotation_deg=-telescope_pa_deg`. Its resampler defines positive angles as
-counterclockwise with `origin="lower"`; +90 degrees sends north toward the
-left (east on the zero-roll sky image). No additional disk reflection is
-needed. Planet and disk features therefore stay aligned at every roll.
-
-## The mathematics
-
-For a single source $S$ through the optical path $\mathcal{O}$, the
-per-pixel **expected electron count** during an exposure of length
-$t$ on a detector with quantum efficiency $\eta$ is:
-
-$$
-\mathbb{E}[N_{\text{electrons}}] \;=\; r_S(\mathcal{O}) \cdot t \cdot \eta
-$$
-
-where $r_S(\mathcal{O})$ is the count rate (electrons per second per
-pixel). The `*_rate` functions return $r_S(\mathcal{O})$.
-
-The actual observed electron count is a Poisson realisation of that
-expectation. The `*_readout` functions return:
-
-$$
-N_{\text{electrons}} \;\sim\; \mathrm{Poisson}(r_S(\mathcal{O}) \cdot t \cdot \eta)
-$$
-
-For the high-count regime coronagraphoto also offers a "thinned" variant
-that uses the Poisson thinning theorem
-($\mathrm{Binomial}(\mathrm{Poisson}(\lambda), p) \sim \mathrm{Poisson}(\lambda p)$)
-to fuse the QE binomial draw into the Poisson draw, which is faster
-without changing the distribution. That's the `readout_source_electrons_thinned`
-path inside the detector model.
-
-## Use `*_rate` for fitting
-
-Anything that needs gradients should differentiate through the rate
-pipeline. Examples:
-
-- **Likelihood evaluation** -- the rate map IS the model expectation;
-  compare against observed counts via a Poisson or Gaussian likelihood.
-- **MAP / HMC retrieval** -- gradient-based parameter inference (planet
-  position, atmospheric composition, orbital elements).
-- **Sensitivity studies** -- $\partial(\text{observable}) / \partial(\text{parameter})$
-  for, e.g., the dependence of detection significance on telescope
-  diameter or exposure time.
-- **Yield calculator forward model** -- the deterministic
-  rate-summed-over-targets that downstream optimisers query.
-
-Requires a configured scene, optical path, and exposure duration.
-
-```python notest
-import jax
-import equinox as eqx
-from coronagraphoto import system_rate
-
-
-# Differentiable rate pipeline -- gradient flows end-to-end
-@eqx.filter_jit
-def total_electrons(wavelength_nm, scene, optical_path):
-    rate_map = system_rate(
-        scene,
-        optical_path,
-        start_time_d=0.0,  # Days from scene.system.epoch.
-        wavelength_nm=wavelength_nm,
-        bin_width_nm=50.0,
-        telescope_pa_deg=0.0,
-        ecliptic_lat_deg=0.0,
-        solar_lon_deg=135.0,
-    )
-    return rate_map.sum() * EXPOSURE_S
-
-
-grad_fn = eqx.filter_grad(total_electrons)
-```
-
-Differentiable parameters can be any JAX array inside `scene` or
-`optical_path` -- use `eqx.tree_at` to swap a field, or differentiate
-directly w.r.t. a kwarg like `wavelength_nm`. The Richardson-converged
-gradient tests in the test suite cover the wavelength case end-to-end.
-
-The `system_rate` orchestrator sums all per-source rates -- star,
-every planet, disk if present, zodi if present -- into one differentiable
-map for the entire scene.
-
-## Use `*_readout` for data generation
-
-Anything that needs a noisy detector image should use the readout
-family. Examples:
-
-- **Generating an HWO survey dataset** -- thousands of frames, each
-  with independent Poisson noise.
-- **End-to-end ADI / RDI demos** -- generate noisy science frames at
-  varying telescope rotations, then run KLIP on the cube.
-- **Comparing post-processing algorithms** -- the algorithm should see
-  realistic noise, not the noiseless rate.
-
-Requires a configured scene, optical path, and observation parameters.
-
-```python notest
-from coronagraphoto import system_readout
-import jax
-
-key = jax.random.PRNGKey(0)
-image = system_readout(
-    scene,
-    optical_path,
-    key,
-    start_time_d=...,
-    exposure_time_s=...,
-    wavelength_nm=...,
-    bin_width_nm=...,
-    telescope_pa_deg=...,
-    ecliptic_lat_deg=...,
-    solar_lon_deg=...,
-)
-```
-
-`system_readout` independently draws Poisson noise per source (each
-gets its own PRNG subkey) and sums the realisations. The sum of
-Poissons is Poisson with summed mean, so this is statistically
-equivalent to one combined draw, but the per-source split gives you
-deterministic noise for the same key + scene combination.
-
-## What you cannot do
-
-You cannot differentiate through `*_readout`. The Poisson draw is a
-discrete random integer and its gradient is zero almost everywhere.
-JAX will not raise; it will silently return zero gradients. If you find
-yourself doing `jax.grad(simulate_frame)` where `simulate_frame` calls
-`*_readout`, **the result is meaningless**. Two acceptable workarounds:
-
-1. **Differentiate the rate instead.** The expected count
-   $r_S \cdot t \cdot \eta$ is what almost every inference problem
-   actually wants, and it's differentiable.
-2. **Use a Gaussian approximation** at high counts:
-   $\mathrm{Poisson}(\lambda) \approx \mathcal{N}(\lambda, \sqrt{\lambda})$.
-   The Gaussian distribution is reparameterisable and differentiable
-   through the noise sample. Build it yourself if you need it.
-
-## Performance
-
-Both families share most of the work -- the readout family is just the
-rate family followed by a single Poisson draw via the detector's
-readout method. The Poisson draw is a few percent of the per-frame
-cost on GPU. See [performance](performance) for the closure-vs-args
-trap that dominates compile time and how to avoid it.
+At each node, native coronagraph products are converted with their `Frame`
+and resampled with `hwoutils.grids.resample`. PSFs and leakage conserve pixel
+flux under covering coarsening; background transmission preserves sampled
+amplitude. Cropping and interpolation can lose flux and must be included in
+an image's numerical error budget. Disk radiance is multiplied by pixel solid
+angle in sr once before extended-scene propagation.

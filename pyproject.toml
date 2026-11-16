@@ -71,6 +71,10 @@ select = ["B", "D", "E", "F", "I", "UP", "RUF"]
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
+[tool.codespell]
+# lod is the shared lambda/D grid unit.
+ignore-words-list = "lod"
+
 [tool.pytest.ini_options]
 filterwarnings = [
   "error",

@@ -1,97 +1,19 @@
 # coronagraphoto
 
-JAX-native coronagraphic image simulation for HWO mission planning.
+Coronagraphic image readers for shared photon and electron budgets.
 
-`coronagraphoto` consumes a {class}`skyscapes.Scene` (star + planets disk + zodi)
-and an {class}`optixstuff.OpticalPath` (primary aperture throughput stack + coronagraph backend + detector)
-and produces one of two things:
+`image_rates` returns per-pixel spectral photon integrands; `image_electrons`
+streams those nodes through the detector yield into band electron rates.
+`observe` draws an electron `Image` on the detector sky grid. Individual source
+terms remain accessible through the shared records.
 
-- A **deterministic count-rate map** (`star_rate`, `planet_rate`,
-  `disk_rate`, `zodi_rate`, `system_rate`) -- differentiable through
-  the full forward model. Use for fitting, retrievals, sensitivity
-  studies.
-- A **Poisson-realised detector readout** (`star_readout`,
-  `planet_readout`, `disk_readout`, `zodi_readout`, `system_readout`)
-  -- the noisy 2D electron count you would actually observe. Use for
-  forward simulation and dataset generation.
+Inputs are a `skyscapes.System`, an `optixstuff.OpticalPath`, wavelength `Band`s,
+a scalar time in days from the scene epoch, and a `SkyOrientation` describing
+roll. Supply local zodi separately, for example `zodi=scene.zodi`.
 
-Both produce 2D images on the same detector grid; they differ only in
-whether Poisson noise has been applied. See
-[rate vs readout](explanation/rate_vs_readout) for when to reach for
-each.
-
-Rows increase along detector +y and columns along detector +x. The parameter
-`telescope_pa_deg` gives the sky position angle of detector +y, measured north
-through east. At zero PA, images follow the FITS display convention:
-`imshow(image, origin="lower")` shows north up and east left (+column west).
-At PA 90 degrees, east is +row and north is +column. Planets and disks share
-this transformation; see [image orientation and roll](explanation/rate_vs_readout.md#image-orientation-and-roll).
-
-## Where coronagraphoto sits in the stack
-
-```mermaid
-flowchart LR
-    sky["<b>skyscapes</b><br/>Scene"]
-    opt["<b>optixstuff</b><br/>OpticalPath"]
-    yip["<b>yippy</b><br/>PSF synthesis"]
-    cor(["<b>coronagraphoto</b><br/>rate / readout"])
-    ana["<b>coronalyze</b><br/>KLIP · SNR maps"]
-    fit["<b>orbix · jaxedith</b><br/>Inference"]
-
-    sky --> cor
-    opt --> cor
-    yip --> opt
-    cor --> ana
-    cor -.differentiable rate.-> fit
-```
-
-`coronagraphoto` is the **image generator**. Inference,
-post-processing, and analysis live in sibling libraries.
-
-| Task | Library |
-|---|---|
-| Build a `Scene` (star, planets, disk, zodi, physical models) | [skyscapes](https://skyscapes.readthedocs.io/) |
-| Build an `OpticalPath` (primary, detectors, coronagraph backend) | [optixstuff](https://optixstuff.readthedocs.io/) |
-| Off-axis PSF synthesis from YIP files | [yippy](https://yippy.readthedocs.io/) |
-| KLIP / RDI / ADI subtraction, Mawet SNR maps | [coronalyze](https://coronalyze.readthedocs.io/) |
-| Orbital mechanics, observatory orbits, EIG scheduling | [orbix](https://github.com/CoreySpohn/orbix) |
-| Exposure-time and yield calculations | [jaxedith](https://github.com/CoreySpohn/jaxedith) |
-
-## A 30-line example
-
-Requires user-supplied ExoVista and coronagraph data.
-
-```python notest
-import jax
-from coronagraphoto import load_scene_from_exovista, system_readout
-from optixstuff import (
-    OpticalPath,
-    SimplePrimary,
-    IdealDetector,
-    ConstantThroughput,
-)
-from yippy import EqxCoronagraph
-
-scene = load_scene_from_exovista("path/to/exovista_system.fits")
-optical_path = OpticalPath(
-    primary=SimplePrimary(diameter_m=6.0),
-    attenuating_elements=(ConstantThroughput(throughput=0.9),),
-    coronagraph=EqxCoronagraph("path/to/coronagraph_data"),
-    detector=IdealDetector(pixel_scale_arcsec=0.01, shape=(512, 512)),
-)
-image = system_readout(
-    scene,
-    optical_path,
-    jax.random.PRNGKey(0),
-    start_time_d=scene.system.epoch.days(2_460_000.0),
-    exposure_time_s=3600.0,
-    wavelength_nm=550.0,
-    bin_width_nm=50.0,
-    telescope_pa_deg=0.0,
-    ecliptic_lat_deg=0.0,
-    solar_lon_deg=135.0,
-)
-```
+See the [README quick start](https://github.com/CoreySpohn/coronagraphoto#quick-start),
+[rate contracts](explanation/rate_vs_readout), and
+[JAX and memory](explanation/performance).
 
 ```{toctree}
 :maxdepth: 1

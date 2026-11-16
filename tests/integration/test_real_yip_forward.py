@@ -1,96 +1,38 @@
-"""End-to-end ExoVista -> coronagraphoto integration test against a REAL yippy YIP.
-
-Mirrors ``test_exovista_forward.py`` but swaps the ``_PerfectCoronagraph``
-mock for a real ``yippy.EqxCoronagraph`` loaded from the eac1_aavc_512
-YIP fetched via ``coronagraphoto.datasets.fetch_coronagraph``. Validates
-that ``system_readout`` runs end-to-end against actual coronagraph data, not
-just our test mocks.
-
-Marked ``slow`` and ``integration`` so default fast runs deselect with
-``-m 'not slow and not integration'``.
-"""
-
-from __future__ import annotations
+"""Full FITS scene/YIP observation integration using small synthetic inputs."""
 
 import equinox as eqx
 import jax
-import jax.numpy as jnp
+import numpy as np
 import pytest
-from optixstuff import (
-    ConstantThroughput,
-    IdealDetector,
-    OpticalPath,
-    SimplePrimary,
-    YippyCoronagraph,
-)
-from skyscapes.datasets import fetch_scene
-from yippy import EqxCoronagraph
+from conftest import make_path, write_scene, write_yip
+from hwoutils.grids import SkyOrientation
+from hwoutils.spectral import Band
+from optixstuff import FramePlan, YippyCoronagraph
 
-from coronagraphoto import load_scene_from_exovista, system_readout
-from coronagraphoto.datasets import fetch_coronagraph
-
-pytestmark = [
-    pytest.mark.slow,
-    pytest.mark.integration,
-    pytest.mark.usefixtures("exovista_precision"),
-]
+from coronagraphoto import image_electrons, load_scene_from_exovista, observe
 
 
-@pytest.fixture(scope="module")
-def real_optical_path():
-    """OpticalPath with an 8 m primary + real yippy eac1_aavc_512 coronagraph.
+@pytest.mark.medium(reason="FITS scene and YIP loaders plus observation compilation")
+def test_fits_scene_yip_observation(tmp_path):
+    """Fails on incompatible scene, YIP, detector or observation adapters.
 
-    Skips PSF-datacube construction (``ensure_psf_datacube=False``)
-    because this test exercises only the star + planet paths against
-    the real YIP. The disk path -- the only consumer of the datacube
-    -- is covered against the perfect-coronagraph mock in
-    ``test_exovista_forward.py``, where an (n_src, n_src, npixels,
-    npixels) datacube costs nothing to build. Precomputing the real
-    datacube was making this test take 20+ minutes; without it the
-    same coverage runs in seconds.
+    Both loaders consume genuine FITS products. Deterministic rates must be
+    positive; draw equality is bitwise because identical keys call one sampler.
     """
-    yip_path = fetch_coronagraph()
-    coro = YippyCoronagraph(backend=EqxCoronagraph(yip_path, ensure_psf_datacube=False))
-
-    ny, nx = coro.psf_shape
-    primary = SimplePrimary(diameter_m=8.0)
-    optics = ConstantThroughput(throughput=1.0)
-    detector = IdealDetector(
-        pixel_scale_arcsec=0.05,
-        shape=(ny, nx),
-        quantum_efficiency=1.0,
-        dark_current_rate_e_per_s=0.0,
+    scene = load_scene_from_exovista(
+        write_scene(tmp_path / "scene.fits"), load_disk=False
     )
-    return OpticalPath(primary, (optics,), coro, detector)
-
-
-def test_exovista_scene_simulates_end_to_end_with_real_yip(real_optical_path):
-    """Star + planet pipeline against a real yippy YIP, not a mock.
-
-    Disk path is stripped because the real-yippy PSF datacube it would
-    require is prohibitively expensive to build (see fixture docstring);
-    disk coverage lives in ``test_exovista_forward.py`` against the
-    mock.
-    """
-    fits_file = fetch_scene()
-    scene = load_scene_from_exovista(fits_file, only_earths=True)
-    scene = eqx.tree_at(lambda s: s.system.disk, scene, None)
-
-    start_time_d = float(scene.system.dynamics.orbits.epoch_d[0])
-    wavelength_nm = 550.0
-    image = system_readout(
-        scene,
-        real_optical_path,
-        jax.random.PRNGKey(0),
-        start_time_d=start_time_d,
-        exposure_time_s=3600.0,
-        wavelength_nm=wavelength_nm,
-        bin_width_nm=50.0,
-        telescope_pa_deg=0.0,
-        ecliptic_lat_deg=0.0,
-        solar_lon_deg=135.0,
+    coro = YippyCoronagraph(write_yip(tmp_path / "yip"), ensure_psf_datacube=False)
+    path = eqx.tree_at(lambda p: p.coronagraph, make_path(n=24, step=0.5), coro)
+    bands = (Band(545.0, 555.0),)
+    plan = FramePlan(10.0, 1.0)
+    options = dict(
+        time_d=0.0, pointing=SkyOrientation(0), quadrature_order=1, zodi=scene.zodi
     )
-
-    assert image.shape == real_optical_path.detector.shape
-    assert bool(jnp.all(jnp.isfinite(image)))
-    assert float(jnp.sum(image)) > 0
+    rates = image_electrons(scene.system, path, bands, **options)
+    assert float(rates.planet.sum()) > 0
+    assert float(rates.local_zodi.sum()) > 0
+    key = jax.random.PRNGKey(0)
+    image = observe(key, scene.system, path, bands, plan, **options)
+    assert image.data.shape == (1, 24, 24)
+    np.testing.assert_array_equal(image.data, path.detector.draw(key, rates, plan))
