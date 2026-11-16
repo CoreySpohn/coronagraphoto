@@ -1,304 +1,160 @@
-"""Tests for speckle_rate / speckle_readout and their system wiring.
-
-Self-contained: a scalar mock coronagraph, a mock speckle field, a duck
-star, and a star-only scene -- no fetched datasets needed.
-"""
-
-from __future__ import annotations
+"""Signed time-dependent speckle excess in the stellar leakage budget."""
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import optixstuff as ox
-import pytest
+import numpy as np
+from conftest import centroid, make_path, make_system
 from hwoutils.epoch import Epoch
-from optixstuff.coronagraph import AbstractTableCoronagraph
-from skyscapes import Scene
-from skyscapes.scene import System
+from hwoutils.grids import Frame, Image, PixelGrid, SkyOrientation
+from hwoutils.spectral import Band
+from optixstuff import AbstractSpeckleField
+from skyscapes.scene import Star
 
-from coronagraphoto import (
-    speckle_rate,
-    speckle_readout,
-    star_rate,
-    star_readout,
-    system_rate,
-    system_readout,
-)
-
-_EPOCH_D = 0.0
+from coronagraphoto import image_rates
 
 
-class _MockCoro(AbstractTableCoronagraph):
-    """Table coronagraph with a flat stellar-leakage floor."""
+class Halo(AbstractSpeckleField):
+    """A finite halo evolving in days, on its own instrumental grid."""
 
-    pixel_scale_lod: float = 0.5
-    IWA: float = 2.0
-    OWA: float = 30.0
-    psf_shape: tuple = (16, 16)
-    psf_datacube: object = None
-    sky_trans: jnp.ndarray = eqx.field(default_factory=lambda: jnp.ones((16, 16)))
+    grid: PixelGrid = eqx.field(
+        static=True,
+        default=PixelGrid.focal(8, 0.5, Frame(550.0, 6.0, "circumscribed")),
+    )
+    epoch_d: float = 3.0
+    level: float = 1.5
 
-    def throughput(self, sep, wl, *, time_s=0.0):
-        return 0.5
-
-    def core_area(self, sep, wl, *, time_s=0.0):
-        return 1.0
-
-    def core_mean_intensity(self, sep, wl, *, time_s=0.0):
-        return 1e-10
-
-    def occulter_transmission(self, sep, wl, *, time_s=0.0):
-        return 1.0
-
-    def stellar_intens(self, stellar_diam_lod):
-        return jnp.full((16, 16), 1e-9)
-
-    def create_psfs(self, x_lod, y_lod):
-        k = jnp.atleast_1d(jnp.asarray(x_lod)).shape[0]
-        return jnp.zeros((k, 16, 16))
-
-
-class _MockSpeckle(ox.AbstractSpeckleField):
-    """Incoherent-halo delta with a mild, deterministic time modulation."""
-
-    pixel_scale_lod: float = 0.5
-    epoch_d: float = _EPOCH_D
-
-    def realize(self, *, wavelength_nm, time_s=0.0):
-        scale = 1.0 + 0.5 * jnp.cos(jnp.asarray(time_s, dtype=float))
-        return jnp.full((16, 16), 1e-10) * scale
-
-
-class _MockStar:
-    """Duck star: a flat spectral flux density and a point-source diameter."""
-
-    def __init__(self, flux=100.0, diameter_arcsec=0.0):
-        self._flux = flux
-        self.diameter_arcsec = diameter_arcsec
-
-    def spec_flux_density(self, wavelength_nm, start_time_d, *, dist_pc):
-        return jnp.asarray(self._flux)
-
-
-def _scene(star):
-    return Scene(
-        System.from_classical(
-            star,
+    def realize(self, *, wavelength_nm, time_d=0.0):
+        """A time-dependent flux fraction per native pixel."""
+        data = (
+            jnp.zeros((8, 8))
+            .at[5, 6]
+            .set(64e-10 * (self.level + jnp.cos(time_d - self.epoch_d)))
+        )
+        return Image(
+            data,
+            self.grid,
             (),
-            star_mass_Msun=1.0,
-            planet_mass_Msun=jnp.empty(0),
-            dist_pc=10.0,
-            epoch=Epoch(2451545.0),
-            a_AU=jnp.empty(0),
-            e=0.0,
-            i_rad=0.0,
-            W_rad=0.0,
-            w_rad=0.0,
-            M0_rad=0.0,
-        ),
-        zodi=None,
+            "per_pixel",
+            "stellar_flux_fraction",
+            outside="reflect",
+        )
+
+
+def test_speckle_leakage_day_clock():
+    """Fails on epoch subtraction twice, wrong units or dead path wiring.
+
+    Over exactly one reflected halo footprint the linear reconstruction
+    conserves its native flux at 2:1 sampling, to 64 eps. A larger detector
+    would include reflected replicas. Roll cannot rotate this instrumental halo.
+    """
+    path = make_path(detector_n=16)
+    wave = jnp.array([400.0, 500.0, 600.0, 700.0])
+    times = jnp.array([-10.0, 20.0])
+    flux = jnp.array([[1.0, 3.0]] * 4)
+    system = make_system(
+        star=Star(wavelengths_nm=wave, times_d=times, flux_density_jy=flux)
     )
-
-
-def _optical_path(speckle=None):
-    return ox.OpticalPath.from_default_setup(
-        _MockCoro(),
-        detector_shape=(16, 16),
-        pixel_scale_arcsec=0.05,
-        speckle=speckle,
-    )
-
-
-_OBS = dict(start_time_d=_EPOCH_D + 100.0, wavelength_nm=550.0, bin_width_nm=10.0)
-
-
-class TestSpeckleRate:
-    """The per-source speckle rate map."""
-
-    def test_shape_and_nonnegative(self):
-        """The rate map is detector-shaped, finite, and non-negative."""
-        op = _optical_path(_MockSpeckle())
-        m = speckle_rate(op.speckle, op, dist_pc=10.0, star=_MockStar(), **_OBS)
-        assert m.shape == op.detector.shape
-        assert jnp.all(m >= 0)
-        assert jnp.all(jnp.isfinite(m))
-
-    def test_pixel_scale_sets_speckle_geometry(self):
-        """The detector resample keys on ``speckle.pixel_scale_lod`` itself.
-
-        The speckle plane no longer needs to share the coronagraph's
-        plate scale: the same speckle array declared at half the scale
-        must land at half the angular offset on the detector.
-        """
-
-        class _BlobSpeckle(ox.AbstractSpeckleField):
-            """A resolved Gaussian blob offset +20 speckle pixels in x."""
-
-            pixel_scale_lod: float = 0.5
-            epoch_d: float = _EPOCH_D
-
-            def realize(self, *, wavelength_nm, time_s=0.0):
-                yy, xx = jnp.mgrid[:64, :64]
-                c = (64 - 1) / 2.0
-                r2 = (xx - c - 20.0) ** 2 + (yy - c) ** 2
-                return 1e-8 * jnp.exp(-r2 / (2.0 * 2.0**2))
-
-        def _com_x(scale):
-            op = ox.OpticalPath.from_default_setup(
-                _MockCoro(),  # coronagraph plate scale stays 0.5
-                detector_shape=(64, 64),
-                pixel_scale_arcsec=0.01,
-                speckle=_BlobSpeckle(pixel_scale_lod=scale),
+    bands = (Band(549.5, 550.5),)
+    options = dict(quadrature_order=1)
+    snapshots = []
+    for time, factor in ((3.0, 2.5), (3.0 + np.pi, 0.5)):
+        base = image_rates(
+            system, path, bands, time_d=time, pointing=SkyOrientation(0), **options
+        )
+        timed = eqx.tree_at(
+            lambda p: p.speckle, path, Halo(), is_leaf=lambda v: v is None
+        )
+        first = image_rates(
+            system, timed, bands, time_d=time, pointing=SkyOrientation(0), **options
+        )
+        rolled = image_rates(
+            system,
+            path,
+            bands,
+            time_d=time,
+            pointing=SkyOrientation(30),
+            speckle=Halo(),
+            **options,
+        )
+        snapshots.append(first)
+        if factor > 0:
+            grid = PixelGrid.regular(
+                path.detector.shape, float(path.detector.pixel_scale_arcsec), "arcsec"
             )
-            m = speckle_rate(op.speckle, op, dist_pc=10.0, star=_MockStar(), **_OBS)
-            x = jnp.arange(m.shape[1]) - (m.shape[1] - 1) / 2.0
-            return float(jnp.sum(m * x[None, :]) / jnp.sum(m))
-
-        assert _com_x(0.5) == pytest.approx(2.0 * _com_x(0.25), rel=0.05)
-
-    def test_time_varying(self):
-        """The realized map changes with observation time."""
-        op = _optical_path(_MockSpeckle())
-        a = speckle_rate(
-            op.speckle,
-            op,
-            dist_pc=10.0,
-            star=_MockStar(),
-            start_time_d=_EPOCH_D,
-            wavelength_nm=550.0,
-            bin_width_nm=10.0,
+            np.testing.assert_allclose(
+                centroid(first.star_leakage[0, 0] - base.star_leakage[0, 0], grid),
+                [grid.center_x + 5.0, grid.center_y + 3.0],
+                rtol=0,
+                atol=1e-10,  # Exact 2:1 sampling, floating-point subtraction.
+            )
+        phi = system.star.photon_flux_density(550.0, time, dist_pc=10.0)
+        expected = 40 * 0.4 * phi * 64 * 1e-10 * factor
+        np.testing.assert_allclose(
+            (first.star_leakage - base.star_leakage).sum(),
+            expected,
+            rtol=64 * np.finfo(float).eps,
         )
-        b = speckle_rate(
-            op.speckle,
-            op,
-            dist_pc=10.0,
-            star=_MockStar(),
-            start_time_d=_EPOCH_D + 0.5,
-            wavelength_nm=550.0,
-            bin_width_nm=10.0,
+        np.testing.assert_array_equal(first.star_leakage, rolled.star_leakage)
+
+        # Same physical epoch: shift orbit, stellar samples and speckle clock.
+        shift = 2.25
+        shifted = make_system(
+            star=Star(wavelengths_nm=wave, times_d=times - shift, flux_density_jy=flux),
+            epoch=Epoch(2451547.0, 0.25),
+            epoch_d=-shift,
         )
-        assert float(jnp.max(jnp.abs(a - b))) > 0.0
-
-    def test_scales_linearly_with_star_flux(self):
-        """Doubling the host-star flux doubles the speckle rate."""
-        op = _optical_path(_MockSpeckle())
-        m1 = speckle_rate(
-            op.speckle, op, dist_pc=10.0, star=_MockStar(flux=100.0), **_OBS
+        same_date = image_rates(
+            shifted,
+            path,
+            bands,
+            time_d=time - shift,
+            pointing=SkyOrientation(0),
+            speckle=Halo(epoch_d=3.0 - shift),
+            **options,
         )
-        m2 = speckle_rate(
-            op.speckle, op, dist_pc=10.0, star=_MockStar(flux=200.0), **_OBS
+        for a, b in zip(
+            jax.tree.leaves(first), jax.tree.leaves(same_date), strict=True
+        ):
+            # Rebased cubic interpolation/orbits incur roundoff; 1e-10 relative.
+            np.testing.assert_allclose(a, b, rtol=1e-10, atol=1e-18)
+
+    # A signed excess lowers the floor without clipping the total: -0.01 of
+    # the halo spreads to at most ~2e-11 per detector pixel, under the 6.25e-11
+    # fixture floor. Fails if the excess itself is clipped at zero. The sum
+    # cancels against a floor ~250 times larger: 1e-10 relative.
+    base = image_rates(
+        system, path, bands, time_d=3.0, pointing=SkyOrientation(0), **options
+    )
+    dimmed = image_rates(
+        system,
+        path,
+        bands,
+        time_d=3.0,
+        pointing=SkyOrientation(0),
+        speckle=Halo(level=-1.01),
+        **options,
+    )
+    phi = system.star.photon_flux_density(550.0, 3.0, dist_pc=10.0)
+    np.testing.assert_allclose(
+        (dimmed.star_leakage - base.star_leakage).sum(),
+        40 * 0.4 * phi * 64e-10 * -0.01,
+        rtol=1e-10,
+    )
+
+    vectorized = jax.vmap(
+        lambda t: image_rates(
+            system,
+            path,
+            bands,
+            time_d=t,
+            pointing=SkyOrientation(0),
+            speckle=Halo(),
+            **options,
         )
-        assert jnp.allclose(m2, 2.0 * m1, rtol=1e-5)
-
-    def test_differentiable_in_time(self):
-        """A gradient flows through the rate with respect to time."""
-        op = _optical_path(_MockSpeckle())
-
-        def total(time_d):
-            return speckle_rate(
-                op.speckle,
-                op,
-                dist_pc=10.0,
-                star=_MockStar(),
-                start_time_d=time_d,
-                wavelength_nm=550.0,
-                bin_width_nm=10.0,
-            ).sum()
-
-        g = jax.grad(total)(_EPOCH_D + 100.0)
-        assert jnp.isfinite(g)
-
-
-class TestSpeckleReadout:
-    """The noisy speckle readout."""
-
-    def test_shape_and_nonnegative(self):
-        """The readout is detector-shaped and non-negative."""
-        op = _optical_path(_MockSpeckle())
-        key = jax.random.PRNGKey(0)
-        m = speckle_readout(
-            op.speckle,
-            op,
-            key,
-            dist_pc=10.0,
-            exposure_time_s=3600.0,
-            star=_MockStar(),
-            **_OBS,
-        )
-        assert m.shape == op.detector.shape
-        assert jnp.all(m >= 0)
-
-
-class TestSystemWiring:
-    """system_rate / system_readout pick up the optical-path speckle field."""
-
-    def test_system_rate_adds_speckle(self):
-        """system_rate with a speckle path equals the no-speckle sum plus it."""
-        scene = _scene(_MockStar())
-        op_none = _optical_path(None)
-        op_spk = _optical_path(_MockSpeckle())
-        sys_args = dict(
-            telescope_pa_deg=0.0, ecliptic_lat_deg=0.0, solar_lon_deg=0.0, **_OBS
-        )
-        base = system_rate(scene, op_none, **sys_args)
-        withspk = system_rate(scene, op_spk, **sys_args)
-        spk = speckle_rate(
-            op_spk.speckle, op_spk, dist_pc=10.0, star=scene.system.star, **_OBS
-        )
-        assert jnp.allclose(withspk, base + spk, rtol=1e-6, atol=0.0)
-        # And the speckle field genuinely contributes.
-        assert float(jnp.max(jnp.abs(withspk - base))) > 0.0
-
-    def test_system_rate_no_speckle_is_star_only(self):
-        """A speckle-free star-only scene reduces to star_rate."""
-        scene = _scene(_MockStar())
-        op_none = _optical_path(None)
-        base = system_rate(
-            scene,
-            op_none,
-            telescope_pa_deg=0.0,
-            ecliptic_lat_deg=0.0,
-            solar_lon_deg=0.0,
-            **_OBS,
-        )
-        star_only = star_rate(scene.system.star, op_none, dist_pc=10.0, **_OBS)
-        assert jnp.allclose(base, star_only)
-
-    def test_system_readout_keysplit_unchanged_without_speckle(self):
-        """A speckle-free path must reproduce the pre-speckle key arithmetic."""
-        scene = _scene(_MockStar())
-        op_none = _optical_path(None)
-        key = jax.random.PRNGKey(3)
-        sys_out = system_readout(
-            scene,
-            op_none,
-            key,
-            exposure_time_s=3600.0,
-            telescope_pa_deg=0.0,
-            ecliptic_lat_deg=0.0,
-            solar_lon_deg=0.0,
-            **_OBS,
-        )
-        # Star-only, no speckle -> exactly one subkey, consumed by the star.
-        k0 = jax.random.split(key, 1)[0]
-        star_out = star_readout(
-            scene.system.star, op_none, k0, dist_pc=10.0, exposure_time_s=3600.0, **_OBS
-        )
-        assert jnp.array_equal(sys_out, star_out)
-
-    def test_system_readout_runs_with_speckle(self):
-        """system_readout runs end-to-end with a speckle field attached."""
-        scene = _scene(_MockStar())
-        op_spk = _optical_path(_MockSpeckle())
-        out = system_readout(
-            scene,
-            op_spk,
-            jax.random.PRNGKey(5),
-            exposure_time_s=3600.0,
-            telescope_pa_deg=0.0,
-            ecliptic_lat_deg=0.0,
-            solar_lon_deg=0.0,
-            **_OBS,
-        )
-        assert out.shape == op_spk.detector.shape
-        assert jnp.all(jnp.isfinite(out))
+    )(jnp.array([3.0, 3.0 + np.pi]))
+    for index, expected in enumerate(snapshots):
+        for a, b in zip(
+            jax.tree.leaves(vectorized), jax.tree.leaves(expected), strict=True
+        ):
+            np.testing.assert_allclose(a[index], b, rtol=1e-10, atol=1e-18)

@@ -15,6 +15,7 @@ The canary uses the same overrides as CI.
 | Build | hatchling | 1.26.3 |
 | Build | hatch-fancy-pypi-readme | 24.1.0 |
 | Build | hatch-vcs | 0.4.0 |
+| Runtime | equinox | 0.13.2 |
 | Runtime | hwoutils | 1.10.0 |
 | Runtime | jax | 0.8.1 |
 | Runtime | optixstuff | 3.0.0 |
@@ -36,7 +37,6 @@ The canary uses the same overrides as CI.
 | Test | pytest-markdown-docs | 0.5.0 |
 | Test | pytest-timeout | 1.3.1 |
 | Test | pytest-fail-slow | 0.1.0 |
-| Test | equinox | 0.13.2 |
 | Test | lod_unit | 1.8.0 |
 | Test | numpy | 2.1.2 |
 | Test | packaging | 23.1 |

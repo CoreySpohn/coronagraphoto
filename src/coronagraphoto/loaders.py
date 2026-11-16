@@ -2,7 +2,6 @@
 
 from collections.abc import Sequence
 
-import jax.numpy as jnp
 from skyscapes import Scene, from_exovista
 from skyscapes.background import AYOZodi
 
@@ -17,8 +16,10 @@ def load_scene_from_exovista(
     """Load a full :class:`skyscapes.Scene` from an ExoVista FITS file.
 
     Delegates system loading to :func:`skyscapes.from_exovista` and adds
-    a default :class:`~skyscapes.background.AYOZodi` background using
-    the host star's wavelength grid.
+    a default :class:`~skyscapes.background.AYOZodi` photon background.
+    The system retains astronomical ``midplane_position_angle_deg`` and
+    stored disk cubes on their native sky grid; no extra disk rotation is
+    performed here.
 
     Enable ``jax.config.update("jax_enable_x64", True)`` before loading:
     imported orbital state vectors need float64 precision. Recent ExoVista
@@ -51,10 +52,8 @@ def load_scene_from_exovista(
         load_disk=load_disk,
     )
 
-    wavelengths_nm = jnp.asarray(system.star._wavelengths_nm)
     zodi = AYOZodi(
-        wavelengths_nm=wavelengths_nm,
-        surface_brightness_mag=zodi_surface_brightness_mag,
+        surface_brightness_mag_arcsec2=zodi_surface_brightness_mag,
     )
 
     return Scene(system=system, zodi=zodi)

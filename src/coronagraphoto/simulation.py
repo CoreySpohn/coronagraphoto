@@ -1,738 +1,486 @@
-"""Functions for running full simulations and processing sources.
+"""Per-pixel readers of the shared photon and electron rate budgets.
 
-Public API conventions:
-
-- ``<source>_rate(source, optical_path, *, ...)`` returns the noiseless
-  per-pixel photon rate incident on the detector for one source (photons/s;
-  detector QE is not applied).
-- ``<source>_readout(source, optical_path, prng_key, *, ...)`` returns a
-  noisy detector readout (photon Poisson + QE binomial) for one source.
-  The readout applies the detector's operating-point QE, one value for the
-  call; a caller integrating a band whose QE varies across it applies the
-  QE per wavelength bin (for example from ``detector.get_qe``).
-- ``system_rate(scene, optical_path, *, ...)`` sums every per-source rate
-  map for a scene (the differentiable forward model).
-- ``system_readout(scene, optical_path, prng_key, *, ...)`` sums every
-  per-source Poisson-realised readout for a scene.
-
-Times are days from the scene epoch. All observation parameters
-(``start_time_d``, ``exposure_time_s``,
-``wavelength_nm``, ``bin_width_nm``, ``telescope_pa_deg``,
-``ecliptic_lat_deg``, ``solar_lon_deg``) are kwarg-only. The convention
-keeps signatures discoverable when more parameters land later (IFS,
-multi-roll observations).
-
-Detector frames have +row = detector +y and +column = detector +x;
-display with ``imshow(origin="lower")``. ``telescope_pa_deg = theta`` is
-the sky position angle of detector +y, measured north through east (the
-Roman CGI corgidrp ``PA_APER`` convention). At theta = 0, +y is north and
-+x is west: the FITS display convention, north up and east left.
-
-For sky offsets (E, N) = (Delta alpha*, Delta delta), the detector offsets
-are ``x = -E cos(theta) + N sin(theta)`` and
-``y = N cos(theta) + E sin(theta)``. These project onto detector basis
-vectors (-cos(theta), sin(theta)) and (sin(theta), cos(theta)) in the
-east/north sky plane. At theta = 90 degrees, east is +row and north is
-+column. Planets are reflected into the FITS sky plane (-E, N), then
-rotated clockwise by theta. Disk images already use that FITS sky plane
-and receive the same clockwise rotation, so planets and disks stay aligned.
+Arrays are (band, node, y, x) for photons/s/nm and (band, y, x) for
+band-integrated electrons/s. Geometry is concrete host metadata; readers cache
+compiled kernels for each static configuration. Optical paths and scenes can
+be arguments of JAX transformations. A roll changes the
+position angle of detector +y, north through east, in SkyOrientation.
 """
 
+from collections.abc import Sequence
+from dataclasses import replace
+from functools import lru_cache, partial
+
+import equinox as eqx
 import jax
 import jax.numpy as jnp
-from hwoutils.constants import d2s
-from hwoutils.conversions import arcsec_to_lambda_d, lambda_d_to_arcsec
-from hwoutils.transforms import ccw_rotation_matrix, resample_flux
+import numpy as np
+from hwoutils.constants import arcsec2rad
+from hwoutils.grids import Image, PixelGrid, SkyOrientation, resample
+from hwoutils.spectral import Band, Quadrature
+from optixstuff import ElectronRates, FramePlan, OpticalPath, PhotonRates
+from optixstuff.coronagraph import AbstractTableCoronagraph, MultiBandCoronagraph
+from optixstuff.speckle import AbstractSpeckleField
 from skyscapes.background import Zodi
+from skyscapes.scene import System
 
 
-def pre_coro_bin_processing(flux, bin_center_nm, bin_width_nm, optical_path):
-    """Process a bin through the pre-coro elements of the optical path."""
-    # ph/s/m^2/nm -> ph/s/m^2
-    flux = flux * bin_width_nm
-    # ph/s
-    flux = flux * optical_path.primary.area_m2
-    # apply combined attenuation of mirrors / filters / etc.
-    return flux * optical_path.system_throughput(bin_center_nm)
+def _detector_grid(optical_path, pointing):
+    """Construct the one sky grid shared by planets, disks and observations."""
+    if pointing.parity != -1:
+        raise ValueError("detector pointing must have parity=-1")
+    with jax.ensure_compile_time_eval():
+        return PixelGrid.regular(
+            optical_path.detector.shape,
+            optical_path.detector.pixel_scale_arcsec,
+            "arcsec",
+            orientation=pointing,
+        )
 
 
-def _detector_sampling_lod(bin_center_nm, optical_path):
-    """The detector grid expressed in coronagraph (lambda/D) units.
-
-    The coronagraph contract is sampling-explicit and dimensionless:
-    every rate function requests maps directly at the detector grid,
-    converted to lambda/D at this wavelength. Chromatic magnification
-    is exactly this conversion changing with the bin center.
-    """
-    pixel_scale_lod = arcsec_to_lambda_d(
-        optical_path.detector.pixel_scale_arcsec,
-        bin_center_nm,
-        optical_path.primary.diameter_m,
-    )
-    return pixel_scale_lod, optical_path.detector.shape
-
-
-# ---------------------------------------------------------------------------
-# Star
-# ---------------------------------------------------------------------------
-
-
-def star_rate(
-    star,
-    optical_path,
-    *,
-    start_time_d,
-    dist_pc,
+def _node_rates(
     wavelength_nm,
-    bin_width_nm,
+    system,
+    optical_path,
+    time_d,
+    grid,
+    ephemeris,
+    positions,
+    zodi,
+    speckle,
+    ecliptic_latitude_deg,
+    solar_longitude_deg,
 ):
-    """Generate the star count rate on the detector."""
+    """Render one node; detector yield never enters this photon calculation."""
+    coro = optical_path.coronagraph
+    if isinstance(coro, MultiBandCoronagraph):
+        coro = coro.band(wavelength_nm)
+    native = coro.grid
+    stellar_grid = native
+    background_grid = native
+    if isinstance(coro, AbstractTableCoronagraph):
+        stellar_grid = coro.stellar_intens(0.0).grid
+        background_grid = coro.sky_trans.grid
+    with jax.ensure_compile_time_eval():
+        angular = replace(native.to_arcsec(wavelength_nm), orientation=grid.orientation)
+    lod_arcsec = native.frame.lod_to_arcsec(wavelength_nm)
+    gain = optical_path.primary.collecting_area_m2 * optical_path.system_throughput(
+        wavelength_nm
+    )
+
+    def detector_pixels(product_grid):
+        # The detector pixels in a product's lambda/D frame at this node, so
+        # the product integrates once over each detector pixel. Native axes
+        # are detector axes; only the scale changes with wavelength.
+        with jax.ensure_compile_time_eval():
+            scale = float(product_grid.frame.lod_to_arcsec(wavelength_nm))
+            return replace(
+                grid,
+                basis=tuple(tuple(b / scale for b in row) for row in grid.basis),
+                unit="lod",
+                frame=product_grid.frame,
+                orientation=product_grid.orientation,
+            )
+
+    def onto_detector(image):
+        # Native coordinates describe detector axes, so attach the live pointing
+        # only after the coronagraph has rendered its instrumental response.
+        with jax.ensure_compile_time_eval():
+            product_grid = replace(
+                image.grid.to_arcsec(wavelength_nm), orientation=grid.orientation
+            )
+        return resample(replace(image, grid=product_grid), grid).data
+
+    star = system.star
+    phi_star = star.photon_flux_density(wavelength_nm, time_d, dist_pc=system.dist_pc)
     diameter = star.diameter_arcsec
     if callable(diameter):
-        diameter = diameter(dist_pc=dist_pc)
-    source_diam_lod = arcsec_to_lambda_d(
-        diameter, wavelength_nm, optical_path.primary.diameter_m
-    )
-    flux = star.spec_flux_density(wavelength_nm, start_time_d, dist_pc=dist_pc)
-    flux = pre_coro_bin_processing(flux, wavelength_nm, bin_width_nm, optical_path)
-    pixel_scale_lod, shape = _detector_sampling_lod(wavelength_nm, optical_path)
-    image_rate = flux * optical_path.coronagraph.stellar_map(
+        diameter = diameter(dist_pc=system.dist_pc)
+    leakage = coro.stellar_map(
         wavelength_nm,
-        source_diam_lod,
-        pixel_scale_lod=pixel_scale_lod,
-        shape=shape,
-    )
-    return jnp.clip(image_rate, 0, None)
-
-
-def star_readout(
-    star,
-    optical_path,
-    prng_key,
-    *,
-    start_time_d,
-    dist_pc,
-    exposure_time_s,
-    wavelength_nm,
-    bin_width_nm,
-):
-    """Process a star through the provided optical path."""
-    image_rate_detector = star_rate(
-        star,
-        optical_path,
-        start_time_d=start_time_d,
-        dist_pc=dist_pc,
-        wavelength_nm=wavelength_nm,
-        bin_width_nm=bin_width_nm,
-    )
-    return optical_path.detector.readout_source_electrons(
-        image_rate_detector, exposure_time_s, prng_key
-    )
-
-
-# ---------------------------------------------------------------------------
-# Planets
-# ---------------------------------------------------------------------------
-
-
-def _planet_batches(system, time_d, wavelength_nm):
-    """Scene-order positions (2, K) and fluxes (K,) for each tuple entry.
-
-    Solve once, then slice the scene-order outputs by photometric batch size.
-    """
-    if not system.planets:
-        return ()
-    times = jnp.atleast_1d(time_d)
-    ephemeris = system.ephemeris(times)
-    positions = system.positions(times, ephemeris=ephemeris)[:, :, 0]
-    fluxes = system.planet_flux_densities(wavelength_nm, times, ephemeris=ephemeris)[
-        :, 0
-    ]
-    batches = []
-    start = 0
-    for planet in system.planets:
-        stop = start + planet.n_planets
-        batches.append((positions[:, start:stop], fluxes[start:stop]))
-        start = stop
-    return tuple(batches)
-
-
-def _planet_image_rate(
-    source_positions_as,
-    flux,
-    optical_path,
-    *,
-    wavelength_nm,
-    bin_width_nm,
-    telescope_pa_deg,
-):
-    """Render positions (2, K) and photon flux densities (K,) for one batch."""
-    # Sky (east, north) -> FITS (west, north), then rotate into detector axes.
-    source_positions_as = source_positions_as.at[0].multiply(-1)
-    rotation_matrix = ccw_rotation_matrix(-telescope_pa_deg)
-    source_positions_as = rotation_matrix @ source_positions_as
-
-    source_positions_lod = arcsec_to_lambda_d(
-        source_positions_as, wavelength_nm, optical_path.primary.diameter_m
-    )
-
-    flux = pre_coro_bin_processing(flux, wavelength_nm, bin_width_nm, optical_path)
-
-    pixel_scale_lod, shape = _detector_sampling_lod(wavelength_nm, optical_path)
-    psfs = optical_path.coronagraph.source_psfs(
-        wavelength_nm,
-        source_positions_lod[0],
-        source_positions_lod[1],
-        pixel_scale_lod=pixel_scale_lod,
-        shape=shape,
-    )
-    image_rate = jnp.einsum("i,ijk->jk", flux, psfs)
-    return jnp.clip(image_rate, 0, None)
-
-
-def planet_rate(
-    system,
-    optical_path,
-    *,
-    start_time_d,
-    wavelength_nm,
-    bin_width_nm,
-    telescope_pa_deg,
-):
-    """Render all planets in a scene System, sharing one ephemeris.
-
-    ``start_time_d`` is days from ``system.epoch``. Positions and fluxes
-    retain flattened scene order across heterogeneous photometric batches.
-    ``telescope_pa_deg`` is the sky PA of detector +y, north through east;
-    at zero PA east is left and north is up with ``imshow(origin="lower")``.
-    """
-    total = jnp.zeros(optical_path.detector.shape)
-    for positions, flux in _planet_batches(system, start_time_d, wavelength_nm):
-        total = total + _planet_image_rate(
-            positions,
-            flux,
-            optical_path,
-            wavelength_nm=wavelength_nm,
-            bin_width_nm=bin_width_nm,
-            telescope_pa_deg=telescope_pa_deg,
+        diameter / stellar_grid.frame.lod_to_arcsec(wavelength_nm),
+        grid=detector_pixels(stellar_grid),
+    ).data
+    if speckle is not None:
+        # The field owns its native lod grid, Frame, reconstruction and
+        # extension; its clock subtracts its own epoch. The excess is signed
+        # (coherent interference can lower the floor); only the total
+        # leakage is clipped at zero below.
+        leakage = leakage + onto_detector(
+            speckle.realize(wavelength_nm=wavelength_nm, time_d=time_d)
         )
-    return total
+    leakage = gain * phi_star * jnp.maximum(leakage, 0.0)
+
+    planet = jnp.zeros(grid.shape)
+    if system.planets:
+        x, y = grid.orientation.sky_to_detector(positions[0], positions[1])
+        phi = system.planet_flux_densities(
+            wavelength_nm, jnp.atleast_1d(time_d), ephemeris=ephemeris
+        )[:, 0]
+        psfs = coro.source_psfs(
+            wavelength_nm, x / lod_arcsec, y / lod_arcsec, grid=detector_pixels(native)
+        )
+        planet = gain * jnp.einsum("k,kyx->yx", phi, psfs.data)
+
+    omega_sr = grid.pixel_area * arcsec2rad**2
+    local = jnp.zeros(grid.shape)
+    if zodi is not None:
+        radiance = zodi.photon_radiance(
+            wavelength_nm,
+            ecliptic_latitude_deg=ecliptic_latitude_deg,
+            solar_longitude_deg=solar_longitude_deg,
+        )
+        transmission = coro.background_transmission(
+            wavelength_nm, grid=detector_pixels(background_grid)
+        ).data
+        local = gain * radiance * omega_sr * transmission
+
+    disk = jnp.zeros(grid.shape)
+    if system.disk is not None:
+        radiance = system.photon_radiance(wavelength_nm, time_d, grid=grid)
+        scene = Image(
+            radiance.data * omega_sr,
+            grid,
+            (),
+            "per_pixel",
+            "ph s^-1 m^-2 nm^-1",
+            reconstruction="linear",
+        )
+        scene = replace(resample(scene, angular), grid=native)
+        # Convolution with the band-limited PSF band-limits the output. A finite
+        # scene is zero outside; a nonzero extension follows the input scene.
+        disk = gain * onto_detector(
+            replace(
+                coro.extended_scene(scene, wavelength_nm, grid=native),
+                reconstruction="band_limited",
+                outside=scene.outside,
+            )
+        )
+    zero = jnp.zeros(grid.shape)
+    return PhotonRates(planet, leakage, local, disk, zero, zero)
 
 
-def planet_readout(
+def _reader(
     system,
     optical_path,
-    prng_key,
-    *,
-    start_time_d,
-    exposure_time_s,
-    wavelength_nm,
-    bin_width_nm,
-    telescope_pa_deg,
+    bands,
+    time_d,
+    pointing,
+    quadrature_order,
+    quadrature,
+    zodi,
+    speckle,
+    ecliptic_latitude_deg,
+    solar_longitude_deg,
 ):
-    """Process all planets in a scene System through the optical path.
+    """Prepare static node geometry and solve the orbit once per observation."""
+    grid = _detector_grid(optical_path, pointing)
+    with jax.ensure_compile_time_eval():
+        if quadrature is None:
+            quadrature = Quadrature.build(bands, None, quadrature_order)
+        else:
+            quadrature = Quadrature(
+                *(
+                    jnp.asarray(np.frombuffer(data, dtype=dtype).reshape(shape))
+                    for shape, dtype, data in quadrature
+                )
+            )
+        if quadrature.nodes_nm.shape[0] != len(bands):
+            raise ValueError("quadrature must have one row per band")
+        nodes = np.asarray(quadrature.nodes_nm).ravel()
+    ephemeris, positions = None, None
+    if system.planets:
+        times = jnp.atleast_1d(time_d)
+        ephemeris = system.ephemeris(times)
+        positions = system.positions(times, ephemeris=ephemeris)[:, :, 0]
+    speckle = optical_path.speckle if speckle is None else speckle
+    branches = tuple(
+        partial(
+            _node_rates,
+            float(w),
+            system,
+            optical_path,
+            time_d,
+            grid,
+            ephemeris,
+            positions,
+            zodi,
+            speckle,
+            ecliptic_latitude_deg,
+            solar_longitude_deg,
+        )
+        for w in nodes
+    )
+    return grid, quadrature, branches
 
-    Detector axes and ``telescope_pa_deg`` follow :func:`planet_rate`:
-    the PA is that of detector +y on the sky, north through east.
-    """
-    image_rate_detector = planet_rate(
+
+def _kernel_arguments(
+    system,
+    optical_path,
+    bands,
+    time_d,
+    pointing,
+    quadrature_order,
+    quadrature,
+    zodi,
+    speckle,
+    ecliptic_latitude_deg,
+    solar_longitude_deg,
+):
+    """Freeze host quadrature by value and keep observation scalars dynamic."""
+    if quadrature is not None:
+        if any(isinstance(x, jax.core.Tracer) for x in jax.tree.leaves(quadrature)):
+            raise ValueError(
+                "quadrature must be concrete host geometry; close over it under JIT"
+            )
+        quadrature = tuple(
+            (a.shape, a.dtype.str, a.tobytes())
+            for a in map(np.asarray, (quadrature.nodes_nm, quadrature.weights_nm))
+        )
+    return (
         system,
         optical_path,
-        start_time_d=start_time_d,
-        wavelength_nm=wavelength_nm,
-        bin_width_nm=bin_width_nm,
-        telescope_pa_deg=telescope_pa_deg,
-    )
-    return optical_path.detector.readout_source_electrons(
-        image_rate_detector, exposure_time_s, prng_key
-    )
-
-
-# ---------------------------------------------------------------------------
-# Disk
-# ---------------------------------------------------------------------------
-
-
-def disk_rate(
-    disk,
-    optical_path,
-    *,
-    start_time_d,
-    dist_pc,
-    wavelength_nm,
-    bin_width_nm,
-    telescope_pa_deg,
-    star,
-    incl_deg,
-    pa_deg,
-):
-    """Generate the disk count rate on the detector.
-
-    Disks return CONTRAST (dimensionless flux ratio relative to the host
-    star); we multiply by ``star.spec_flux_density`` here to convert to
-    photon flux density per pixel before resampling and PSF convolution.
-
-    ``incl_deg`` / ``pa_deg`` are the disk's intrinsic orientation in the
-    sky frame, in the skyscapes convention: ``pa_deg`` turns the line of
-    nodes from +x (east) toward +y (north), so the astronomical major-axis
-    PA is ``90 - pa_deg``. ``telescope_pa_deg`` is the sky PA of detector +y, north
-    through east. The input disk image follows the FITS sky convention
-    (+row north, +column west). ``extended_scene`` uses positive angles
-    for CCW image rotations with ``origin="lower"``, so rotating by
-    ``-telescope_pa_deg`` gives x = -E cos(theta) + N sin(theta),
-    y = N cos(theta) + E sin(theta), just as for :func:`planet_rate`.
-    Output +row is detector +y and +column is detector +x.
-
-    Raises:
-        ValueError: from the coronagraph if it cannot render an extended
-            scene (e.g. a table-backed coronagraph built without a PSF
-            datacube).
-    """
-    contrast = disk.surface_brightness(
-        wavelength_nm, start_time_d, incl_deg, pa_deg, dist_pc=dist_pc
-    )
-    star_flux = star.spec_flux_density(wavelength_nm, start_time_d, dist_pc=dist_pc)
-    flux = contrast * star_flux
-    flux = pre_coro_bin_processing(flux, wavelength_nm, bin_width_nm, optical_path)
-
-    map_pixel_scale_lod = arcsec_to_lambda_d(
-        disk.pixel_scale_arcsec,
-        wavelength_nm,
-        optical_path.primary.diameter_m,
-    )
-    pixel_scale_lod, shape = _detector_sampling_lod(wavelength_nm, optical_path)
-    image_rate = optical_path.coronagraph.extended_scene(
-        flux,
-        map_pixel_scale_lod,
-        wavelength_nm,
-        pixel_scale_lod=pixel_scale_lod,
-        shape=shape,
-        # FITS sky pixels already encode x=-E; the detector rotation is CW.
-        rotation_deg=-telescope_pa_deg,
-    )
-    return jnp.clip(image_rate, 0, None)
-
-
-def disk_readout(
-    disk,
-    optical_path,
-    prng_key,
-    *,
-    start_time_d,
-    dist_pc,
-    exposure_time_s,
-    wavelength_nm,
-    bin_width_nm,
-    telescope_pa_deg,
-    star,
-    incl_deg,
-    pa_deg,
-):
-    """Process a disk through the provided optical path.
-
-    ``incl_deg`` / ``pa_deg`` are the disk's intrinsic sky-frame
-    orientation; ``system_readout`` pulls them from
-    ``scene.system.midplane_inc_deg`` / ``midplane_pa_deg`` so every
-    disk component in the System renders at the same midplane.
-    Detector axes and the sky PA of detector +y (``telescope_pa_deg``)
-    follow :func:`disk_rate`.
-    """
-    image_rate_detector = disk_rate(
-        disk,
-        optical_path,
-        start_time_d=start_time_d,
-        dist_pc=dist_pc,
-        wavelength_nm=wavelength_nm,
-        bin_width_nm=bin_width_nm,
-        telescope_pa_deg=telescope_pa_deg,
-        star=star,
-        incl_deg=incl_deg,
-        pa_deg=pa_deg,
-    )
-    return optical_path.detector.readout_source_electrons(
-        image_rate_detector, exposure_time_s, prng_key
-    )
-
-
-# ---------------------------------------------------------------------------
-# Zodi
-# ---------------------------------------------------------------------------
-
-
-def zodi_rate(
-    zodi: Zodi,
-    optical_path,
-    *,
-    start_time_d,
-    wavelength_nm,
-    bin_width_nm,
-    ecliptic_lat_deg,
-    solar_lon_deg,
-):
-    """Generate the zodi count rate on the detector.
-
-    Treats zodi as a spatially uniform surface-brightness source. The
-    coronagraph's sky transmission map sets the per-pixel attenuation;
-    no PSF convolution is needed (a flat field convolved with any
-    normalised PSF returns itself).
-    """
-    sb_per_arcsec2 = zodi.spec_flux_density(
-        wavelength_nm, start_time_d, ecliptic_lat_deg, solar_lon_deg
-    )
-    flux_per_pixel = sb_per_arcsec2 * optical_path.detector.pixel_scale_arcsec**2
-
-    pixel_scale_lod, shape = _detector_sampling_lod(wavelength_nm, optical_path)
-    flux_map = flux_per_pixel * optical_path.coronagraph.background_transmission(
-        wavelength_nm, pixel_scale_lod=pixel_scale_lod, shape=shape
-    )
-    flux_map = pre_coro_bin_processing(
-        flux_map, wavelength_nm, bin_width_nm, optical_path
-    )
-    return jnp.clip(flux_map, 0, None)
-
-
-def zodi_readout(
-    zodi: Zodi,
-    optical_path,
-    prng_key,
-    *,
-    start_time_d,
-    exposure_time_s,
-    wavelength_nm,
-    bin_width_nm,
-    ecliptic_lat_deg,
-    solar_lon_deg,
-):
-    """Process a zodi source through the provided optical path."""
-    image_rate_detector = zodi_rate(
+        tuple(bands),
+        jnp.asarray(time_d),
+        pointing,
+        quadrature_order,
+        quadrature,
         zodi,
-        optical_path,
-        start_time_d=start_time_d,
-        wavelength_nm=wavelength_nm,
-        bin_width_nm=bin_width_nm,
-        ecliptic_lat_deg=ecliptic_lat_deg,
-        solar_lon_deg=solar_lon_deg,
-    )
-    return optical_path.detector.readout_source_electrons(
-        image_rate_detector, exposure_time_s, prng_key
-    )
-
-
-# ---------------------------------------------------------------------------
-# Speckle
-# ---------------------------------------------------------------------------
-
-
-def speckle_rate(
-    speckle,
-    optical_path,
-    *,
-    start_time_d,
-    dist_pc,
-    wavelength_nm,
-    bin_width_nm,
-    star,
-):
-    """Generate the speckle count rate on the detector.
-
-    The speckle field returns a CONTRAST delta (fraction of host-star flux
-    per pixel) -- the stochastic wavefront-error residual that sits on top
-    of the deterministic ``stellar_intens`` floor already applied in
-    :func:`star_rate`. We multiply by the host-star flux to convert to a
-    photon rate, then resample to the detector. Structurally this mirrors
-    :func:`star_rate`, not :func:`disk_rate`: the field is already a
-    post-coronagraph focal-plane map, so there is no PSF convolution.
-
-    Evolution is driven by time, not a PRNG key: the elapsed seconds are
-    ``(start_time_d - speckle.epoch_d) * d2s``, so the rate is deterministic
-    and differentiable and temporal correlation survives across a roll
-    sequence. The realization's randomness is fixed at construction.
-
-    The speckle map is taken on the plane declared by its own
-    ``speckle.pixel_scale_lod`` and resampled to the detector grid
-    directly, so it need not share a plate scale with the coronagraph.
-    """
-    time_s = (start_time_d - speckle.epoch_d) * d2s
-    flux = star.spec_flux_density(wavelength_nm, start_time_d, dist_pc=dist_pc)
-    flux = pre_coro_bin_processing(flux, wavelength_nm, bin_width_nm, optical_path)
-    contrast = speckle.realize(wavelength_nm=wavelength_nm, time_s=time_s)
-    image_rate_coro = contrast * flux
-    speckle_scale_arcsec = lambda_d_to_arcsec(
-        speckle.pixel_scale_lod,
-        wavelength_nm,
-        optical_path.primary.diameter_m,
-    )
-    image_rate = resample_flux(
-        image_rate_coro,
-        speckle_scale_arcsec,
-        optical_path.detector.pixel_scale_arcsec,
-        optical_path.detector.shape,
-        0.0,  # speckles are detector-fixed; rotation is applied source-side
-    )
-    return jnp.clip(image_rate, 0, None)
-
-
-def speckle_readout(
-    speckle,
-    optical_path,
-    prng_key,
-    *,
-    start_time_d,
-    dist_pc,
-    exposure_time_s,
-    wavelength_nm,
-    bin_width_nm,
-    star,
-):
-    """Process a speckle field through the provided optical path.
-
-    The PRNG key is used only for the photon Poisson draw; the speckle
-    realization itself is deterministic in time (see :func:`speckle_rate`).
-    """
-    image_rate_detector = speckle_rate(
         speckle,
-        optical_path,
-        start_time_d=start_time_d,
-        dist_pc=dist_pc,
-        wavelength_nm=wavelength_nm,
-        bin_width_nm=bin_width_nm,
-        star=star,
-    )
-    return optical_path.detector.readout_source_electrons(
-        image_rate_detector, exposure_time_s, prng_key
+        jnp.asarray(ecliptic_latitude_deg),
+        jnp.asarray(solar_longitude_deg),
     )
 
 
-# ---------------------------------------------------------------------------
-# Whole-scene orchestrator
-# ---------------------------------------------------------------------------
-
-
-def system_rate(
-    scene,
+def _image_impl(
+    system,
     optical_path,
+    bands,
+    time_d,
+    pointing,
+    quadrature_order,
+    quadrature,
+    zodi,
+    speckle,
+    ecliptic_latitude_deg,
+    solar_longitude_deg,
     *,
-    start_time_d,
-    wavelength_nm,
-    bin_width_nm,
-    telescope_pa_deg,
-    ecliptic_lat_deg,
-    solar_lon_deg,
-    trace=False,
+    kind,
 ):
-    """Sum of deterministic per-source count rates for a :class:`~skyscapes.Scene`.
-
-    The differentiable companion to :func:`system_readout`. Returns the
-    total rate map (photons/s/pixel incident on the detector, no Poisson
-    noise; detector QE is applied at readout by :func:`system_readout`)
-    summing star, every planet, the optional disk, the optional zodi, and
-    the optional speckle field on ``optical_path``. Use this for likelihood
-    evaluation, retrievals, or any inference loop that needs gradients
-    through the full forward model.
-
-    ``telescope_pa_deg`` is the sky PA of detector +y, north through east;
-    output +row/+column are detector +y/+x. At zero PA, display with
-    ``origin="lower"`` for north up and east left.
-
-    With ``trace=True`` the return becomes ``(total, parts)``, where
-    ``parts`` maps a source name to that source's own rate map, in the same
-    units and on the same detector grid as ``total``. Keys are present only
-    for the sources this scene actually has: ``"star"`` always, ``"planets"``
-    when the system has any (summed over every planet batch), and ``"disk"``,
-    ``"zodi"``, ``"speckle"`` when those are configured. The parts sum to
-    ``total`` up to floating-point associativity, so a per-source
-    decomposition costs one call instead of one call per source.
-
-    Every traced field is already on the path to ``total``, so tracing
-    never recomputes the forward model. The cost is output memory, roughly
-    one extra result-sized array per source, plus a few percent of
-    arithmetic where materialising the parts blocks kernel fusion. Inside
-    an enclosing ``jit``, parts the caller does not use are dead-code
-    eliminated exactly. ``trace`` is static, so each value compiles its
-    own kernel.
-    """
-    has_disk = scene.system.disk is not None
-    has_zodi = scene.zodi is not None
-    parts = {}
-
-    contribution = star_rate(
-        scene.system.star,
+    """Render one configuration with array leaves supplied at runtime."""
+    grid, quadrature, branches = _reader(
+        system,
         optical_path,
-        dist_pc=scene.system.dist_pc,
-        start_time_d=start_time_d,
-        wavelength_nm=wavelength_nm,
-        bin_width_nm=bin_width_nm,
+        bands,
+        time_d,
+        pointing,
+        quadrature_order,
+        quadrature,
+        zodi,
+        speckle,
+        ecliptic_latitude_deg,
+        solar_longitude_deg,
     )
-    total = contribution
-    if trace:
-        parts["star"] = contribution
-
-    planets = None
-    for positions, flux in _planet_batches(scene.system, start_time_d, wavelength_nm):
-        contribution = _planet_image_rate(
-            positions,
-            flux,
-            optical_path,
-            wavelength_nm=wavelength_nm,
-            bin_width_nm=bin_width_nm,
-            telescope_pa_deg=telescope_pa_deg,
+    if kind == "photons":
+        values = jax.lax.map(
+            lambda i: jax.lax.switch(i, branches), jnp.arange(len(branches))
         )
-        total = total + contribution
-        if trace:
-            planets = contribution if planets is None else planets + contribution
-    if trace and planets is not None:
-        parts["planets"] = planets
-
-    if has_disk:
-        contribution = disk_rate(
-            scene.system.disk,
-            optical_path,
-            start_time_d=start_time_d,
-            wavelength_nm=wavelength_nm,
-            bin_width_nm=bin_width_nm,
-            telescope_pa_deg=telescope_pa_deg,
-            star=scene.system.star,
-            dist_pc=scene.system.dist_pc,
-            incl_deg=jnp.asarray(scene.system.midplane_inc_deg),
-            pa_deg=jnp.asarray(scene.system.midplane_pa_deg),
+        return jax.tree.map(
+            lambda x: x.reshape((*quadrature.nodes_nm.shape, *grid.shape)), values
         )
-        total = total + contribution
-        if trace:
-            parts["disk"] = contribution
 
-    if has_zodi:
-        contribution = zodi_rate(
-            scene.zodi,
-            optical_path,
-            start_time_d=start_time_d,
-            wavelength_nm=wavelength_nm,
-            bin_width_nm=bin_width_nm,
-            ecliptic_lat_deg=ecliptic_lat_deg,
-            solar_lon_deg=solar_lon_deg,
+    n_bands, n_nodes = quadrature.nodes_nm.shape
+    initial = ElectronRates(
+        **{
+            name: jnp.zeros((n_bands, *grid.shape))
+            for name in PhotonRates.__dataclass_fields__
+        }
+    )
+
+    def accumulate(total, index):
+        photons = jax.lax.switch(index, branches)
+        photons = jax.tree.map(lambda x: x[None, None], photons)
+        single = Quadrature(
+            quadrature.nodes_nm.reshape(-1)[index].reshape(1, 1),
+            quadrature.weights_nm.reshape(-1)[index].reshape(1, 1),
         )
-        total = total + contribution
-        if trace:
-            parts["zodi"] = contribution
-
-    if optical_path.speckle is not None:
-        contribution = speckle_rate(
-            optical_path.speckle,
-            optical_path,
-            start_time_d=start_time_d,
-            wavelength_nm=wavelength_nm,
-            bin_width_nm=bin_width_nm,
-            star=scene.system.star,
-            dist_pc=scene.system.dist_pc,
+        electrons = optical_path.detector.electrons(photons, single)
+        total = jax.tree.map(
+            lambda a, b: a.at[index // n_nodes].add(b[0]), total, electrons
         )
-        total = total + contribution
-        if trace:
-            parts["speckle"] = contribution
+        return total, None
 
-    if not trace:
-        return total
-    return total, parts
+    electrons = jax.lax.scan(accumulate, initial, jnp.arange(len(branches)))[0]
+    return electrons
 
 
-def system_readout(
-    scene,
-    optical_path,
-    prng_key,
+def _draw_impl(detector, key, electrons, plan):
+    """Stage detector noise separately so observations share the renderer."""
+    return detector.draw(key, electrons, plan)
+
+
+@lru_cache(maxsize=4)
+def _cached_image_kernel(function, treedef, static_leaves, signature):
+    """Own at most four eager JIT functions, including shape/dtype variants."""
+    static = jax.tree.unflatten(treedef, static_leaves)
+
+    def run(dynamic):
+        args, kwargs = eqx.combine(dynamic, static)
+        return function(*args, **kwargs)
+
+    # Only arrays are passed to jit; host metadata is in the bounded closure.
+    # A separate function per entry lets eviction release its JAX cache too.
+    return jax.jit(run)
+
+
+def _image_kernel(*args, _function=_image_impl, **kwargs):
+    """Reuse eager kernels; let caller transformations own their staging cache."""
+    dynamic, static = eqx.partition((args, kwargs), eqx.is_array)
+    arrays = jax.tree.leaves(dynamic)
+    if any(isinstance(a, jax.core.Tracer) for a in arrays):
+        return _function(*args, **kwargs)
+    static_leaves, treedef = jax.tree.flatten(static)
+    signature = tuple(
+        (a.shape, a.dtype, getattr(a, "weak_type", False)) for a in arrays
+    )
+    return _cached_image_kernel(_function, treedef, tuple(static_leaves), signature)(
+        dynamic
+    )
+
+
+def clear_reader_cache():
+    """Release all eager reader kernels; the next eager call compiles again.
+
+    Caller-owned JIT executables and live output arrays are unaffected. JAX
+    and the system allocator can retain memory after executable release.
+    """
+    _cached_image_kernel.cache_clear()
+
+
+def image_rates(
+    system: System,
+    optical_path: OpticalPath,
+    bands: Sequence[Band],
     *,
-    start_time_d,
-    exposure_time_s,
-    wavelength_nm,
-    bin_width_nm,
-    telescope_pa_deg,
-    ecliptic_lat_deg,
-    solar_lon_deg,
-):
-    """Simulate a full :class:`~skyscapes.Scene` through the optical path.
+    time_d,
+    pointing: SkyOrientation,
+    quadrature_order: int = 4,
+    quadrature: Quadrature | None = None,
+    zodi: Zodi | None = None,
+    speckle: AbstractSpeckleField | None = None,
+    ecliptic_latitude_deg=0.0,
+    solar_longitude_deg=135.0,
+) -> PhotonRates:
+    """Return full (W,Q,ny,nx) photon integrands, in photons/s/nm/pixel.
 
-    Sums per-source detector readouts. Each source consumes its own
-    independent PRNG subkey (see :mod:`jax.random` best practices). The
-    optional speckle field on ``optical_path`` is the last source and
-    consumes the final subkey, so scenes run without one are unaffected.
-
-    ``telescope_pa_deg`` is the sky PA of detector +y, north through east;
-    output +row/+column are detector +y/+x. At zero PA, display with
-    ``origin="lower"`` for north up and east left.
-
-    Planet positions and fluxes share one scene ephemeris; independent
-    photon draws retain the photometric tuple batch boundaries.
+    Pass a host-prepared quadrature to share nodes and weights with other
+    readers; otherwise use Quadrature.build(bands, None, quadrature_order)
+    to integrate this record. The default is unsplit Gauss-Legendre: subdivide
+    bands at spectral breaks and increase order to resolve spectral structure.
+    No QE or survival is applied. zodi=None disables local zodi; speckle=None
+    uses the path's optional speckle field. Thermal and companion terms are zero.
     """
-    has_disk = scene.system.disk is not None
-    has_zodi = scene.zodi is not None
-    has_speckle = optical_path.speckle is not None
-
-    n_keys = (
-        1 + len(scene.system.planets) + int(has_disk) + int(has_zodi) + int(has_speckle)
+    return _image_kernel(
+        *_kernel_arguments(
+            system,
+            optical_path,
+            bands,
+            time_d,
+            pointing,
+            quadrature_order,
+            quadrature,
+            zodi,
+            speckle,
+            ecliptic_latitude_deg,
+            solar_longitude_deg,
+        ),
+        kind="photons",
     )
-    keys = iter(jax.random.split(prng_key, n_keys))
 
-    total = star_readout(
-        scene.system.star,
+
+def image_electrons(
+    system: System,
+    optical_path: OpticalPath,
+    bands: Sequence[Band],
+    *,
+    time_d,
+    pointing: SkyOrientation,
+    quadrature_order: int = 4,
+    quadrature: Quadrature | None = None,
+    zodi: Zodi | None = None,
+    speckle: AbstractSpeckleField | None = None,
+    ecliptic_latitude_deg=0.0,
+    solar_longitude_deg=135.0,
+) -> ElectronRates:
+    """Stream nodes into (W,ny,nx) electrons/s with detector-owned yield.
+
+    quadrature, when supplied, owns the nodes and weights and supersedes
+    quadrature_order. Its arrays become a static key by value; close over
+    this host-prepared geometry under JIT. OpticalPath may be an argument.
+    Each scan step wraps one photon image in (1,1,ny,nx), passes its one-node
+    Quadrature to detector.electrons, and adds that result to its band. No
+    node images are stacked. Static-grid branches grow compile size with Q;
+    forward image storage is the band accumulator plus one node's images.
+    JAX reverse-mode may retain residuals for differentiation.
+    """
+    return _image_kernel(
+        *_kernel_arguments(
+            system,
+            optical_path,
+            bands,
+            time_d,
+            pointing,
+            quadrature_order,
+            quadrature,
+            zodi,
+            speckle,
+            ecliptic_latitude_deg,
+            solar_longitude_deg,
+        ),
+        kind="electrons",
+    )
+
+
+def observe(
+    key,
+    system: System,
+    optical_path: OpticalPath,
+    bands: Sequence[Band],
+    plan: FramePlan,
+    *,
+    time_d,
+    pointing: SkyOrientation,
+    quadrature_order: int = 4,
+    quadrature: Quadrature | None = None,
+    zodi: Zodi | None = None,
+    speckle: AbstractSpeckleField | None = None,
+    ecliptic_latitude_deg=0.0,
+    solar_longitude_deg=135.0,
+) -> Image:
+    """Draw one electron Image (W,ny,nx), per_pixel on the detector sky grid.
+
+    Rates describe the instantaneous scene at time_d, held throughout plan.
+    Detector noise is drawn once after combining all source terms.
+    """
+    electrons = image_electrons(
+        system,
         optical_path,
-        next(keys),
-        dist_pc=scene.system.dist_pc,
-        start_time_d=start_time_d,
-        exposure_time_s=exposure_time_s,
-        wavelength_nm=wavelength_nm,
-        bin_width_nm=bin_width_nm,
+        bands,
+        time_d=time_d,
+        pointing=pointing,
+        quadrature_order=quadrature_order,
+        quadrature=quadrature,
+        zodi=zodi,
+        speckle=speckle,
+        ecliptic_latitude_deg=ecliptic_latitude_deg,
+        solar_longitude_deg=solar_longitude_deg,
     )
-
-    for positions, flux in _planet_batches(scene.system, start_time_d, wavelength_nm):
-        rate = _planet_image_rate(
-            positions,
-            flux,
-            optical_path,
-            wavelength_nm=wavelength_nm,
-            bin_width_nm=bin_width_nm,
-            telescope_pa_deg=telescope_pa_deg,
-        )
-        total = total + optical_path.detector.readout_source_electrons(
-            rate, exposure_time_s, next(keys)
-        )
-
-    if has_disk:
-        total = total + disk_readout(
-            scene.system.disk,
-            optical_path,
-            next(keys),
-            start_time_d=start_time_d,
-            exposure_time_s=exposure_time_s,
-            wavelength_nm=wavelength_nm,
-            bin_width_nm=bin_width_nm,
-            telescope_pa_deg=telescope_pa_deg,
-            star=scene.system.star,
-            dist_pc=scene.system.dist_pc,
-            incl_deg=jnp.asarray(scene.system.midplane_inc_deg),
-            pa_deg=jnp.asarray(scene.system.midplane_pa_deg),
-        )
-
-    if has_zodi:
-        total = total + zodi_readout(
-            scene.zodi,
-            optical_path,
-            next(keys),
-            start_time_d=start_time_d,
-            exposure_time_s=exposure_time_s,
-            wavelength_nm=wavelength_nm,
-            bin_width_nm=bin_width_nm,
-            ecliptic_lat_deg=ecliptic_lat_deg,
-            solar_lon_deg=solar_lon_deg,
-        )
-
-    if has_speckle:
-        total = total + speckle_readout(
-            optical_path.speckle,
-            optical_path,
-            next(keys),
-            start_time_d=start_time_d,
-            exposure_time_s=exposure_time_s,
-            wavelength_nm=wavelength_nm,
-            bin_width_nm=bin_width_nm,
-            star=scene.system.star,
-            dist_pc=scene.system.dist_pc,
-        )
-
-    return total
+    return Image(
+        _image_kernel(
+            optical_path.detector, key, electrons, plan, _function=_draw_impl
+        ),
+        _detector_grid(optical_path, pointing),
+        ("band",),
+        "per_pixel",
+        "electrons",
+    )

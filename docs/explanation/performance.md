@@ -1,92 +1,117 @@
-# Performance: avoid baking large arrays into JIT compilation
+# JAX and memory
 
-When you wrap a simulation function with `@eqx.filter_jit`, any JAX array
-referenced through a Python closure becomes a **constant baked into the
-compiled program**, not a runtime argument. For a typical coronagraphoto
-setup the PSF datacube held inside `optical_path.coronagraph` is the
-dominant cost --- a 256x256 quarter-symmetric cube is 4.36 GB in float32
---- and JAX will print a warning at lowering time:
+`image_rates` retains a `(W,Q,ny,nx)` image per source term. Prefer
+`image_electrons` for band-integrated output: its `lax.scan` carries only
+`(W,ny,nx)` electron arrays, renders one node, applies detector yield with a
+one-node `Quadrature`, and discards that node's images. `observe` uses this
+streaming path. Reverse-mode differentiation can retain scan residuals.
 
-```
-UserWarning: A large amount of constants were captured during lowering
-(4.46GB total). If this is intentional, disable this warning by setting
-JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1.
-```
+`PixelGrid` and `Frame` are immutable host geometry. The reader prepares
+static node branches selected by the scan, so compile size grows with node
+count. It does not precompute or retain all node images. The table adapter's
+reference sampling is scaled to each concrete node using shared grid tools.
 
-The visible symptoms are a long first-call compile (we measured 43.7 s
-for an uncached forward model on a single-GPU host), the warning above,
-and brittle reuse: any change to `optical_path` forces a full recompile
-because the cube has been folded into the program's constant pool.
+All three public readers share a cache of at most four eager JIT functions.
+The first eager call compiles; later calls reuse that kernel when static
+configuration and array shapes/dtypes (including weak scalar types) match.
+The cache evicts the least recently used kernel, so returning to an evicted
+configuration compiles again. `observe` shares the `image_electrons` renderer,
+then draws detector noise in a separate small cached kernel; it does not
+retain a second image-rendering kernel. Rendering and noise share the same
+four-entry limit.
 
-## The rule: hoist objects that carry JAX arrays into the signature
+Time, sky-background coordinates, array-valued scene fluxes, detector yield/noise parameters and PRNG keys remain runtime
+inputs. Use arrays for numerical scene parameters that you intend to vary;
+Equinox treats Python scalar leaves as static. Bands, pointing, quadrature
+order, detector pixel scale/shape and coronagraph grids are static geometry.
+Changing these requires a new compilation. Numerical tables remain array
+inputs wherever the instrument exposes them as PyTree leaves.
 
-`eqx.filter_jit` traces JAX arrays in pytree **arguments** as runtime
-inputs. Move every container that owns a heavy array --- `optical_path`,
-`star`, `planet`, `disk`, `zodi` --- out of closure capture and into the
-function signature. The PSF datacube then flows in as a normal input
-array rather than being memcopied into the compiled binary.
+A supplied `Quadrature` is encoded by shape, dtype and exact node/weight bytes
+into an immutable, hashable kernel key. Equal rules share a kernel even when
+they are different objects; changing either array selects a new kernel. This
+small host copy is intentional: each wavelength requires concrete resampling
+geometry. Build the quadrature before tracing and close over it in an outer
+JIT; passing its arrays as traced arguments is unsupported. The default rule
+is built once while tracing the kernel. A supplied rule supersedes the order.
 
-Requires a configured scene system, optical path, and exposure parameters.
+The readers also compose with a caller's own JIT. While tracing they stage
+directly into that program, without adding an eager cache entry. Pass the
+optical path as an argument, or close over it. Its detector pixel scale is a
+validated host float and stays static in either form:
 
 ```python notest
-# Avoid: optical_path closed over from outer scope.
+import equinox as eqx
+from coronagraphoto import observe
+
+
 @eqx.filter_jit
-def simulate_frame(time_d, wavelength_nm, key):
-    rate = planet_rate(system, optical_path, ...)
-    return optical_path.detector.readout_source_electrons(rate, EXPOSURE_S, key)
+def predict(system, optical_path, key, time_d):
+    return observe(
+        key,
+        system,
+        optical_path,
+        bands,
+        plan,
+        time_d=time_d,
+        pointing=pointing,
+        zodi=local_zodi,
+    )
+
+
+image = predict(system, optical_path, key, time_d)
+image.data.block_until_ready()
 ```
 
-Requires a configured scene system, optical path, and exposure parameters.
+`vmap` adds a frame axis to interpolation and FFT workspaces. Its memory per
+frame is implementation-dependent, not an inherent requirement of rendering
+an observation. Prefer `lax.map` when frames would exhaust memory:
 
 ```python notest
-# Prefer: every JAX-array-bearing object is an argument.
-@eqx.filter_jit
-def simulate_frame(optical_path, system, time_d, wavelength_nm, key):
-    rate = planet_rate(system, optical_path, ...)
-    return optical_path.detector.readout_source_electrons(rate, EXPOSURE_S, key)
+import jax
+
+images = jax.lax.map(
+    lambda kt: predict(system, optical_path, kt[0], kt[1]).data,
+    (keys, times_d),
+)
+images.block_until_ready()
 ```
 
-## Measured impact
+This retains the output stack while reusing one frame's workspace. Compilation
+and table loading also consume memory beyond the executable's temporary
+buffers. Scene contrast parameters and time support gradients through the
+deterministic readers. Use float64 for faint-contrast calculations and enable
+it before constructing the scene or tables.
 
-On a single-GPU benchmark of the full uncached forward model (star +
-planet + disk + zodi + Poisson readout) the two patterns compile and
-run as follows:
+On the tutorial table, the largest workspaces are padded PSF FFTs over the
+four nearest offsets for every planet. For eight planets and 256-square
+PSFs, two complex128 buffers of shape `(8, 4, 1024, 513)` occupy about
+256.5 MiB each. The complete offset table is not FFT-shifted for each query.
+Streaming individual planets can change floating-point rounding, so the
+reader retains batched planet interpolation. Dense resampling matrices and
+node image accumulators are much smaller than those FFT workspaces.
 
-| Variant                  | Closure (baked) | As-argument |
-| ------------------------ | --------------- | ----------- |
-| First-call compile       | 43.7 s          | 5.6 s       |
-| Steady-state median      | 22.7 ms         | 22.9 ms     |
-| Steady-state std (n=20)  | 6.2 ms          | 0.3 ms      |
-| Captured-constants size  | 4.46 GB         | none        |
+Executables, staging graphs, constants and allocator pools contribute to
+resident memory in addition to the buffers reported by `memory_analysis()`.
+The eager cache retains up to four configurations across all three readers;
+new reader kinds, pointings, bands or shapes can consume additional entries.
+A JIT function can hold more than one executable when device, sharding or JAX
+compilation context changes. The four-entry limit bounds functions rather
+than bytes or all possible backend executable variants.
 
-Steady-state per-frame cost is unchanged --- closure capture does not
-cost anything once the program is compiled --- but compile time drops
-roughly 8x and the constants warning disappears. The variance
-improvement is a secondary effect: the long compile spills into the
-first timed iterations and inflates the standard deviation of the
-closure-pattern measurements.
+To release these entries between independent notebook sections:
 
-## When closure capture is fine
+```python notest
+from coronagraphoto import clear_reader_cache
 
-Small precomputed JAX arrays that exist specifically as cache state
-should stay closed-over. The cached forward model in
-`coronagraphoto`'s benchmarks pre-computes the star and disk count
-rates once and folds them into the JIT --- each is a 256x256 float32
-array (256 KB), and baking them is the entire point of the cached
-variant. The rule applies to large containers like
-`optical_path.coronagraph`, not to every closure-captured array.
-
-## Diagnostic: find what JAX captured
-
-To see exactly which Python frames produced the captured constants,
-set the report environment variable before the first compile:
-
-```python
-import os
-
-os.environ["JAX_CAPTURED_CONSTANTS_REPORT_FRAMES"] = "-1"
+clear_reader_cache()
 ```
 
-JAX will print the call sites that introduced each captured constant
-to stderr. This is the fastest way to identify a closure-captured cube
-that should have been an argument.
+This does not clear caller-owned JIT kernels. Reuse the same compiled
+function across frames; constructing new JIT closures or retaining objects
+returned by `lower(...).compile()` keeps additional programs alive. To clear
+JAX's compilation and staging caches between independent experiments, call
+[`jax.clear_caches()`](https://docs.jax.dev/en/latest/_autosummary/jax.clear_caches.html).
+Release any explicitly retained compiled objects too. Cache release does
+not promise an immediate drop in RSS: live outputs and allocator pools can
+remain resident. Neither cache-clear operation changes numerical results.
