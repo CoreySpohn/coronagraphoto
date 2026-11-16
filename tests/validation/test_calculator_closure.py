@@ -112,10 +112,9 @@ def closure(tmp_path_factory):
             ):
                 separation = float(jnp.hypot(x, y) / angular_scale)
 
-                def offaxis(s, wave=wave):
-                    image = coro.source_psfs(
-                        wave, jnp.array([s]), jnp.zeros(1), grid=coro.grid
-                    )
+                def offaxis(s):
+                    # The record integrates native point-density samples.
+                    image = coro.create_psfs(jnp.array([s]), jnp.zeros(1))
                     return replace(image, data=image.data[0], leading_axes=())
 
                 refined = _performance_curves(

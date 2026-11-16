@@ -67,6 +67,20 @@ def _node_rates(
         wavelength_nm
     )
 
+    def detector_pixels(product_grid):
+        # The detector pixels in a product's lambda/D frame at this node, so
+        # the product integrates once over each detector pixel. Native axes
+        # are detector axes; only the scale changes with wavelength.
+        with jax.ensure_compile_time_eval():
+            scale = float(product_grid.frame.lod_to_arcsec(wavelength_nm))
+            return replace(
+                grid,
+                basis=tuple(tuple(b / scale for b in row) for row in grid.basis),
+                unit="lod",
+                frame=product_grid.frame,
+                orientation=product_grid.orientation,
+            )
+
     def onto_detector(image):
         # Native coordinates describe detector axes, so attach the live pointing
         # only after the coronagraph has rendered its instrumental response.
@@ -81,13 +95,11 @@ def _node_rates(
     diameter = star.diameter_arcsec
     if callable(diameter):
         diameter = diameter(dist_pc=system.dist_pc)
-    leakage = onto_detector(
-        coro.stellar_map(
-            wavelength_nm,
-            diameter / stellar_grid.frame.lod_to_arcsec(wavelength_nm),
-            grid=stellar_grid,
-        )
-    )
+    leakage = coro.stellar_map(
+        wavelength_nm,
+        diameter / stellar_grid.frame.lod_to_arcsec(wavelength_nm),
+        grid=detector_pixels(stellar_grid),
+    ).data
     if speckle is not None:
         # The field owns its native lod grid, Frame, reconstruction and
         # extension; its clock subtracts its own epoch. The excess is signed
@@ -105,9 +117,9 @@ def _node_rates(
             wavelength_nm, jnp.atleast_1d(time_d), ephemeris=ephemeris
         )[:, 0]
         psfs = coro.source_psfs(
-            wavelength_nm, x / lod_arcsec, y / lod_arcsec, grid=native
+            wavelength_nm, x / lod_arcsec, y / lod_arcsec, grid=detector_pixels(native)
         )
-        planet = gain * jnp.einsum("k,kyx->yx", phi, onto_detector(psfs))
+        planet = gain * jnp.einsum("k,kyx->yx", phi, psfs.data)
 
     omega_sr = grid.pixel_area * arcsec2rad**2
     local = jnp.zeros(grid.shape)
@@ -117,9 +129,9 @@ def _node_rates(
             ecliptic_latitude_deg=ecliptic_latitude_deg,
             solar_longitude_deg=solar_longitude_deg,
         )
-        transmission = onto_detector(
-            coro.background_transmission(wavelength_nm, grid=background_grid)
-        )
+        transmission = coro.background_transmission(
+            wavelength_nm, grid=detector_pixels(background_grid)
+        ).data
         local = gain * radiance * omega_sr * transmission
 
     disk = jnp.zeros(grid.shape)
