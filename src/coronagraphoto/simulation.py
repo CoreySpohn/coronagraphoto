@@ -89,29 +89,13 @@ def _node_rates(
         )
     )
     if speckle is not None:
-        delta = speckle.realize(wavelength_nm=wavelength_nm, time_d=time_d)
-        with jax.ensure_compile_time_eval():
-            speckle_grid = PixelGrid.regular(
-                delta.shape,
-                speckle.pixel_scale_lod,
-                "lod",
-                frame=optical_path.primary.frame(native.frame.reference_wavelength_nm),
-            ).to_arcsec(wavelength_nm)
-            speckle_grid = replace(speckle_grid, orientation=grid.orientation)
-        delta = resample(
-            Image(
-                delta,
-                speckle_grid,
-                (),
-                "per_pixel",
-                "stellar_flux_fraction",
-                outside="reflect",
-            ),
-            grid,
-        ).data
-        # Preserve the existing positive excess-halo treatment, without changing
-        # the speckle evolution model or subtracting its epoch a second time.
-        leakage = leakage + jnp.maximum(delta, 0.0)
+        # The field owns its native lod grid, Frame, reconstruction and
+        # extension; its clock subtracts its own epoch. The excess is signed
+        # (coherent interference can lower the floor); only the total
+        # leakage is clipped at zero below.
+        leakage = leakage + onto_detector(
+            speckle.realize(wavelength_nm=wavelength_nm, time_d=time_d)
+        )
     leakage = gain * phi_star * jnp.maximum(leakage, 0.0)
 
     planet = jnp.zeros(grid.shape)

@@ -1,4 +1,4 @@
-"""Positive time-dependent speckle excess in the stellar leakage budget."""
+"""Signed time-dependent speckle excess in the stellar leakage budget."""
 
 import equinox as eqx
 import jax
@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 from conftest import centroid, make_path, make_system
 from hwoutils.epoch import Epoch
-from hwoutils.grids import PixelGrid, SkyOrientation
+from hwoutils.grids import Frame, Image, PixelGrid, SkyOrientation
 from hwoutils.spectral import Band
 from optixstuff import AbstractSpeckleField
 from skyscapes.scene import Star
@@ -17,15 +17,27 @@ from coronagraphoto import image_rates
 class Halo(AbstractSpeckleField):
     """A finite halo evolving in days, on its own instrumental grid."""
 
-    pixel_scale_lod: float = 0.5
+    grid: PixelGrid = eqx.field(
+        static=True,
+        default=PixelGrid.focal(8, 0.5, Frame(550.0, 6.0, "circumscribed")),
+    )
     epoch_d: float = 3.0
+    level: float = 1.5
 
     def realize(self, *, wavelength_nm, time_d=0.0):
         """A time-dependent flux fraction per native pixel."""
-        return (
+        data = (
             jnp.zeros((8, 8))
             .at[5, 6]
-            .set(64e-10 * (0.5 + jnp.cos(time_d - self.epoch_d)))
+            .set(64e-10 * (self.level + jnp.cos(time_d - self.epoch_d)))
+        )
+        return Image(
+            data,
+            self.grid,
+            (),
+            "per_pixel",
+            "stellar_flux_fraction",
+            outside="reflect",
         )
 
 
@@ -46,7 +58,7 @@ def test_speckle_leakage_day_clock():
     bands = (Band(549.5, 550.5),)
     options = dict(quadrature_order=1)
     snapshots = []
-    for time, factor in ((3.0, 1.5), (3.0 + np.pi, 0.0)):
+    for time, factor in ((3.0, 2.5), (3.0 + np.pi, 0.5)):
         base = image_rates(
             system, path, bands, time_d=time, pointing=SkyOrientation(0), **options
         )
@@ -106,6 +118,29 @@ def test_speckle_leakage_day_clock():
         ):
             # Rebased cubic interpolation/orbits incur roundoff; 1e-10 relative.
             np.testing.assert_allclose(a, b, rtol=1e-10, atol=1e-18)
+
+    # A signed excess lowers the floor without clipping the total: -0.01 of
+    # the halo spreads to at most ~2e-11 per detector pixel, under the 6.25e-11
+    # fixture floor. Fails if the excess itself is clipped at zero. The sum
+    # cancels against a floor ~250 times larger: 1e-10 relative.
+    base = image_rates(
+        system, path, bands, time_d=3.0, pointing=SkyOrientation(0), **options
+    )
+    dimmed = image_rates(
+        system,
+        path,
+        bands,
+        time_d=3.0,
+        pointing=SkyOrientation(0),
+        speckle=Halo(level=-1.01),
+        **options,
+    )
+    phi = system.star.photon_flux_density(550.0, 3.0, dist_pc=10.0)
+    np.testing.assert_allclose(
+        (dimmed.star_leakage - base.star_leakage).sum(),
+        40 * 0.4 * phi * 64e-10 * -0.01,
+        rtol=1e-10,
+    )
 
     vectorized = jax.vmap(
         lambda t: image_rates(
