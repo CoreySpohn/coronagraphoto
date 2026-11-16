@@ -32,10 +32,11 @@ class Halo(AbstractSpeckleField):
 def test_speckle_leakage_day_clock():
     """Fails on epoch subtraction twice, wrong units or dead path wiring.
 
-    Summed halo flux is conserved by covering coarsening grids: 64 eps.
-    Roll must not rotate this instrumental contribution.
+    Over exactly one reflected halo footprint the linear reconstruction
+    conserves its native flux at 2:1 sampling, to 64 eps. A larger detector
+    would include reflected replicas. Roll cannot rotate this instrumental halo.
     """
-    path = make_path()
+    path = make_path(detector_n=16)
     wave = jnp.array([400.0, 500.0, 600.0, 700.0])
     times = jnp.array([-10.0, 20.0])
     flux = jnp.array([[1.0, 3.0]] * 4)

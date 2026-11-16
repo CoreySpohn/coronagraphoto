@@ -99,7 +99,15 @@ def _node_rates(
             ).to_arcsec(wavelength_nm)
             speckle_grid = replace(speckle_grid, orientation=grid.orientation)
         delta = resample(
-            Image(delta, speckle_grid, (), "per_pixel", "stellar_flux_fraction"), grid
+            Image(
+                delta,
+                speckle_grid,
+                (),
+                "per_pixel",
+                "stellar_flux_fraction",
+                outside="reflect",
+            ),
+            grid,
         ).data
         # Preserve the existing positive excess-halo treatment, without changing
         # the speckle evolution model or subtracting its epoch a second time.
@@ -134,11 +142,22 @@ def _node_rates(
     if system.disk is not None:
         radiance = system.photon_radiance(wavelength_nm, time_d, grid=grid)
         scene = Image(
-            radiance.data * omega_sr, grid, (), "per_pixel", "ph s^-1 m^-2 nm^-1"
+            radiance.data * omega_sr,
+            grid,
+            (),
+            "per_pixel",
+            "ph s^-1 m^-2 nm^-1",
+            reconstruction="linear",
         )
         scene = replace(resample(scene, angular), grid=native)
+        # Convolution with the band-limited PSF band-limits the output. A finite
+        # scene is zero outside; a nonzero extension follows the input scene.
         disk = gain * onto_detector(
-            coro.extended_scene(scene, wavelength_nm, grid=native)
+            replace(
+                coro.extended_scene(scene, wavelength_nm, grid=native),
+                reconstruction="band_limited",
+                outside=scene.outside,
+            )
         )
     zero = jnp.zeros(grid.shape)
     return PhotonRates(planet, leakage, local, disk, zero, zero)
@@ -151,6 +170,7 @@ def _reader(
     time_d,
     pointing,
     quadrature_order,
+    quadrature,
     zodi,
     speckle,
     ecliptic_latitude_deg,
@@ -159,7 +179,10 @@ def _reader(
     """Prepare static node geometry and solve the orbit once per observation."""
     grid = _detector_grid(optical_path, pointing)
     with jax.ensure_compile_time_eval():
-        quadrature = Quadrature.build(bands, None, quadrature_order)
+        if quadrature is None:
+            quadrature = Quadrature.build(bands, None, quadrature_order)
+        if quadrature.nodes_nm.shape[0] != len(bands):
+            raise ValueError("quadrature must have one row per band")
         nodes = np.asarray(quadrature.nodes_nm).ravel()
     ephemeris, positions = None, None
     if system.planets:
@@ -195,6 +218,7 @@ def image_rates(
     time_d,
     pointing: SkyOrientation,
     quadrature_order: int = 4,
+    quadrature: Quadrature | None = None,
     zodi: Zodi | None = None,
     speckle: AbstractSpeckleField | None = None,
     ecliptic_latitude_deg=0.0,
@@ -202,11 +226,12 @@ def image_rates(
 ) -> PhotonRates:
     """Return full (W,Q,ny,nx) photon integrands, in photons/s/nm/pixel.
 
-    Use Quadrature.build(bands, None, quadrature_order) to integrate this
-    record. The rule is unsplit Gauss-Legendre: subdivide bands at spectral
-    breaks and increase order to resolve spectral structure. No QE or survival
-    is applied. zodi=None disables local zodi; speckle=None uses the path's
-    optional speckle field. Thermal and companion terms are zero.
+    Pass a host-prepared quadrature to share nodes and weights with other
+    readers; otherwise use Quadrature.build(bands, None, quadrature_order)
+    to integrate this record. The default is unsplit Gauss-Legendre: subdivide
+    bands at spectral breaks and increase order to resolve spectral structure.
+    No QE or survival is applied. zodi=None disables local zodi; speckle=None
+    uses the path's optional speckle field. Thermal and companion terms are zero.
     """
     grid, quadrature, branches = _reader(
         system,
@@ -215,6 +240,7 @@ def image_rates(
         time_d,
         pointing,
         quadrature_order,
+        quadrature,
         zodi,
         speckle,
         ecliptic_latitude_deg,
@@ -236,6 +262,7 @@ def image_electrons(
     time_d,
     pointing: SkyOrientation,
     quadrature_order: int = 4,
+    quadrature: Quadrature | None = None,
     zodi: Zodi | None = None,
     speckle: AbstractSpeckleField | None = None,
     ecliptic_latitude_deg=0.0,
@@ -243,6 +270,8 @@ def image_electrons(
 ) -> ElectronRates:
     """Stream nodes into (W,ny,nx) electrons/s with detector-owned yield.
 
+    quadrature, when supplied, owns the nodes and weights and supersedes
+    quadrature_order. Close over this host-prepared geometry under JIT.
     Each scan step wraps one photon image in (1,1,ny,nx), passes its one-node
     Quadrature to detector.electrons, and adds that result to its band. No
     node images are stacked. Static-grid branches grow compile size with Q;
@@ -256,6 +285,7 @@ def image_electrons(
         time_d,
         pointing,
         quadrature_order,
+        quadrature,
         zodi,
         speckle,
         ecliptic_latitude_deg,
@@ -295,6 +325,7 @@ def observe(
     time_d,
     pointing: SkyOrientation,
     quadrature_order: int = 4,
+    quadrature: Quadrature | None = None,
     zodi: Zodi | None = None,
     speckle: AbstractSpeckleField | None = None,
     ecliptic_latitude_deg=0.0,
@@ -312,6 +343,7 @@ def observe(
         time_d=time_d,
         pointing=pointing,
         quadrature_order=quadrature_order,
+        quadrature=quadrature,
         zodi=zodi,
         speckle=speckle,
         ecliptic_latitude_deg=ecliptic_latitude_deg,

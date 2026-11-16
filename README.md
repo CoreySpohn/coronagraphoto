@@ -56,9 +56,10 @@ to combine terms. Optical throughput excludes detector yield. Only
 
 `image_electrons` scans nodes and accumulates band images, holding one node's
 images at a time. `image_rates` retains all nodes for inspection and small
-problems. Both use `Quadrature.build(bands, None, quadrature_order)`, with
-Gauss-Legendre order 4 by default. Split bands at spectral discontinuities
-and increase order until the desired quantities converge.
+problems. Pass `quadrature=` to share host-prepared nodes and weights with
+another reader. Otherwise both use `Quadrature.build(bands, None,
+quadrature_order)`, with Gauss-Legendre order 4 by default. Split bands at
+spectral discontinuities and increase order until the desired quantities converge.
 
 ## Quick start
 

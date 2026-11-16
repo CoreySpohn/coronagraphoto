@@ -6,7 +6,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import PlateauCoronagraph, make_path, make_system
+from conftest import GaussianCoronagraph, PlateauCoronagraph, make_path, make_system
 from hwoutils.constants import arcsec2rad
 from hwoutils.grids import Image, PixelGrid, SkyOrientation
 from hwoutils.spectral import Band
@@ -20,9 +20,18 @@ from coronagraphoto import image_rates
 def test_aperture_closure_two_samplings():
     """Fails on area/unit/throughput errors in any of the four image terms.
 
-    Exact plateau integrals isolate radiometry. Each sampling must agree
-    with the record within half the two-sampling absolute gap plus 1e-9
-    photons/s/nm. This is closure, not a convergence-order claim.
+    Planet/leakage/zodi retain exact plateau integrals. A finite uniform
+    disk convolved with the square PSF is a separable tapered map, not a
+    global plateau. Along each native axis h[j] is the sum of the square's
+    unit interior and half boundary weights over source pixels, weighted
+    by their deposited flux. Linear sky sampling and native deposition give
+    that source vector as (detector_step/native_step)*W.T@W@ones, where W
+    is the triangular interpolation kernel; at 2:1 its edge entries are
+    25/32, not one. The 2-D map is f*.3/16*step**2*h[y]*h[x].
+    Zero-extended band-limited pixel
+    integration multiplies each Fourier mode by sinc(frequency*pixel_width).
+    The independently integrated separable DFT supplies the disk oracle;
+    256 eps relative allows FFT, contraction and weighted-sum rounding.
     """
     coro = PlateauCoronagraph(n=32, step=0.25, cube=True)
     lod_arcsec = float(coro.grid.frame.lod_to_arcsec(550.0))
@@ -59,7 +68,7 @@ def test_aperture_closure_two_samplings():
             ]
         )
     )
-    measured = []
+    measured, references = [], []
     for n, step in ((32, 0.25), (64, 0.125)):
         path = make_path(n=32, step=0.25, detector_n=n, detector_step=step)
         path = eqx.tree_at(lambda p: p.coronagraph, path, coro)
@@ -77,6 +86,33 @@ def test_aperture_closure_two_samplings():
             rates.planet[0, 0], aperture_grid, (), "per_pixel", "stellar_flux_fraction"
         )
         weights = rule.weights(psf, (0.5, 0.0))
+        # Independent finite-source convolution and exact Fourier pixel integrals.
+        delta = (np.arange(32)[:, None] - np.arange(32)[None, :]) * 0.25
+        sky_positions = (np.arange(n) - (n - 1) / 2) * step / 0.25 + 15.5
+        linear = np.maximum(1 - abs(sky_positions[:, None] - np.arange(32)), 0)
+        source = step / 0.25 * linear.T @ linear @ np.ones(32)
+        h = ((abs(delta) < 2) + 0.5 * (abs(delta) == 2)) @ source
+        padded = np.pad(h, (16, 16))
+        frequencies = np.fft.fftfreq(len(padded))
+        target = (np.arange(n) - (n - 1) / 2) * step / 0.25 + 15.5 + 16
+        basis = np.exp(2j * np.pi * target[:, None] * frequencies)
+        integrated = (
+            basis @ (np.fft.fft(padded) * np.sinc(frequencies * step / 0.25))
+        ).real / len(padded)
+        disk_pixels = (
+            40
+            * 0.4
+            * phi_s
+            * 1e-10
+            * 0.3
+            / 16
+            * step**2
+            * integrated[:, None]
+            * integrated[None, :]
+        )
+        sample_reference = reference.copy()
+        sample_reference[3] = np.sum(disk_pixels * np.asarray(weights))
+        references.append(sample_reference)
         measured.append(
             np.array(
                 [
@@ -96,17 +132,32 @@ def test_aperture_closure_two_samplings():
         "gap",
         gap,
     )
-    for sample in measured:
-        np.testing.assert_array_less(abs(sample - reference), gap / 2 + 1e-9)
+    for sample, sample_reference in zip(measured, references, strict=True):
+        np.testing.assert_allclose(
+            sample, sample_reference, rtol=256 * np.finfo(float).eps, atol=0
+        )
 
 
 def test_extended_scene_equals_pixel_center_source():
     """Fails on an even-grid half-pixel offset or silent missing-cube fallback.
 
-    Native-grid delta contraction equals direct Gaussian at 64 eps of peak;
-    a half-native-pixel source shift differs by >.05 of peak.
+    A one-pixel scene contracts to its point PSF before reconstruction.
+    Both outputs then integrate the same zero-extended band-limited density
+    over detector pixels, so equality holds to 64 eps of peak. Declaring the
+    point PSF linear would compare different continuous images. A source
+    shift of half a native pixel differs by >.05 of peak.
     """
-    path = make_path(n=20, step=0.3, cube=True)
+
+    class BandLimitedGaussian(GaussianCoronagraph):
+        def create_psfs(self, x_lod, y_lod):
+            return replace(
+                super().create_psfs(x_lod, y_lod), reconstruction="band_limited"
+            )
+
+    path = make_path(n=20, step=0.3)
+    path = eqx.tree_at(
+        lambda p: p.coronagraph, path, BandLimitedGaussian(n=20, step=0.3, cube=True)
+    )
     grid = PixelGrid.regular(
         (20, 20),
         float(path.detector.pixel_scale_arcsec),

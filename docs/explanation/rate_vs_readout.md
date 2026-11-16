@@ -1,10 +1,12 @@
 # Photon rates, electron rates and observations
 
 `image_rates(system, optical_path, bands, *, time_d, pointing,
-quadrature_order=4, zodi=None, speckle=None, ecliptic_latitude_deg=0.0,
-solar_longitude_deg=135.0)` returns `PhotonRates`. Each field is an integrand
+quadrature_order=4, quadrature=None, zodi=None, speckle=None,
+ecliptic_latitude_deg=0.0, solar_longitude_deg=135.0)` returns `PhotonRates`. Each field is an integrand
 in photons/s/nm/pixel with shape `(W,Q,ny,nx)`. Integrate it with
-`rates.integrate(Quadrature.build(bands, None, quadrature_order))` for photons/s.
+`rates.integrate(quadrature)` for photons/s when a shared quadrature is supplied;
+otherwise use `Quadrature.build(bands, None, quadrature_order)`. Supplied nodes
+and weights supersede `quadrature_order` and must be prepared before tracing.
 
 `image_electrons` takes exactly the same arguments and returns `ElectronRates`
 in electrons/s/pixel, shape `(W,ny,nx)`. It applies the detector's yield at
@@ -43,13 +45,14 @@ Stored disks keep their native sky geometry. Parametric disks use
 ## Spectral and spatial sampling
 
 Bands are positive `hwoutils.spectral.Band` intervals in nm. The reader uses
-an unsplit Gauss-Legendre rule; supply band boundaries at sharp spectral
-breaks and test convergence in `quadrature_order`. The photon record does not
+a supplied quadrature or an unsplit Gauss-Legendre rule; place boundaries at
+sharp spectral breaks and test convergence in `quadrature_order`. The photon record does not
 include integration weights. Their nm unit enters exactly once in integration.
 
 At each node, native coronagraph products are converted with their `Frame`
-and resampled with `hwoutils.grids.resample`. PSFs and leakage conserve pixel
-flux under covering coarsening; background transmission preserves sampled
-amplitude. Cropping and interpolation can lose flux and must be included in
-an image's numerical error budget. Disk radiance is multiplied by pixel solid
-angle in sr once before extended-scene propagation.
+and resampled with `hwoutils.grids.resample`, honouring each input Image's
+reconstruction declaration. Disk radiance uses linear reconstruction and is
+multiplied by pixel solid angle in sr once before extended-scene propagation.
+Convolution with the band-limited PSF produces a band-limited image. Speckle
+samples and noisy detector draws retain the default reconstruction. Cropping
+and discretization must be included in an image's numerical error budget.
