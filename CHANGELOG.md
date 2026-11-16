@@ -18,6 +18,17 @@
 - Require `orbix>=3.0.0` and `skyscapes>=2.1.0` for consistent sky coordinates
   and FITS-oriented disk images.
 
+## [5.0.0](https://github.com/CoreySpohn/coronagraphoto/compare/v4.2.0...v5.0.0) (2026-11-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* **simulation:** one scene ephemeris per exposure; times are days from the scene epoch
+
+### Features
+
+* **simulation:** one scene ephemeris per exposure; times are days from the scene epoch ([d12e549](https://github.com/CoreySpohn/coronagraphoto/commit/d12e54947b5c5fa967f8d2ab68b5f52e71836499))
+
 ## [4.2.0](https://github.com/CoreySpohn/coronagraphoto/compare/v4.1.0...v4.2.0) (2026-11-05)
 
 
