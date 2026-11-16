@@ -1,16 +1,17 @@
 """Per-pixel readers of the shared photon and electron rate budgets.
 
 Arrays are (band, node, y, x) for photons/s/nm and (band, y, x) for
-band-integrated electrons/s. Geometry is concrete host metadata. Close over
-instrument geometry, bands and pointing when applying JAX transformations;
-scene parameters and observation time can be traced. A roll changes the
+band-integrated electrons/s. Geometry is concrete host metadata; readers cache
+compiled kernels for each static configuration. Optical paths and scenes can
+be arguments of JAX transformations. A roll changes the
 position angle of detector +y, north through east, in SkyOrientation.
 """
 
 from collections.abc import Sequence
 from dataclasses import replace
-from functools import partial
+from functools import lru_cache, partial
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -31,7 +32,7 @@ def _detector_grid(optical_path, pointing):
     with jax.ensure_compile_time_eval():
         return PixelGrid.regular(
             optical_path.detector.shape,
-            float(optical_path.detector.pixel_scale_arcsec),
+            optical_path.detector.pixel_scale_arcsec,
             "arcsec",
             orientation=pointing,
         )
@@ -177,6 +178,13 @@ def _reader(
     with jax.ensure_compile_time_eval():
         if quadrature is None:
             quadrature = Quadrature.build(bands, None, quadrature_order)
+        else:
+            quadrature = Quadrature(
+                *(
+                    jnp.asarray(np.frombuffer(data, dtype=dtype).reshape(shape))
+                    for shape, dtype, data in quadrature
+                )
+            )
         if quadrature.nodes_nm.shape[0] != len(bands):
             raise ValueError("quadrature must have one row per band")
         nodes = np.asarray(quadrature.nodes_nm).ravel()
@@ -206,6 +214,149 @@ def _reader(
     return grid, quadrature, branches
 
 
+def _kernel_arguments(
+    system,
+    optical_path,
+    bands,
+    time_d,
+    pointing,
+    quadrature_order,
+    quadrature,
+    zodi,
+    speckle,
+    ecliptic_latitude_deg,
+    solar_longitude_deg,
+):
+    """Freeze host quadrature by value and keep observation scalars dynamic."""
+    if quadrature is not None:
+        if any(isinstance(x, jax.core.Tracer) for x in jax.tree.leaves(quadrature)):
+            raise ValueError(
+                "quadrature must be concrete host geometry; close over it under JIT"
+            )
+        quadrature = tuple(
+            (a.shape, a.dtype.str, a.tobytes())
+            for a in map(np.asarray, (quadrature.nodes_nm, quadrature.weights_nm))
+        )
+    return (
+        system,
+        optical_path,
+        tuple(bands),
+        jnp.asarray(time_d),
+        pointing,
+        quadrature_order,
+        quadrature,
+        zodi,
+        speckle,
+        jnp.asarray(ecliptic_latitude_deg),
+        jnp.asarray(solar_longitude_deg),
+    )
+
+
+def _image_impl(
+    system,
+    optical_path,
+    bands,
+    time_d,
+    pointing,
+    quadrature_order,
+    quadrature,
+    zodi,
+    speckle,
+    ecliptic_latitude_deg,
+    solar_longitude_deg,
+    *,
+    kind,
+):
+    """Render one configuration with array leaves supplied at runtime."""
+    grid, quadrature, branches = _reader(
+        system,
+        optical_path,
+        bands,
+        time_d,
+        pointing,
+        quadrature_order,
+        quadrature,
+        zodi,
+        speckle,
+        ecliptic_latitude_deg,
+        solar_longitude_deg,
+    )
+    if kind == "photons":
+        values = jax.lax.map(
+            lambda i: jax.lax.switch(i, branches), jnp.arange(len(branches))
+        )
+        return jax.tree.map(
+            lambda x: x.reshape((*quadrature.nodes_nm.shape, *grid.shape)), values
+        )
+
+    n_bands, n_nodes = quadrature.nodes_nm.shape
+    initial = ElectronRates(
+        **{
+            name: jnp.zeros((n_bands, *grid.shape))
+            for name in PhotonRates.__dataclass_fields__
+        }
+    )
+
+    def accumulate(total, index):
+        photons = jax.lax.switch(index, branches)
+        photons = jax.tree.map(lambda x: x[None, None], photons)
+        single = Quadrature(
+            quadrature.nodes_nm.reshape(-1)[index].reshape(1, 1),
+            quadrature.weights_nm.reshape(-1)[index].reshape(1, 1),
+        )
+        electrons = optical_path.detector.electrons(photons, single)
+        total = jax.tree.map(
+            lambda a, b: a.at[index // n_nodes].add(b[0]), total, electrons
+        )
+        return total, None
+
+    electrons = jax.lax.scan(accumulate, initial, jnp.arange(len(branches)))[0]
+    return electrons
+
+
+def _draw_impl(detector, key, electrons, plan):
+    """Stage detector noise separately so observations share the renderer."""
+    return detector.draw(key, electrons, plan)
+
+
+@lru_cache(maxsize=4)
+def _cached_image_kernel(function, treedef, static_leaves, signature):
+    """Own at most four eager JIT functions, including shape/dtype variants."""
+    static = jax.tree.unflatten(treedef, static_leaves)
+
+    def run(dynamic):
+        args, kwargs = eqx.combine(dynamic, static)
+        return function(*args, **kwargs)
+
+    # Only arrays are passed to jit; host metadata is in the bounded closure.
+    # A separate function per entry lets eviction release its JAX cache too.
+    return jax.jit(run)
+
+
+def _image_kernel(*args, _function=_image_impl, **kwargs):
+    """Reuse eager kernels; let caller transformations own their staging cache."""
+    dynamic, static = eqx.partition((args, kwargs), eqx.is_array)
+    arrays = jax.tree.leaves(dynamic)
+    if any(isinstance(a, jax.core.Tracer) for a in arrays):
+        return _function(*args, **kwargs)
+    static_leaves, treedef = jax.tree.flatten(static)
+    signature = tuple(
+        (a.shape, a.dtype, getattr(a, "weak_type", False)) for a in arrays
+    )
+    return _cached_image_kernel(_function, treedef, tuple(static_leaves), signature)(
+        dynamic
+    )
+
+
+def clear_reader_cache():
+    """Release all eager reader kernels; the next eager call compiles again.
+
+    Caller-owned JIT executables and live output arrays are unaffected. JAX
+    and the system allocator can retain memory after executable release.
+    """
+    _cached_image_kernel.cache_clear()
+
+
 def image_rates(
     system: System,
     optical_path: OpticalPath,
@@ -229,24 +380,21 @@ def image_rates(
     No QE or survival is applied. zodi=None disables local zodi; speckle=None
     uses the path's optional speckle field. Thermal and companion terms are zero.
     """
-    grid, quadrature, branches = _reader(
-        system,
-        optical_path,
-        bands,
-        time_d,
-        pointing,
-        quadrature_order,
-        quadrature,
-        zodi,
-        speckle,
-        ecliptic_latitude_deg,
-        solar_longitude_deg,
-    )
-    values = jax.lax.map(
-        lambda i: jax.lax.switch(i, branches), jnp.arange(len(branches))
-    )
-    return jax.tree.map(
-        lambda x: x.reshape((*quadrature.nodes_nm.shape, *grid.shape)), values
+    return _image_kernel(
+        *_kernel_arguments(
+            system,
+            optical_path,
+            bands,
+            time_d,
+            pointing,
+            quadrature_order,
+            quadrature,
+            zodi,
+            speckle,
+            ecliptic_latitude_deg,
+            solar_longitude_deg,
+        ),
+        kind="photons",
     )
 
 
@@ -267,48 +415,30 @@ def image_electrons(
     """Stream nodes into (W,ny,nx) electrons/s with detector-owned yield.
 
     quadrature, when supplied, owns the nodes and weights and supersedes
-    quadrature_order. Close over this host-prepared geometry under JIT.
+    quadrature_order. Its arrays become a static key by value; close over
+    this host-prepared geometry under JIT. OpticalPath may be an argument.
     Each scan step wraps one photon image in (1,1,ny,nx), passes its one-node
     Quadrature to detector.electrons, and adds that result to its band. No
     node images are stacked. Static-grid branches grow compile size with Q;
     forward image storage is the band accumulator plus one node's images.
     JAX reverse-mode may retain residuals for differentiation.
     """
-    grid, quadrature, branches = _reader(
-        system,
-        optical_path,
-        bands,
-        time_d,
-        pointing,
-        quadrature_order,
-        quadrature,
-        zodi,
-        speckle,
-        ecliptic_latitude_deg,
-        solar_longitude_deg,
+    return _image_kernel(
+        *_kernel_arguments(
+            system,
+            optical_path,
+            bands,
+            time_d,
+            pointing,
+            quadrature_order,
+            quadrature,
+            zodi,
+            speckle,
+            ecliptic_latitude_deg,
+            solar_longitude_deg,
+        ),
+        kind="electrons",
     )
-    n_bands, n_nodes = quadrature.nodes_nm.shape
-    initial = ElectronRates(
-        **{
-            name: jnp.zeros((n_bands, *grid.shape))
-            for name in PhotonRates.__dataclass_fields__
-        }
-    )
-
-    def accumulate(total, index):
-        photons = jax.lax.switch(index, branches)
-        photons = jax.tree.map(lambda x: x[None, None], photons)
-        single = Quadrature(
-            quadrature.nodes_nm.reshape(-1)[index].reshape(1, 1),
-            quadrature.weights_nm.reshape(-1)[index].reshape(1, 1),
-        )
-        electrons = optical_path.detector.electrons(photons, single)
-        total = jax.tree.map(
-            lambda a, b: a.at[index // n_nodes].add(b[0]), total, electrons
-        )
-        return total, None
-
-    return jax.lax.scan(accumulate, initial, jnp.arange(len(branches)))[0]
 
 
 def observe(
@@ -346,7 +476,9 @@ def observe(
         solar_longitude_deg=solar_longitude_deg,
     )
     return Image(
-        optical_path.detector.draw(key, electrons, plan),
+        _image_kernel(
+            optical_path.detector, key, electrons, plan, _function=_draw_impl
+        ),
         _detector_grid(optical_path, pointing),
         ("band",),
         "per_pixel",
