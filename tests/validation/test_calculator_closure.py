@@ -77,7 +77,7 @@ def closure(tmp_path_factory):
     bands = (Band(500.0, 550.0), Band(550.0, 600.0))
     zodi = PrecomputedZodi(jnp.array([500.0, 600.0]), jnp.full(2, 1e12))
     pointing, time_d = SkyOrientation(0.0), 0.0
-    q = je.aperture_quadrature(system, base, bands, zodi=zodi)
+    q = je.aperture_quadrature(system, base, bands, zodi=zodi, exozodi="scene")
     image_q = Quadrature.build(bands, None, 4)
     prepared = je.prepare_aperture(base, bands, q, rule=rule)
     # Both readers use this host-prepared rule and exactly these spectral nodes.
@@ -95,6 +95,7 @@ def closure(tmp_path_factory):
         quadrature=q,
         prepared_aperture=prepared,
         zodi=zodi,
+        exozodi="scene",
     )
     calculator = base.detector.electrons(rates, q)
     expected = np.stack([np.asarray(getattr(calculator, name)) for name in TERMS])
@@ -250,6 +251,7 @@ def closure(tmp_path_factory):
                 quadrature=q,
                 prepared_aperture=prepared,
                 zodi=zodi,
+                exozodi="scene",
             )
             doubled_images = image_electrons(
                 doubled,
