@@ -200,6 +200,40 @@ class TestAlgorithmicConservation:
 # =============================================================================
 
 
+def _two_body_position_AU(
+    time_d, *, a_AU, e, W_rad, i_rad, w_rad, M0_rad, epoch_d, mu_AU3_per_d2
+):
+    """Independent float64 Kepler reference in the (east, north, away) frame."""
+    a, ecc, node, inc, peri, mean0, epoch, mu = np.asarray(
+        [a_AU, e, W_rad, i_rad, w_rad, M0_rad, epoch_d, mu_AU3_per_d2],
+        dtype=np.float64,
+    )
+    mean = (
+        mean0 + np.sqrt(mu / a**3) * (np.asarray(time_d, dtype=np.float64) - epoch)
+    ) % (2 * np.pi)
+    eccentric = np.full_like(mean, np.pi) if ecc >= 0.8 else mean.copy()
+    for _ in range(100):
+        step = (eccentric - ecc * np.sin(eccentric) - mean) / (
+            1 - ecc * np.cos(eccentric)
+        )
+        eccentric -= step
+        if np.all(np.abs(step) < 1e-14):
+            break
+    else:
+        raise RuntimeError("Kepler reference did not converge to 1e-14 radians")
+
+    x = a * (np.cos(eccentric) - ecc)
+    y = a * np.sqrt(1 - ecc**2) * np.sin(eccentric)
+    # Rotate the perifocal plane by periapsis, inclination, then node.
+    # The node is measured north through east; positive z points away.
+    along_node = np.cos(peri) * x - np.sin(peri) * y
+    across_node = np.sin(peri) * x + np.cos(peri) * y
+    east = np.sin(node) * along_node + np.cos(node) * np.cos(inc) * across_node
+    north = np.cos(node) * along_node - np.sin(node) * np.cos(inc) * across_node
+    away = np.sin(inc) * across_node
+    return np.stack([east, north, away], axis=-1)
+
+
 class TestOrbitalMechanics:
     """Tier 7: Verify planets obey Kepler's Laws."""
 
@@ -220,30 +254,23 @@ class TestOrbitalMechanics:
 
     def test_circular_orbit_constant_radius(self):
         """A circular orbit should maintain constant angular separation."""
-        from orbix.kepler.shortcuts.grid import get_grid_solver
-        from orbix.orbit import KeplerianOrbit
-
-        orbit = KeplerianOrbit(
-            a_AU=jnp.array([1.0]),
-            e=jnp.array([0.0]),
-            i_rad=jnp.array([0.0]),
-            W_rad=jnp.array([0.0]),
-            w_rad=jnp.array([0.0]),
-            M0_rad=jnp.array([0.0]),
-            t0_d=jnp.array([0.0]),
+        times = np.array([0.0, 91.3, 182.6, 273.9], dtype=np.float64)
+        position_AU = _two_body_position_AU(
+            times,
+            a_AU=1.0,
+            e=0.0,
+            W_rad=0.0,
+            i_rad=0.0,
+            w_rad=0.0,
+            M0_rad=0.0,
+            epoch_d=0.0,
+            mu_AU3_per_d2=const.G * const.Msun2kg,
         )
-        solver = get_grid_solver(level="scalar", E=False, trig=True, jit=True)
-
-        times = jnp.array([0.0, 91.3, 182.6, 273.9])
-        seps = []
-        for t in times:
-            alpha = orbit.separation_arcsec(
-                solver,
-                jnp.atleast_1d(t),
-                Ms_kg=jnp.atleast_1d(const.Msun2kg),
-                dist_pc=jnp.atleast_1d(10.0),
-            )
-            seps.append(float(alpha[0, 0]))
+        seps = (
+            np.hypot(position_AU[:, 0], position_AU[:, 1])
+            * const.rad2arcsec
+            / (10.0 * const.pc2AU)
+        )
 
         assert np.std(seps) / np.mean(seps) < 0.01
 
