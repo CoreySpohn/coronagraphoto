@@ -42,15 +42,18 @@ def test_yip_image_absolute_photon_fraction(tmp_path, distinct_products):
     path = make_path(n=24, step=0.5, detector_n=28, detector_step=0.5)
     path = eqx.tree_at(lambda p: p.coronagraph, path, coro)
     # Exactly a measured source offset: 1 lod north at the reference wavelength.
-    stellar = coro.stellar_intens(0.1)
+    stellar = coro.stellar_map(550.0, 0.1, grid=None)
     star = FlatStar(
         flux_phot_per_nm_m2=1e6,
         diameter_arcsec=0.1 * stellar.grid.frame.lod_to_arcsec(550.0),
     )
     if distinct_products:
         star = BlackbodyStar(teff_K=5772.0, radius_m=6.957e8)
-        stellar = coro.stellar_intens(
-            star.diameter_arcsec(dist_pc=10.0) / stellar.grid.frame.lod_to_arcsec(550.0)
+        stellar = coro.stellar_map(
+            550.0,
+            star.diameter_arcsec(dist_pc=10.0)
+            / stellar.grid.frame.lod_to_arcsec(550.0),
+            grid=None,
         )
     phi_star = star.photon_flux_density(550.0, 0.0, dist_pc=10.0)
     system = make_system(

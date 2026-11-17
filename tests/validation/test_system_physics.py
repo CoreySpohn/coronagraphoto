@@ -149,9 +149,9 @@ def test_extended_scene_equals_pixel_center_source():
     """
 
     class BandLimitedGaussian(GaussianCoronagraph):
-        def create_psfs(self, x_lod, y_lod):
+        def _native_source_psfs(self, x_lod, y_lod):
             return replace(
-                super().create_psfs(x_lod, y_lod), reconstruction="band_limited"
+                super()._native_source_psfs(x_lod, y_lod), reconstruction="band_limited"
             )
 
     path = make_path(n=20, step=0.3)
@@ -181,9 +181,11 @@ def test_extended_scene_equals_pixel_center_source():
     a, b = np.asarray(rates.planet), np.asarray(rates.exozodi)
     np.testing.assert_allclose(a, b, atol=64 * np.finfo(float).eps * a.max(), rtol=0)
     native = path.coronagraph.grid
-    shifted = path.coronagraph.create_psfs(
+    shifted = path.coronagraph.source_psfs(
+        550.0,
         jnp.array([float(x) / float(native.frame.lod_to_arcsec(550.0)) + 0.15]),
         jnp.array([float(y) / float(native.frame.lod_to_arcsec(550.0))]),
+        grid=None,
     ).data
     correct = a[0] / (40 * 0.4 * 1e6 * flux_fraction)
     assert np.max(abs(shifted - correct)) / correct.max() > 0.05

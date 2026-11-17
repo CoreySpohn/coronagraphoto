@@ -59,7 +59,7 @@ def _node_rates(
     stellar_grid = native
     background_grid = native
     if isinstance(coro, AbstractTableCoronagraph):
-        stellar_grid = coro.stellar_intens(0.0).grid
+        stellar_grid = coro.stellar_map(wavelength_nm, 0.0, grid=None).grid
         background_grid = coro.sky_trans.grid
     with jax.ensure_compile_time_eval():
         angular = replace(native.to_arcsec(wavelength_nm), orientation=grid.orientation)

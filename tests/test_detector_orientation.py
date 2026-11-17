@@ -75,8 +75,11 @@ def test_cardinal_centroids(sky_pa, roll, expected):
             )
         positions = scene.positions(jnp.array([0.0]))
         lod_arcsec = path.coronagraph.grid.frame.lod_to_arcsec(550.0)
-        reference = path.coronagraph.create_psfs(
-            positions[1, :, 0] / lod_arcsec, positions[0, :, 0] / lod_arcsec
+        reference = path.coronagraph.source_psfs(
+            550.0,
+            positions[1, :, 0] / lod_arcsec,
+            positions[0, :, 0] / lod_arcsec,
+            grid=None,
         ).data
         reference = (
             40

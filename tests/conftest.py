@@ -114,13 +114,13 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
         )
         if cube:
             x, y = self.grid.coordinates()
-            self.psf_datacube = self.create_psfs(x.ravel(), y.ravel()).data.reshape(
-                n, n, n, n
-            )
+            self.psf_datacube = self.source_psfs(
+                550.0, x.ravel(), y.ravel(), grid=None
+            ).data.reshape(n, n, n, n)
         else:
             self.psf_datacube = None
 
-    def create_psfs(self, x_lod, y_lod):
+    def _native_source_psfs(self, x_lod, y_lod):
         """Integrate the sampled Gaussian with its stated native pixel area."""
         x, y = self.grid.coordinates()
         r2 = (x[None] - jnp.atleast_1d(x_lod)[:, None, None]) ** 2 + (
@@ -134,7 +134,7 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
         )
         return Image(data, self.grid, ("source",), "per_pixel", "stellar_flux_fraction")
 
-    def stellar_intens(self, stellar_diam_lod):
+    def _native_stellar_map(self, stellar_diam_lod):
         """Uniform leakage density with a resolved-diameter response."""
         return Image(
             jnp.full(self.grid.shape, 1e-9 * self.grid.pixel_area)
@@ -268,7 +268,7 @@ class PlateauCoronagraph(GaussianCoronagraph):
     of curved PSFs, tested by the Gaussian worked example.
     """
 
-    def create_psfs(self, x_lod, y_lod):
+    def _native_source_psfs(self, x_lod, y_lod):
         """Separable square with the trapezoidal convention on its boundary."""
         x, y = self.grid.coordinates()
         dx = jnp.abs(x[None] - jnp.atleast_1d(x_lod)[:, None, None])

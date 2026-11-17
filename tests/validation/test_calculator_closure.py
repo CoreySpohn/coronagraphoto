@@ -115,12 +115,14 @@ def closure(tmp_path_factory):
 
                 def offaxis(s):
                     # The record integrates native point-density samples.
-                    image = coro.create_psfs(jnp.array([s]), jnp.zeros(1))
+                    image = coro.source_psfs(
+                        550.0, jnp.array([s]), jnp.zeros(1), grid=None
+                    )
                     return replace(image, data=image.data[0], leading_axes=())
 
                 refined = _performance_curves(
                     offaxis,
-                    coro.stellar_intens(0.0),
+                    coro.stellar_map(550.0, 0.0, grid=None),
                     record.rule,
                     separations_lod=[separation],
                     oversample=oversample,
