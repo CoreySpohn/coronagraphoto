@@ -77,11 +77,13 @@ import numpy as np
 from hwoutils.constants import Mearth2kg, Msun2kg
 from hwoutils.epoch import Epoch
 from hwoutils.grids import Image, PixelGrid
+from hwoutils.spectral import Band
 from optixstuff import ConstantThroughput, Detector, OpticalPath, SimplePrimary
+from optixstuff.apertures import Circular
 from optixstuff.coronagraph import AbstractTableCoronagraph
+from optixstuff.performance import PerformanceCurves
 from skyscapes.physical_model import GridPhysicalModel
 from skyscapes.scene import FlatStar, Planet, Star, System
-from yippy import Circular, PerformanceCurves
 
 _RULE = Circular(0.7)
 
@@ -97,6 +99,7 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
     grid: PixelGrid = eqx.field(static=True)
     sky_trans: Image
     psf_datacube: object
+    bandpass: Band | None = None
     outer_working_angle_lod: object = None
     sigma_lod: float = 0.35
     chromatic: bool = eqx.field(static=True, default=False)

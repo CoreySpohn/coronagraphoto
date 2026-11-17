@@ -74,11 +74,12 @@ jax.config.update("jax_enable_x64", True)
 
 from hwoutils.grids import SkyOrientation
 from hwoutils.spectral import Band
-from optixstuff import FramePlan, OpticalPath, YippyCoronagraph
+from yippy import Coronagraph
+from optixstuff import FramePlan, OpticalPath
 from coronagraphoto import image_electrons, load_scene_from_exovista, observe
 
 scene = load_scene_from_exovista("scene.fits", load_disk=False)
-coronagraph = YippyCoronagraph("yip", ensure_psf_datacube=False)
+coronagraph = Coronagraph("yip")
 optical_path = OpticalPath.from_default_setup(
     coronagraph,
     circumscribed_diameter_m=6.0,

@@ -13,10 +13,11 @@ from conftest import make_path, make_system, write_yip
 from hwoutils.constants import arcsec2rad
 from hwoutils.grids import Image, PixelGrid, SkyOrientation
 from hwoutils.spectral import Band, Quadrature
-from optixstuff import Detector, ElectronRates, FramePlan, YippyCoronagraph
+from optixstuff import Detector, ElectronRates, FramePlan
+from optixstuff.apertures import Circular
+from optixstuff.performance import _performance_curves
 from skyscapes.disk import GraterDisk
-from yippy import Circular
-from yippy.performance import _performance_curves
+from yippy import Coronagraph
 from zodi import SurfaceBrightnessDust
 from zodi.jax import PrecomputedZodi
 
@@ -51,11 +52,10 @@ def closure(tmp_path_factory):
     lod, with nonzero curved wings. No response is mocked or renormalized.
     """
     rule = Circular(0.7)
-    coro = YippyCoronagraph(
+    coro = Coronagraph(
         write_yip(tmp_path_factory.mktemp("calculator-closure") / "yip"),
-        ensure_psf_datacube=True,
-        rule=rule,
-    )
+        rules=(rule,),
+    ).create_psf_datacube()
     base = eqx.tree_at(lambda p: p.coronagraph, make_path(), coro)
     scale = float(base.primary.frame(550.0).lod_to_arcsec(550.0))
     disk = GraterDisk(

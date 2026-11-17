@@ -1,5 +1,6 @@
 """YIP adapter integration using a small synthetic FITS package."""
 
+from copy import copy
 from dataclasses import replace
 
 import equinox as eqx
@@ -10,9 +11,8 @@ from conftest import make_path, make_system, write_yip
 from hwoutils.constants import arcsec2rad
 from hwoutils.grids import PixelGrid, SkyOrientation, resample
 from hwoutils.spectral import Band
-from optixstuff import YippyCoronagraph
 from skyscapes.scene import BlackbodyStar, FlatStar
-from yippy import Coronagraph, EqxCoronagraph
+from yippy import Coronagraph
 from zodi.jax import PrecomputedZodi
 
 from coronagraphoto import image_rates
@@ -30,15 +30,15 @@ def test_yip_image_absolute_photon_fraction(tmp_path, distinct_products):
     by clipping negative leakage to 64 eps of total absolute stellar flux;
     the nonnegative-rate guard must not hide finite-field ringing.
     """
-    host = Coronagraph(write_yip(tmp_path / "yip", distinct_products=distinct_products))
+    coro = Coronagraph(write_yip(tmp_path / "yip", distinct_products=distinct_products))
     if distinct_products:
-        # The legacy loader assigns the stellar header to the off-axis product.
-        # Restore its independent synthetic geometry before building the adapter.
-        host.offax.grid = make_path(n=24, step=0.5).coronagraph.grid
-        host.grid = host.offax.grid
-    coro = YippyCoronagraph(
-        backend=EqxCoronagraph(yippy_coro=host, ensure_psf_datacube=False)
-    )
+        # Restore the off-axis product's independent synthetic frame; the
+        # loader currently assigns it the stellar product's header frame.
+        offaxis = copy(coro._offaxis_backend)
+        offaxis.grid = make_path(n=24, step=0.5).coronagraph.grid
+        coro = eqx.tree_at(
+            lambda c: (c.grid, c._offaxis_backend), coro, (offaxis.grid, offaxis)
+        )
     path = make_path(n=24, step=0.5, detector_n=28, detector_step=0.5)
     path = eqx.tree_at(lambda p: p.coronagraph, path, coro)
     # Exactly a measured source offset: 1 lod north at the reference wavelength.

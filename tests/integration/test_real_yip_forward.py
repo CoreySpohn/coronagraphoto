@@ -7,7 +7,8 @@ import pytest
 from conftest import make_path, write_scene, write_yip
 from hwoutils.grids import SkyOrientation
 from hwoutils.spectral import Band
-from optixstuff import FramePlan, YippyCoronagraph
+from optixstuff import FramePlan
+from yippy import Coronagraph
 
 from coronagraphoto import image_electrons, load_scene_from_exovista, observe
 
@@ -22,7 +23,7 @@ def test_fits_scene_yip_observation(tmp_path):
     scene = load_scene_from_exovista(
         write_scene(tmp_path / "scene.fits"), load_disk=False
     )
-    coro = YippyCoronagraph(write_yip(tmp_path / "yip"), ensure_psf_datacube=False)
+    coro = Coronagraph(write_yip(tmp_path / "yip"))
     path = eqx.tree_at(lambda p: p.coronagraph, make_path(n=24, step=0.5), coro)
     bands = (Band(545.0, 555.0),)
     plan = FramePlan(10.0, 1.0)
