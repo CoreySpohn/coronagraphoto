@@ -21,8 +21,8 @@ from hwoutils.spectral import Band, Quadrature
 from optixstuff import ElectronRates, FramePlan, OpticalPath, PhotonRates
 from optixstuff.coronagraph import AbstractTableCoronagraph, MultiBandCoronagraph
 from optixstuff.speckle import AbstractSpeckleField
-from skyscapes.background import Zodi
 from skyscapes.scene import System
+from zodi.jax import AbstractLocalZodi
 
 
 def _detector_grid(optical_path, pointing):
@@ -366,7 +366,7 @@ def image_rates(
     pointing: SkyOrientation,
     quadrature_order: int = 4,
     quadrature: Quadrature | None = None,
-    zodi: Zodi | None = None,
+    zodi: AbstractLocalZodi | None = None,
     speckle: AbstractSpeckleField | None = None,
     ecliptic_latitude_deg=0.0,
     solar_longitude_deg=135.0,
@@ -407,7 +407,7 @@ def image_electrons(
     pointing: SkyOrientation,
     quadrature_order: int = 4,
     quadrature: Quadrature | None = None,
-    zodi: Zodi | None = None,
+    zodi: AbstractLocalZodi | None = None,
     speckle: AbstractSpeckleField | None = None,
     ecliptic_latitude_deg=0.0,
     solar_longitude_deg=135.0,
@@ -452,7 +452,7 @@ def observe(
     pointing: SkyOrientation,
     quadrature_order: int = 4,
     quadrature: Quadrature | None = None,
-    zodi: Zodi | None = None,
+    zodi: AbstractLocalZodi | None = None,
     speckle: AbstractSpeckleField | None = None,
     ecliptic_latitude_deg=0.0,
     solar_longitude_deg=135.0,

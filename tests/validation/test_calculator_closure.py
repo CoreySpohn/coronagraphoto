@@ -14,11 +14,11 @@ from hwoutils.constants import arcsec2rad
 from hwoutils.grids import Image, PixelGrid, SkyOrientation
 from hwoutils.spectral import Band, Quadrature
 from optixstuff import Detector, ElectronRates, FramePlan, YippyCoronagraph
-from skyscapes.background import PrecomputedZodi
 from skyscapes.disk import GraterDisk
 from yippy import Circular
 from yippy.performance import _performance_curves
 from zodi import SurfaceBrightnessDust
+from zodi.jax import PrecomputedZodi
 
 from coronagraphoto import image_electrons
 

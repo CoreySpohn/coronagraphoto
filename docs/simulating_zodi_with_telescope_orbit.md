@@ -11,7 +11,7 @@ For an existing system and optical path:
 from hwoutils.grids import SkyOrientation
 from hwoutils.spectral import Band
 from orbix.observatory import ObservatoryL2Halo
-from skyscapes.background import LeinertZodi
+from zodi.jax import LeinertZodi
 from coronagraphoto import image_electrons
 
 observer = ObservatoryL2Halo.from_default(equinox_mjd=60575.25)

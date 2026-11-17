@@ -10,9 +10,9 @@ from conftest import GaussianCoronagraph, PlateauCoronagraph, make_path, make_sy
 from hwoutils.constants import arcsec2rad
 from hwoutils.grids import Image, PixelGrid, SkyOrientation
 from hwoutils.spectral import Band
-from skyscapes.background import PrecomputedZodi
 from skyscapes.disk import ExovistaDisk
 from yippy import Circular
+from zodi.jax import PrecomputedZodi
 
 from coronagraphoto import image_rates
 

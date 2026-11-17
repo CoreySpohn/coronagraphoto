@@ -11,9 +11,9 @@ from hwoutils.constants import arcsec2rad
 from hwoutils.grids import PixelGrid, SkyOrientation, resample
 from hwoutils.spectral import Band
 from optixstuff import YippyCoronagraph
-from skyscapes.background import PrecomputedZodi
 from skyscapes.scene import BlackbodyStar, FlatStar
 from yippy import Coronagraph, EqxCoronagraph
+from zodi.jax import PrecomputedZodi
 
 from coronagraphoto import image_rates
 

@@ -7,7 +7,7 @@ from hwoutils.constants import arcsec2rad
 from hwoutils.grids import SkyOrientation
 from hwoutils.spectral import Band
 from orbix.observatory import ObservatoryL2Halo
-from skyscapes.background import LeinertZodi
+from zodi.jax import LeinertZodi
 
 from coronagraphoto import image_rates
 

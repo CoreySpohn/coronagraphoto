@@ -3,7 +3,7 @@
 from collections.abc import Sequence
 
 from skyscapes import Scene, from_exovista
-from skyscapes.background import AYOZodi
+from zodi.jax import AYOZodi
 
 
 def load_scene_from_exovista(
@@ -16,7 +16,7 @@ def load_scene_from_exovista(
     """Load a full :class:`skyscapes.Scene` from an ExoVista FITS file.
 
     Delegates system loading to :func:`skyscapes.from_exovista` and adds
-    a default :class:`~skyscapes.background.AYOZodi` photon background.
+    a default :class:`~zodi.jax.AYOZodi` photon background.
     The system retains astronomical ``midplane_position_angle_deg`` and
     stored disk cubes on their native sky grid; no extra disk rotation is
     performed here.

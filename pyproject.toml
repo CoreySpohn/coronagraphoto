@@ -25,6 +25,7 @@ dependencies = [
   "pooch>=1.8.2",
   "yippy>=2.10.6",
   "skyscapes>=4.0.0",
+  "zodi[jax]>=1.1.0",
 ]
 [project.optional-dependencies]
 dev = ["pre-commit>=3.5.0"]
