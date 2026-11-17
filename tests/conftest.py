@@ -16,14 +16,6 @@ from hypothesis import settings
 # Keep lazily cached dependency tables and evaluation arrays at one precision.
 jax.config.update("jax_enable_x64", True)
 
-from coronagraphoto.datasets import (
-    fetch_all,
-    fetch_coronagraph,
-    fetch_scene,
-)
-
-__all__ = ["fetch_all", "fetch_coronagraph", "fetch_scene"]
-
 # Released hwoutils versions may not include the optional budget plugin yet.
 pytest_plugins = []
 if importlib.util.find_spec("hwoutils.testbudget") is not None:
@@ -108,6 +100,7 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
     chromatic: bool = eqx.field(static=True, default=False)
 
     def __init__(self, n=40, step=0.25, *, chromatic=False, cube=False):
+        """Build an n x n focal grid with the given lambda/D step."""
         self.grid = PixelGrid.focal(
             n,
             step,
