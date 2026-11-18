@@ -1,6 +1,5 @@
 """YIP adapter integration using a small synthetic FITS package."""
 
-from copy import copy
 from dataclasses import replace
 
 import equinox as eqx
@@ -32,12 +31,14 @@ def test_yip_image_absolute_photon_fraction(tmp_path, distinct_products):
     """
     coro = Coronagraph(write_yip(tmp_path / "yip", distinct_products=distinct_products))
     if distinct_products:
-        # Restore the off-axis product's independent synthetic frame; the
-        # loader currently assigns it the stellar product's header frame.
-        offaxis = copy(coro._offaxis_backend)
-        offaxis.grid = make_path(n=24, step=0.5).coronagraph.grid
+        # A YIP has one FITS grid for the stellar/off-axis pair. Give the
+        # in-memory products distinct frames to exercise the reader contract.
+        stellar_grid = coro.stellar_grid
+        stellar_frame = replace(
+            stellar_grid.frame, diameter_m=3.0, reference_wavelength_nm=650.0
+        )
         coro = eqx.tree_at(
-            lambda c: (c.grid, c._offaxis_backend), coro, (offaxis.grid, offaxis)
+            lambda c: c.stellar_grid, coro, replace(stellar_grid, frame=stellar_frame)
         )
     path = make_path(n=24, step=0.5, detector_n=28, detector_step=0.5)
     path = eqx.tree_at(lambda p: p.coronagraph, path, coro)
@@ -45,13 +46,13 @@ def test_yip_image_absolute_photon_fraction(tmp_path, distinct_products):
     stellar = coro.stellar_map(550.0, 0.1, grid=None)
     star = FlatStar(
         flux_phot_per_nm_m2=1e6,
-        diameter_arcsec=0.1 * stellar.grid.frame.lod_to_arcsec(550.0),
+        fixed_diameter_arcsec=0.1 * stellar.grid.frame.lod_to_arcsec(550.0),
     )
     if distinct_products:
         star = BlackbodyStar(teff_K=5772.0, radius_m=6.957e8)
         stellar = coro.stellar_map(
             550.0,
-            star.diameter_arcsec(dist_pc=10.0)
+            star.angular_diameter_arcsec(10.0)
             / stellar.grid.frame.lod_to_arcsec(550.0),
             grid=None,
         )

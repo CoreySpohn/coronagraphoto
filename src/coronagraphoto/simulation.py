@@ -93,9 +93,7 @@ def _node_rates(
 
     star = system.star
     phi_star = star.photon_flux_density(wavelength_nm, time_d, dist_pc=system.dist_pc)
-    diameter = star.diameter_arcsec
-    if callable(diameter):
-        diameter = diameter(dist_pc=system.dist_pc)
+    diameter = star.angular_diameter_arcsec(system.dist_pc)
     leakage = coro.stellar_map(
         wavelength_nm,
         diameter / stellar_grid.frame.lod_to_arcsec(wavelength_nm),
@@ -460,6 +458,7 @@ def observe(
     """Draw one electron Image (W,ny,nx), per_pixel on the detector sky grid.
 
     Rates describe the instantaneous scene at time_d, held throughout plan.
+    Plan fields are scalar or (W,), with W matching the band axis.
     Detector noise is drawn once after combining all source terms.
     """
     electrons = image_electrons(

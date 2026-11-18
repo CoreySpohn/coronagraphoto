@@ -13,7 +13,7 @@ from conftest import make_path, make_system, write_yip
 from hwoutils.constants import arcsec2rad
 from hwoutils.grids import Image, PixelGrid, SkyOrientation
 from hwoutils.spectral import Band, Quadrature
-from optixstuff import Detector, ElectronRates, FramePlan
+from optixstuff import Detector, ElectronRates, FramePlan, prepare_aperture
 from optixstuff.apertures import Circular
 from optixstuff.performance import _performance_curves
 from skyscapes.disk import GraterDisk
@@ -79,7 +79,7 @@ def closure(tmp_path_factory):
     pointing, time_d = SkyOrientation(0.0), 0.0
     q = je.aperture_quadrature(system, base, bands, zodi=zodi, exozodi="scene")
     image_q = Quadrature.build(bands, None, 4)
-    prepared = je.prepare_aperture(base, bands, q, rule=rule)
+    prepared = prepare_aperture(base, bands, q, rule=rule)
     # Both readers use this host-prepared rule and exactly these spectral nodes.
     np.testing.assert_array_equal(q.nodes_nm, image_q.nodes_nm)
     np.testing.assert_array_equal(q.weights_nm, image_q.weights_nm)
@@ -97,7 +97,7 @@ def closure(tmp_path_factory):
         zodi=zodi,
         exozodi="scene",
     )
-    calculator = base.detector.electrons(rates, q)
+    calculator = base.detector.electrons(rates.mean, q)
     expected = np.stack([np.asarray(getattr(calculator, name)) for name in TERMS])
     east, north = system.positions(jnp.array([time_d]))[:2, 0, 0]
     x, y = pointing.sky_to_detector(east, north)
@@ -106,12 +106,11 @@ def closure(tmp_path_factory):
     calc_ladder, analytic_nodes = [], []
     for oversample in (10, 20, 40):
         node_rates = []
-        for waves, nodes in zip(np.asarray(q.nodes_nm), prepared.nodes, strict=True):
+        for reference in prepared.references:
             row, analytic_row = [], []
-            for wave, (_, node_rule, record, angular_scale) in zip(
-                waves, nodes, strict=True
-            ):
-                separation = float(jnp.hypot(x, y) / angular_scale)
+            for node in reference.nodes:
+                wave, node_rule = node.wavelength_nm, node.record.rule
+                separation = float(jnp.hypot(x, y) / node.arcsec_per_lod)
 
                 def offaxis(s):
                     # The record integrates native point-density samples.
@@ -123,7 +122,7 @@ def closure(tmp_path_factory):
                 refined = _performance_curves(
                     offaxis,
                     coro.stellar_map(550.0, 0.0, grid=None),
-                    record.rule,
+                    node_rule,
                     separations_lod=[separation],
                     oversample=oversample,
                 )
@@ -142,29 +141,19 @@ def closure(tmp_path_factory):
         calc_ladder.append(
             np.asarray(
                 base.detector.electrons(
-                    replace(rates, planet=jnp.stack(node_rates)), q
+                    replace(rates.mean, planet=jnp.stack(node_rates)), q
                 ).planet
             )
         )
     calc_ladder = np.asarray(calc_ladder)
     analytic = np.asarray(
         base.detector.electrons(
-            replace(rates, planet=jnp.stack(analytic_nodes)), q
+            replace(rates.mean, planet=jnp.stack(analytic_nodes)), q
         ).planet
     )
     calc_limit, calc_order, calc_uncertainty = _richardson(calc_ladder)
     calc_discretization = expected[0] - calc_limit
-    centre_grid = PixelGrid.regular(
-        (1, 1),
-        1.0,
-        "arcsec",
-        center=(-float(east), -float(north)),
-        orientation=SkyOrientation(0.0, parity=1),
-    )
-    centre = np.asarray(
-        system.photon_radiance(q.nodes_nm, time_d, grid=centre_grid).data
-    )
-    centre = centre[..., 0, 0]
+    centre = np.asarray(system.photon_radiance_at(q.nodes_nm, time_d, east, north))
     measured, bounds, redistribution, snrs, snr_bounds = [], [], [], [], []
     dust_ratios = []
     plan = FramePlan(100.0, 36.0)
@@ -191,10 +180,11 @@ def closure(tmp_path_factory):
         )
         sky = PixelGrid.regular((n, n), pitch * scale, "arcsec", orientation=pointing)
         weights = []
-        for band_index, (_, ref, angular_scale, record) in enumerate(
-            prepared.references
-        ):
-            frame = path.primary.frame(ref, record.frame.diameter_convention)
+        for band_index, reference in enumerate(prepared.references):
+            angular_scale, record = reference.arcsec_per_lod, reference.record
+            frame = path.primary.frame(
+                reference.wavelength_nm, record.frame.diameter_convention
+            )
             grid = PixelGrid.regular(
                 (n, n), pitch * scale / float(angular_scale), "lod", frame=frame
             )
@@ -216,7 +206,7 @@ def closure(tmp_path_factory):
         average = np.sum(radiance * np.asarray(weights)[:, None], axis=(-2, -1))
         average /= np.asarray(weights.sum(axis=(-2, -1)))[:, None]
         disk_difference = replace(
-            rates, exozodi=rates.exozodi * jnp.asarray(average / centre - 1)
+            rates.mean, exozodi=rates.mean.exozodi * jnp.asarray(average / centre - 1)
         )
         bounds.append(np.asarray(detector.electrons(disk_difference, q).exozodi))
         # Model-form difference b includes native deposition and PSF redistribution.
@@ -238,7 +228,7 @@ def closure(tmp_path_factory):
                 )
             raw_nodes.append(jnp.stack(raw_row))
         raw = detector.electrons(
-            replace(rates, exozodi=jnp.stack(raw_nodes)), q
+            replace(rates.mean, exozodi=jnp.stack(raw_nodes)), q
         ).exozodi
         redistribution.append(np.asarray(sums.exozodi - raw))
         if n == 48:
@@ -266,7 +256,8 @@ def closure(tmp_path_factory):
             )
             dust_ratios = np.stack(
                 (
-                    detector.electrons(doubled_rates, q).exozodi / calculator.exozodi,
+                    detector.electrons(doubled_rates.mean, q).exozodi
+                    / calculator.exozodi,
                     jnp.sum(doubled_images.exozodi * weights, axis=(-2, -1))
                     / sums.exozodi,
                 )
@@ -280,7 +271,8 @@ def closure(tmp_path_factory):
             pp.exozodi_residual_fraction * sums.exozodi * plan.live_time_s
         ) ** 2
         image_snr = sums.planet * plan.live_time_s / jnp.sqrt(variance)
-        calc_snr = je.snr(rates, detector, q, plan, n_pix=n_pix, post_processing=pp)
+        detector_rates = replace(rates, n_pix=n_pix, n_pix_variance=n_pix)
+        calc_snr = je.snr(detector_rates, detector, q, plan, post_processing=pp)
         snrs.append(np.stack((calc_snr, image_snr)))
         snr_bounds.append((detector, n_pix))
     measured, bounds, snrs = np.asarray(measured), np.asarray(bounds), np.asarray(snrs)

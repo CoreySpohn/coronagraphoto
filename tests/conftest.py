@@ -173,6 +173,10 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
             [1e-9 * area / tau],
             0.0,
             min(self.grid.shape) * self.grid.step / 2,
+            throughput_variance=[tau],
+            core_area_variance_lod2=[area],
+            leakage_fraction_variance=[1e-9 * area],
+            leakage_density_variance_lod2=[1e-9],
             extra={"occulter_transmission": [0.3]},
         )
 
@@ -303,6 +307,10 @@ class PlateauCoronagraph(GaussianCoronagraph):
             [ell / tau],
             0.0,
             min(self.grid.shape) * self.grid.step / 2,
+            throughput_variance=[tau],
+            core_area_variance_lod2=[area],
+            leakage_fraction_variance=[ell],
+            leakage_density_variance_lod2=[1e-9],
             extra={"occulter_transmission": [0.3]},
         )
 
@@ -407,8 +415,6 @@ def write_yip(path, *, distinct_products=False):
     ):
         product_header = header.copy()
         if distinct_products and name == "stellar_intens":
-            product_header["D"] = 3.0
-            product_header["LAMBDA"] = 650.0
             data = data * (1 + np.array([0.0, 0.1, 0.2])[:, None, None] ** 2)
             data = data * (1 + 0.02 * xx)
         if distinct_products and name == "sky_trans":
