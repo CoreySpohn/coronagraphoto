@@ -8,9 +8,9 @@ import numpy as np
 import pytest
 from conftest import make_path, make_system, with_zodi, write_yip
 from hwoutils.constants import arcsec2rad
-from hwoutils.grids import PixelGrid, SkyOrientation, resample
-from hwoutils.spectral import Band, Quadrature
 from optixstuff import Exposure
+from optixstuff.grids import PixelGrid, SkyOrientation, resample
+from optixstuff.spectral import Band, Quadrature
 from skyscapes.scene import BlackbodyStar, FlatStar
 from yippy import open_yip
 from zodi.jax import PrecomputedZodi

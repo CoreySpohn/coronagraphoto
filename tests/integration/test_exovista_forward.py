@@ -3,9 +3,9 @@
 import numpy as np
 from conftest import make_path, write_scene
 from hwoutils.constants import arcsec2rad
-from hwoutils.grids import SkyOrientation
-from hwoutils.spectral import Band, Quadrature
 from optixstuff import Exposure
+from optixstuff.grids import SkyOrientation
+from optixstuff.spectral import Band, Quadrature
 from skyscapes import from_exovista
 
 from coronagraphoto import photon_rates

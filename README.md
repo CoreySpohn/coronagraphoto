@@ -74,7 +74,7 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 
-from hwoutils.spectral import Band
+from optixstuff.spectral import Band
 from yippy import open_yip
 from optixstuff import FramePlan, Instrument
 from skyscapes import from_exovista

@@ -6,9 +6,9 @@ import jax.numpy as jnp
 import numpy as np
 from conftest import centroid, make_path, make_system
 from hwoutils.epoch import Epoch
-from hwoutils.grids import Frame, Image, Measure, PixelGrid
-from hwoutils.spectral import Band, Quadrature
 from optixstuff import AbstractSpeckleField, Exposure
+from optixstuff.grids import Frame, Image, Measure, PixelGrid
+from optixstuff.spectral import Band, Quadrature
 from skyscapes.scene import Star
 
 from coronagraphoto import photon_rates

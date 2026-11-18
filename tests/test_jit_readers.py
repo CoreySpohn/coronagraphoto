@@ -6,8 +6,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import make_path, make_system
-from hwoutils.spectral import Band, Quadrature
 from optixstuff import Exposure, FramePlan
+from optixstuff.spectral import Band, Quadrature
 from skyscapes.scene import FlatStar
 
 from coronagraphoto import expected, observe, photon_rates
@@ -170,8 +170,8 @@ def test_traced_nodes_select_the_band_model_inside_the_program():
     images, and a node outside every band gives NaN instead of a wrong model.
     """
     from conftest import GaussianCoronagraph
-    from hwoutils.grids import Frame
     from optixstuff import MultiBandCoronagraph
+    from optixstuff.grids import Frame
 
     blue = GaussianCoronagraph(n=16, bandpass=Band(490, 510))
     red = GaussianCoronagraph(

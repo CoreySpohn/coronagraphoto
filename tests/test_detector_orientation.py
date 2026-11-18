@@ -7,9 +7,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import GaussianCoronagraph, centroid, make_path, make_system
-from hwoutils.grids import Frame, PixelGrid, SkyOrientation
-from hwoutils.spectral import Band, Quadrature
 from optixstuff import Exposure, MultiBandCoronagraph, ScalarCoronagraph
+from optixstuff.grids import Frame, PixelGrid, SkyOrientation
+from optixstuff.spectral import Band, Quadrature
 from skyscapes.disk import ExovistaDisk
 from skyscapes.physical_model import GridPhysicalModel
 from skyscapes.scene import Planet

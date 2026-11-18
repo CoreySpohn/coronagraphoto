@@ -11,8 +11,6 @@ import numpy as np
 import pytest
 from conftest import make_path, make_system, with_zodi, write_yip
 from hwoutils.constants import arcsec2rad
-from hwoutils.grids import Image, Measure, PixelGrid, SkyOrientation
-from hwoutils.spectral import Band, Quadrature
 from optixstuff import (
     Detector,
     ElectronRates,
@@ -21,7 +19,9 @@ from optixstuff import (
     prepare_aperture,
 )
 from optixstuff.apertures import Circular
+from optixstuff.grids import Image, Measure, PixelGrid, SkyOrientation
 from optixstuff.performance import _performance_curves
+from optixstuff.spectral import Band, Quadrature
 from skyscapes.disk import GraterDisk
 from yippy import open_yip
 from zodi import SurfaceBrightnessDust

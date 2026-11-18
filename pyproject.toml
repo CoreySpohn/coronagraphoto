@@ -18,7 +18,7 @@ classifiers = [
 ]
 dependencies = [
   "equinox>=0.13.2",
-  "hwoutils>=1.15.0",
+  "hwoutils[jax]>=1.15.0",
   "jax>=0.8.1",
   "optixstuff>=5.0.0",
   "orbix>=4.1.0",
@@ -109,9 +109,8 @@ known_first_party = ["coronagraphoto"]
 optional_dependencies_dev_groups = ["dev", "docs", "test"]
 
 [tool.deptry.per_rule_ignores]
-# optixstuff supplies the duck-typed Instrument consumed by the simulation API.
 # orbix's floor preserves the sky-coordinate convention of loaded skyscapes scenes.
-DEP002 = ["optixstuff", "orbix"]
+DEP002 = ["orbix"]
 
 [tool.ty.environment]
 python-version = "3.11"

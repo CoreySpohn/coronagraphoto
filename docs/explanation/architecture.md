@@ -7,7 +7,7 @@ The reader composes shared contracts without owning the underlying physics.
 | Star and planet photon flux densities; disk photon radiance | skyscapes |
 | Local-zodi photon radiance | zodi.jax |
 | Orbits and sky offsets | orbix, via skyscapes.Scene |
-| Bands, quadrature, frames, grids and resampling | hwoutils |
+| Bands, quadrature, frames, grids and resampling | optixstuff |
 | Aperture rules and YIP PSFs | yippy |
 | Collecting area, optical throughput, coronagraph, detector and frame plan | optixstuff |
 | Per-pixel assembly and node streaming | coronagraphoto |

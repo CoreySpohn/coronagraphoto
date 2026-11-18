@@ -72,9 +72,9 @@ forward model:
 | Package | Role |
 |---|---|
 | `skyscapes` | `Scene`, `Star`, `Planet`, `Disk`, physical models |
-| `optixstuff` | `Instrument`, detectors, throughput, filters |
+| `optixstuff` | `Instrument`, detectors, throughput, filters, bands and grids |
 | `yippy` | YIP-based PSF synthesis (the coronagraph backend) |
-| `hwoutils` | Shared unit conversions, transforms, JAX configuration |
+| `hwoutils` | Shared constants, unit conversions and JAX configuration |
 
 `pip install coronagraphoto` pulls all of these as transitive
 dependencies. If you `uv sync` from source, use `--all-packages` to

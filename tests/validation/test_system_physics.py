@@ -14,10 +14,10 @@ from conftest import (
     with_zodi,
 )
 from hwoutils.constants import arcsec2rad
-from hwoutils.grids import Image, Measure, PixelGrid, SkyOrientation
-from hwoutils.spectral import Band, Quadrature
 from optixstuff import Exposure
 from optixstuff.apertures import Circular
+from optixstuff.grids import Image, Measure, PixelGrid, SkyOrientation
+from optixstuff.spectral import Band, Quadrature
 from skyscapes.disk import ExovistaDisk
 from zodi.jax import PrecomputedZodi
 

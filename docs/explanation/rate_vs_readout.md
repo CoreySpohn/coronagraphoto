@@ -52,7 +52,7 @@ applies its Gauss-Legendre order within each interval. The photon record
 carries the quadrature, whose nm weights enter once at integration.
 
 At each node, native coronagraph products are converted with their `Frame`
-and resampled with `hwoutils.grids.resample`, honouring each input Image's
+and resampled with `optixstuff.grids.resample`, honouring each input Image's
 reconstruction declaration. Disk radiance uses linear reconstruction and is
 multiplied by pixel solid angle in sr once before extended-scene propagation.
 Convolution with the band-limited PSF produces a band-limited image. Speckle

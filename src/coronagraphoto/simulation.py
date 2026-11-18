@@ -18,14 +18,14 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.grids import Image, Measure, PixelGrid, SkyOrientation, resample
-from hwoutils.spectral import Band, Quadrature
 from optixstuff import ElectronRates, Exposure, FramePlan, Instrument, PhotonRates
 from optixstuff.coronagraph import (
     AbstractImagingCoronagraph,
     AbstractSceneCoronagraph,
     MultiBandCoronagraph,
 )
+from optixstuff.grids import Image, Measure, PixelGrid, SkyOrientation, resample
+from optixstuff.spectral import Band, Quadrature
 from skyscapes import Scene
 
 

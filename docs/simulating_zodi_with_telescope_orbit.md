@@ -11,7 +11,7 @@ For an existing scene and instrument:
 from dataclasses import replace
 
 import equinox as eqx
-from hwoutils.spectral import Band
+from optixstuff.spectral import Band
 from orbix.observatory import ObservatoryL2Halo
 from zodi.jax import LeinertZodi
 from coronagraphoto import build_exposure, expected

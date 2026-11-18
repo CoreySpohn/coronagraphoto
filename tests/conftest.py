@@ -77,8 +77,6 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import Mearth2kg, Msun2kg
 from hwoutils.epoch import Epoch
-from hwoutils.grids import Frame, Image, Measure, PixelGrid, resample
-from hwoutils.spectral import Band
 from optixstuff import ConstantThroughput, Detector, Instrument, SimplePrimary
 from optixstuff.apertures import Circular
 from optixstuff.coronagraph import (
@@ -87,7 +85,9 @@ from optixstuff.coronagraph import (
     SceneRender,
     SourcePSFs,
 )
+from optixstuff.grids import Frame, Image, Measure, PixelGrid, resample
 from optixstuff.performance import PerformanceCurves, SampledProfile
+from optixstuff.spectral import Band
 from skyscapes.physical_model import GridPhysicalModel
 from skyscapes.scene import FlatStar, Planet, Scene, Star
 

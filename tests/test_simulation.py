@@ -11,9 +11,9 @@ def test_worked_example():
 
     assert hasattr(cp, "photon_rates"), "the shared photon reader must be public"
     from conftest import worked_setup
-    from hwoutils.spectral import Band, Quadrature
     from numpy.polynomial.legendre import leggauss
     from optixstuff import Exposure
+    from optixstuff.spectral import Band, Quadrature
 
     system, path = worked_setup()
     bands = (Band(500, 600),)
@@ -46,8 +46,8 @@ def test_worked_example():
 def test_node_yield_once(chromatic):
     """Fails on double yield or band-mean QE; exact algebra at 32 float64 eps."""
     from conftest import worked_setup
-    from hwoutils.spectral import Band, Quadrature
     from optixstuff import Exposure
+    from optixstuff.spectral import Band, Quadrature
 
     import coronagraphoto as cp
 
@@ -100,8 +100,8 @@ def test_streaming_jit_and_gradient():
     import jax
     import jax.numpy as jnp
     from conftest import worked_setup
-    from hwoutils.spectral import Band, Quadrature
     from optixstuff import Exposure
+    from optixstuff.spectral import Band, Quadrature
 
     import coronagraphoto as cp
 
@@ -147,8 +147,8 @@ def test_refused_planet_psf_only_invalidates_lit_source():
     import equinox as eqx
     import jax.numpy as jnp
     from conftest import GaussianCoronagraph, make_path, make_system
-    from hwoutils.spectral import Quadrature
     from optixstuff import Exposure, SourcePSFs
+    from optixstuff.spectral import Quadrature
 
     import coronagraphoto as cp
 
@@ -186,8 +186,8 @@ def test_expected_integrates_declared_response_kink():
     import jax.numpy as jnp
     from conftest import make_path, make_system, with_zodi
     from hwoutils.constants import arcsec2rad
-    from hwoutils.spectral import Band, Quadrature, Transmission
     from optixstuff import Exposure, TransmissiveElement
+    from optixstuff.spectral import Band, Quadrature, Transmission
     from zodi.jax import PrecomputedZodi
 
     import coronagraphoto as cp

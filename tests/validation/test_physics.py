@@ -6,9 +6,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import make_path, make_system
-from hwoutils.grids import Measure, SkyOrientation
-from hwoutils.spectral import Band, Quadrature
 from optixstuff import Exposure, FramePlan
+from optixstuff.grids import Measure, SkyOrientation
+from optixstuff.spectral import Band, Quadrature
 
 from coronagraphoto import expected, observe
 

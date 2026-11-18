@@ -5,8 +5,8 @@ import jax
 import numpy as np
 import pytest
 from conftest import make_path, write_scene, write_yip
-from hwoutils.spectral import Band, Quadrature
 from optixstuff import Exposure, FramePlan
+from optixstuff.spectral import Band, Quadrature
 from skyscapes import from_exovista
 from yippy import open_yip
 
