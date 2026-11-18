@@ -255,7 +255,7 @@ def _render(scene, instrument, exposure, *, kind, band_ids):
                 name: a + getattr(electrons, name)[0] for name, a in total.items()
             }, None
 
-        xs = (row.nodes_nm[0], row.weights_nm[0])
+        xs = (row.nodes_nm[0], row.weights("response")[0])
         return jax.lax.scan(step, initial, xs)[0]
 
     rows = [render_band(i) for i in range(len(quadrature.bands))]

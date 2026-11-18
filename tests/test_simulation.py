@@ -70,7 +70,9 @@ def test_node_yield_once(chromatic):
     expected = np.zeros_like(actual)
     doubled = np.zeros_like(actual)
     for k, (wave, weight) in enumerate(
-        zip(np.asarray(q.nodes_nm[0]), np.asarray(q.weights_nm[0]), strict=True)
+        zip(
+            np.asarray(q.nodes_nm[0]), np.asarray(q.weights("response")[0]), strict=True
+        )
     ):
         eta = 0.9 * (0.8 - (0.002 * (wave - 550) if chromatic else 0.0))
         expected += eta * weight * np.asarray(rates.planet[:, k])
