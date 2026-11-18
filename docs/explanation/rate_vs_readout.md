@@ -1,20 +1,18 @@
 # Photon rates, electron rates and observations
 
-`image_rates(system, optical_path, bands, *, time_d, pointing,
-quadrature_order=4, quadrature=None, zodi=None, speckle=None,
-ecliptic_latitude_deg=0.0, solar_longitude_deg=135.0)` returns `PhotonRates`. Each field is an integrand
-in photons/s/nm/pixel with shape `(W,Q,ny,nx)`. Integrate it with
-`rates.integrate(quadrature)` for photons/s when a shared quadrature is supplied;
-otherwise use `Quadrature.build(bands, None, quadrature_order)`. Supplied nodes
-and weights supersede `quadrature_order` and must be prepared before tracing.
+`image_rates(system, optical_path, quadrature, *, time_d, pointing,
+zodi=None, speckle=None, ecliptic_latitude_deg=0.0, solar_longitude_deg=135.0)`
+returns `PhotonRates`. Each source field holds photons/s/nm/pixel with shape
+`(W,Q,ny,nx)`. Call `rates.integrate()` for band-integrated photons/s/pixel
+on the bands carried by the rule.
 
 `image_electrons` takes exactly the same arguments and returns `ElectronRates`
 in electrons/s/pixel, shape `(W,ny,nx)`. It applies the detector's yield at
 each wavelength node before accumulation. For small images its result equals
-`optical_path.detector.electrons(image_rates(...), quadrature)`; the streaming
+`optical_path.detector.electrons(image_rates(...))`; the streaming
 form avoids retaining the node image cube.
 
-`observe(key, system, optical_path, bands, plan, *, time_d, pointing, ...)`
+`observe(key, system, optical_path, quadrature, plan, *, time_d, pointing, ...)`
 accepts the same optional keywords. It calls `detector.draw` on the electron
 rates and returns `Image(data, detector_grid, ("band",), "per_pixel", "electrons")`.
 The observation holds the instantaneous scene at `time_d` throughout the
@@ -44,10 +42,12 @@ Stored disks keep their native sky geometry. Parametric disks use
 
 ## Spectral and spatial sampling
 
-Bands are positive `hwoutils.spectral.Band` intervals in nm. The reader uses
-a supplied quadrature or an unsplit Gauss-Legendre rule; place boundaries at
-sharp spectral breaks and test convergence in `quadrature_order`. The photon record does not
-include integration weights. Their nm unit enters exactly once in integration.
+Use `Quadrature.build(bands, system, optical_path, zodi)` on the host when
+local zodi is active. The system declares the star, planets and attached disk.
+Include an explicitly supplied speckle field when it contributes. Omit absent
+models. The rule splits each positive-width band at the declared breaks and
+applies its Gauss-Legendre order within each interval. The photon record
+carries the quadrature, whose nm weights enter once at integration.
 
 At each node, native coronagraph products are converted with their `Frame`
 and resampled with `hwoutils.grids.resample`, honouring each input Image's

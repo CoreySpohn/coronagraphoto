@@ -9,7 +9,7 @@ For an existing system and optical path:
 
 ```python notest
 from hwoutils.grids import SkyOrientation
-from hwoutils.spectral import Band
+from hwoutils.spectral import Band, Quadrature
 from orbix.observatory import ObservatoryL2Halo
 from zodi.jax import LeinertZodi
 from coronagraphoto import image_electrons
@@ -17,13 +17,15 @@ from coronagraphoto import image_electrons
 observer = ObservatoryL2Halo.from_default(equinox_mjd=60575.25)
 lat = observer.ecliptic_latitude_deg(mjd, ra_rad, dec_rad)
 lon = observer.helio_ecliptic_longitude_deg(mjd, ra_rad, dec_rad)
+zodi = LeinertZodi()
+quadrature = Quadrature.build((Band(500.0, 600.0),), system, optical_path, zodi)
 rates = image_electrons(
     system,
     optical_path,
-    (Band(500.0, 600.0),),
+    quadrature,
     time_d=time_d,
     pointing=SkyOrientation(0.0),
-    zodi=LeinertZodi(),
+    zodi=zodi,
     ecliptic_latitude_deg=lat,
     solar_longitude_deg=lon,
 )

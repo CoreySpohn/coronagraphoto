@@ -56,10 +56,9 @@ to combine terms. Optical throughput excludes detector yield. Only
 
 `image_electrons` scans nodes and accumulates band images, holding one node's
 images at a time. `image_rates` retains all nodes for inspection and small
-problems. Pass `quadrature=` to share host-prepared nodes and weights with
-another reader. Otherwise both use `Quadrature.build(bands, None,
-quadrature_order)`, with Gauss-Legendre order 4 by default. Split bands at
-spectral discontinuities and increase order until the desired quantities converge.
+problems. Build one quadrature on the host from the active scene and optical
+path. Its Gauss-Legendre rule splits at every declared break, including
+detector QE knots. Reuse that quadrature across readers.
 
 ## Quick start
 
@@ -73,7 +72,7 @@ import jax
 jax.config.update("jax_enable_x64", True)
 
 from hwoutils.grids import SkyOrientation
-from hwoutils.spectral import Band
+from hwoutils.spectral import Band, Quadrature
 from yippy import open_yip
 from optixstuff import FramePlan, OpticalPath
 from coronagraphoto import image_electrons, load_scene_from_exovista, observe
@@ -89,14 +88,15 @@ optical_path = OpticalPath.from_default_setup(
     pixel_scale_arcsec=0.01,
 )
 bands = (Band(500.0, 600.0),)
+quadrature = Quadrature.build(bands, scene, optical_path)
 pointing = SkyOrientation(pa_y_deg=30.0, parity=-1)
 options = dict(time_d=0.0, pointing=pointing, zodi=scene.zodi)
-rates = image_electrons(scene.system, optical_path, bands, **options)
+rates = image_electrons(scene.system, optical_path, quadrature, **options)
 image = observe(
     jax.random.PRNGKey(0),
     scene.system,
     optical_path,
-    bands,
+    quadrature,
     FramePlan(frame_time_s=100.0, n_frames=36),
     **options,
 )

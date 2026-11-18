@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from conftest import make_path, make_system
 from hwoutils.grids import SkyOrientation
-from hwoutils.spectral import Band
+from hwoutils.spectral import Band, Quadrature
 from optixstuff import FramePlan
 
 from coronagraphoto import image_electrons, observe
@@ -33,14 +33,12 @@ def test_draw_mean_and_reproducibility():
     )
     path = eqx.tree_at(lambda p: p.detector, path, detector)
     system = make_system()
-    bands = (Band(549.5, 550.5),)
+    q = Quadrature.build((Band(549.5, 550.5),), system, path, order=1)
     plan = FramePlan(10.0, 6.0)
-    options = dict(time_d=0.0, pointing=SkyOrientation(0), quadrature_order=1)
-    electrons = image_electrons(system, path, bands, **options)
+    options = dict(time_d=0.0, pointing=SkyOrientation(0))
+    electrons = image_electrons(system, path, q, **options)
     mean, var = detector.mean_and_variance(electrons, plan)
-    draw = eqx.filter_jit(
-        lambda key: observe(key, system, path, bands, plan, **options)
-    )
+    draw = eqx.filter_jit(lambda key: observe(key, system, path, q, plan, **options))
     key = jax.random.PRNGKey(0)
     first, second = draw(key), draw(key)
     assert first.quantity == "electrons" and first.measure == "per_pixel"

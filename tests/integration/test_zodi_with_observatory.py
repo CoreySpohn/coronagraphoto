@@ -5,7 +5,7 @@ import numpy as np
 from conftest import make_path, make_system
 from hwoutils.constants import arcsec2rad
 from hwoutils.grids import SkyOrientation
-from hwoutils.spectral import Band
+from hwoutils.spectral import Band, Quadrature
 from orbix.observatory import ObservatoryL2Halo
 from zodi.jax import LeinertZodi
 
@@ -30,10 +30,9 @@ def test_observatory_zodi_radiance_reaches_pixels():
         rate = image_rates(
             system,
             path,
-            (Band(549.5, 550.5),),
+            Quadrature.build((Band(549.5, 550.5),), system, path, zodi, order=1),
             time_d=day,
             pointing=SkyOrientation(0),
-            quadrature_order=1,
             zodi=zodi,
             ecliptic_latitude_deg=lat,
             solar_longitude_deg=lon,

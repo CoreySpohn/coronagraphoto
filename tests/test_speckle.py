@@ -7,7 +7,7 @@ import numpy as np
 from conftest import centroid, make_path, make_system
 from hwoutils.epoch import Epoch
 from hwoutils.grids import Frame, Image, PixelGrid, SkyOrientation
-from hwoutils.spectral import Band
+from hwoutils.spectral import Band, Quadrature
 from optixstuff import AbstractSpeckleField
 from skyscapes.scene import Star
 
@@ -23,6 +23,10 @@ class Halo(AbstractSpeckleField):
     )
     epoch_d: float = 3.0
     level: float = 1.5
+
+    def spectral_breaks_nm(self):
+        """The halo is achromatic."""
+        return np.empty(0)
 
     def realize(self, *, wavelength_nm, time_d=0.0):
         """A time-dependent flux fraction per native pixel."""
@@ -55,27 +59,21 @@ def test_speckle_leakage_day_clock():
     system = make_system(
         star=Star(wavelengths_nm=wave, times_d=times, flux_density_jy=flux)
     )
-    bands = (Band(549.5, 550.5),)
-    options = dict(quadrature_order=1)
+    q = Quadrature.build((Band(549.5, 550.5),), system, path, Halo(), order=1)
     snapshots = []
     for time, factor in ((3.0, 2.5), (3.0 + np.pi, 0.5)):
-        base = image_rates(
-            system, path, bands, time_d=time, pointing=SkyOrientation(0), **options
-        )
+        base = image_rates(system, path, q, time_d=time, pointing=SkyOrientation(0))
         timed = eqx.tree_at(
             lambda p: p.speckle, path, Halo(), is_leaf=lambda v: v is None
         )
-        first = image_rates(
-            system, timed, bands, time_d=time, pointing=SkyOrientation(0), **options
-        )
+        first = image_rates(system, timed, q, time_d=time, pointing=SkyOrientation(0))
         rolled = image_rates(
             system,
             path,
-            bands,
+            q,
             time_d=time,
             pointing=SkyOrientation(30),
             speckle=Halo(),
-            **options,
         )
         snapshots.append(first)
         if factor > 0:
@@ -107,11 +105,10 @@ def test_speckle_leakage_day_clock():
         same_date = image_rates(
             shifted,
             path,
-            bands,
+            q,
             time_d=time - shift,
             pointing=SkyOrientation(0),
             speckle=Halo(epoch_d=3.0 - shift),
-            **options,
         )
         for a, b in zip(
             jax.tree.leaves(first), jax.tree.leaves(same_date), strict=True
@@ -123,17 +120,14 @@ def test_speckle_leakage_day_clock():
     # the halo spreads to at most ~2e-11 per detector pixel, under the 6.25e-11
     # fixture floor. Fails if the excess itself is clipped at zero. The sum
     # cancels against a floor ~250 times larger: 1e-10 relative.
-    base = image_rates(
-        system, path, bands, time_d=3.0, pointing=SkyOrientation(0), **options
-    )
+    base = image_rates(system, path, q, time_d=3.0, pointing=SkyOrientation(0))
     dimmed = image_rates(
         system,
         path,
-        bands,
+        q,
         time_d=3.0,
         pointing=SkyOrientation(0),
         speckle=Halo(level=-1.01),
-        **options,
     )
     phi = system.star.photon_flux_density(550.0, 3.0, dist_pc=10.0)
     np.testing.assert_allclose(
@@ -146,11 +140,10 @@ def test_speckle_leakage_day_clock():
         lambda t: image_rates(
             system,
             path,
-            bands,
+            q,
             time_d=t,
             pointing=SkyOrientation(0),
             speckle=Halo(),
-            **options,
         )
     )(jnp.array([3.0, 3.0 + np.pi]))
     for index, expected in enumerate(snapshots):

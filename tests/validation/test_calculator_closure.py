@@ -80,27 +80,18 @@ def closure(tmp_path_factory):
     bands = (Band(500.0, 550.0), Band(550.0, 600.0))
     zodi = PrecomputedZodi(jnp.array([500.0, 600.0]), jnp.full(2, 1e12))
     pointing, time_d = SkyOrientation(0.0), 0.0
-    q = je.aperture_quadrature(system, base, bands, zodi=zodi, exozodi="scene")
-    image_q = Quadrature.build(bands, None, 4)
-    prepared = prepare_aperture(base, bands, q, rule=rule)
-    # Both readers use this host-prepared rule and exactly these spectral nodes.
-    np.testing.assert_array_equal(q.nodes_nm, image_q.nodes_nm)
-    np.testing.assert_array_equal(q.weights_nm, image_q.weights_nm)
-    np.testing.assert_array_equal(q.nodes_nm, prepared.quadrature.nodes_nm)
-    np.testing.assert_array_equal(q.weights_nm, prepared.quadrature.weights_nm)
+    q = Quadrature.build(bands, system, base, zodi)
+    prepared = prepare_aperture(base, q, rule=rule)
     rates = je.aperture_rates(
         system,
         base,
-        bands,
+        prepared,
         time_d=time_d,
         planet_index=0,
-        rule=rule,
-        quadrature=q,
-        prepared_aperture=prepared,
         zodi=zodi,
         exozodi="scene",
     )
-    calculator = base.detector.electrons(rates.mean, q)
+    calculator = base.detector.electrons(rates.mean)
     expected = np.stack([np.asarray(getattr(calculator, name)) for name in TERMS])
     east, north = system.positions(jnp.array([time_d]))[:2, 0, 0]
     x, y = pointing.sky_to_detector(east, north)
@@ -144,14 +135,14 @@ def closure(tmp_path_factory):
         calc_ladder.append(
             np.asarray(
                 base.detector.electrons(
-                    replace(rates.mean, planet=jnp.stack(node_rates)), q
+                    replace(rates.mean, planet=jnp.stack(node_rates))
                 ).planet
             )
         )
     calc_ladder = np.asarray(calc_ladder)
     analytic = np.asarray(
         base.detector.electrons(
-            replace(rates.mean, planet=jnp.stack(analytic_nodes)), q
+            replace(rates.mean, planet=jnp.stack(analytic_nodes))
         ).planet
     )
     calc_limit, calc_order, calc_uncertainty = _richardson(calc_ladder)
@@ -175,10 +166,9 @@ def closure(tmp_path_factory):
         images = image_electrons(
             system,
             path,
-            bands,
+            q,
             time_d=time_d,
             pointing=pointing,
-            quadrature=prepared.quadrature,
             zodi=zodi,
         )
         sky = PixelGrid.regular((n, n), pitch * scale, "arcsec", orientation=pointing)
@@ -211,7 +201,7 @@ def closure(tmp_path_factory):
         disk_difference = replace(
             rates.mean, exozodi=rates.mean.exozodi * jnp.asarray(average / centre - 1)
         )
-        bounds.append(np.asarray(detector.electrons(disk_difference, q).exozodi))
+        bounds.append(np.asarray(detector.electrons(disk_difference).exozodi))
         # Model-form difference b includes native deposition and PSF redistribution.
         # Compute the unconvolved aperture flux independently from sky radiance.
         raw_nodes = []
@@ -233,7 +223,7 @@ def closure(tmp_path_factory):
                 )
             raw_nodes.append(jnp.stack(raw_row))
         raw = detector.electrons(
-            replace(rates.mean, exozodi=jnp.stack(raw_nodes)), q
+            replace(rates.mean, exozodi=jnp.stack(raw_nodes))
         ).exozodi
         redistribution.append(np.asarray(sums.exozodi - raw))
         if n == 48:
@@ -241,28 +231,23 @@ def closure(tmp_path_factory):
             doubled_rates = je.aperture_rates(
                 doubled,
                 path,
-                bands,
+                prepared,
                 time_d=time_d,
                 planet_index=0,
-                rule=rule,
-                quadrature=q,
-                prepared_aperture=prepared,
                 zodi=zodi,
                 exozodi="scene",
             )
             doubled_images = image_electrons(
                 doubled,
                 path,
-                bands,
+                q,
                 time_d=time_d,
                 pointing=pointing,
-                quadrature=q,
                 zodi=zodi,
             )
             dust_ratios = np.stack(
                 (
-                    detector.electrons(doubled_rates.mean, q).exozodi
-                    / calculator.exozodi,
+                    detector.electrons(doubled_rates.mean).exozodi / calculator.exozodi,
                     jnp.sum(doubled_images.exozodi * weights, axis=(-2, -1))
                     / sums.exozodi,
                 )
@@ -277,7 +262,7 @@ def closure(tmp_path_factory):
         ) ** 2
         image_snr = sums.planet * plan.live_time_s / jnp.sqrt(variance)
         detector_rates = replace(rates, n_pix=n_pix, n_pix_variance=n_pix)
-        calc_snr = je.snr(detector_rates, detector, q, plan, post_processing=pp)
+        calc_snr = je.snr(detector_rates, detector, plan, post_processing=pp)
         snrs.append(np.stack((calc_snr, image_snr)))
         snr_bounds.append((detector, n_pix))
     measured, bounds, snrs = np.asarray(measured), np.asarray(bounds), np.asarray(snrs)
@@ -313,7 +298,7 @@ def closure(tmp_path_factory):
                     0,
                 )
             interval = ElectronRates(
-                **values, thermal=jnp.zeros(2), stellar_companions=jnp.zeros(2)
+                bands, **values, thermal=jnp.zeros(2), stellar_companions=jnp.zeros(2)
             )
             _, variance = detector.mean_and_variance(interval, plan, n_pix=n_pix)
             variance += (

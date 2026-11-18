@@ -109,10 +109,11 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
     sigma_lod: float = 0.35
     chromatic: bool = eqx.field(static=True, default=False)
 
-    def __init__(self, n=40, step=0.25, *, chromatic=False, frame=None):
+    def __init__(self, n=40, step=0.25, *, chromatic=False, frame=None, bandpass=None):
         """Build an n x n focal grid with the given lambda/D step."""
         if frame is None:
             frame = Frame(550.0, 6.0, "circumscribed")
+        self.bandpass = bandpass
         self.grid = PixelGrid.focal(n, step, frame)
         self.chromatic = chromatic
         self.sky_trans = Image(
@@ -275,9 +276,9 @@ def make_path(
     )
 
 
-def worked_setup():
+def worked_setup(*, n_wavelengths=1201):
     """AB=5 flat F_nu, dense cubic photon interpolation, linear contrast."""
-    wave = jnp.linspace(400.0, 700.0, 1201)
+    wave = jnp.linspace(400.0, 700.0, n_wavelengths)
     star = Star(
         wavelengths_nm=wave,
         times_d=jnp.array([0.0]),

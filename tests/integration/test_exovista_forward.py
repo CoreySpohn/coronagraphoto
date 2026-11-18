@@ -4,7 +4,7 @@ import numpy as np
 from conftest import make_path, write_scene
 from hwoutils.constants import arcsec2rad
 from hwoutils.grids import SkyOrientation
-from hwoutils.spectral import Band
+from hwoutils.spectral import Band, Quadrature
 
 from coronagraphoto import image_rates, load_scene_from_exovista
 
@@ -29,10 +29,9 @@ def test_exovista_native_disk_and_position_angle(tmp_path):
     rates = image_rates(
         system,
         path,
-        (Band(549.5, 550.5),),
+        Quadrature.build((Band(549.5, 550.5),), scene, path, order=1),
         time_d=0.0,
         pointing=SkyOrientation(30),
-        quadrature_order=1,
         zodi=scene.zodi,
     )
     # Absolute incoming local-zodi normalization, on an interior pixel.

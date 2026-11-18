@@ -9,7 +9,7 @@ import pytest
 from conftest import make_path, make_system, write_yip
 from hwoutils.constants import arcsec2rad
 from hwoutils.grids import PixelGrid, SkyOrientation, resample
-from hwoutils.spectral import Band
+from hwoutils.spectral import Band, Quadrature
 from skyscapes.scene import BlackbodyStar, FlatStar
 from yippy import open_yip
 from zodi.jax import PrecomputedZodi
@@ -66,10 +66,9 @@ def test_yip_image_absolute_photon_fraction(tmp_path, distinct_products):
     rates = image_rates(
         system,
         path,
-        (Band(549.5, 550.5),),
+        Quadrature.build((Band(549.5, 550.5),), system, path, zodi, order=1),
         time_d=0.0,
         pointing=SkyOrientation(90),
-        quadrature_order=1,
         zodi=zodi,
     )
     np.testing.assert_allclose(

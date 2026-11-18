@@ -14,7 +14,7 @@ from conftest import (
 )
 from hwoutils.constants import arcsec2rad
 from hwoutils.grids import Image, PixelGrid, SkyOrientation
-from hwoutils.spectral import Band
+from hwoutils.spectral import Band, Quadrature
 from optixstuff.apertures import Circular
 from skyscapes.disk import ExovistaDisk
 from zodi.jax import PrecomputedZodi
@@ -81,10 +81,9 @@ def test_aperture_closure_two_samplings():
         rates = image_rates(
             system,
             path,
-            (Band(549.5, 550.5),),
+            Quadrature.build((Band(549.5, 550.5),), system, path, zodi, order=1),
             time_d=0.0,
             pointing=SkyOrientation(0),
-            quadrature_order=1,
             zodi=zodi,
         )
         aperture_grid = PixelGrid.regular((n, n), step, "lod", frame=coro.grid.frame)
@@ -182,9 +181,9 @@ def test_disk_equals_pixel_center_source():
         sky_pa_deg=float(jnp.rad2deg(jnp.arctan2(east, north))),
         disk=disk,
     )
-    options = dict(time_d=0.0, pointing=SkyOrientation(0), quadrature_order=1)
-    bands = (Band(549.5, 550.5),)
-    rates = image_rates(system, path, bands, **options)
+    options = dict(time_d=0.0, pointing=SkyOrientation(0))
+    q = Quadrature.build((Band(549.5, 550.5),), system, path, order=1)
+    rates = image_rates(system, path, q, **options)
     a, b = np.asarray(rates.planet), np.asarray(rates.exozodi)
     np.testing.assert_allclose(a, b, atol=64 * np.finfo(float).eps * a.max(), rtol=0)
     native = path.coronagraph.grid
@@ -198,4 +197,4 @@ def test_disk_equals_pixel_center_source():
     assert np.max(abs(shifted - correct)) / correct.max() > 0.05
     missing = make_path(n=20, step=0.3)
     with pytest.raises(TypeError, match="AbstractSceneCoronagraph"):
-        image_rates(system, missing, bands, **options)
+        image_rates(system, missing, q, **options)

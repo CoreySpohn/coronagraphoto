@@ -7,8 +7,7 @@ be arguments of JAX transformations. A roll changes the
 position angle of detector +y, north through east, in SkyOrientation.
 """
 
-from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import lru_cache, partial
 
 import equinox as eqx
@@ -17,7 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import arcsec2rad
 from hwoutils.grids import Image, PixelGrid, SkyOrientation, resample
-from hwoutils.spectral import Band, Quadrature
+from hwoutils.spectral import Quadrature
 from optixstuff import ElectronRates, FramePlan, OpticalPath, PhotonRates
 from optixstuff.coronagraph import AbstractImagingCoronagraph, AbstractSceneCoronagraph
 from optixstuff.speckle import AbstractSpeckleField
@@ -150,7 +149,14 @@ def _node_rates(
         )
         disk = jnp.where(rendered.valid, disk, jnp.nan)
     zero = jnp.zeros(grid.shape)
-    return PhotonRates(planet, leakage, local, disk, zero, zero)
+    return dict(
+        planet=planet,
+        star_leakage=leakage,
+        local_zodi=local,
+        exozodi=disk,
+        thermal=zero,
+        stellar_companions=zero,
+    )
 
 
 def _reader(
@@ -166,14 +172,7 @@ def _reader(
 ):
     """Prepare static node geometry and solve the orbit once per observation."""
     grid = _detector_grid(optical_path, pointing)
-    with jax.ensure_compile_time_eval():
-        quadrature = Quadrature(
-            *(
-                jnp.asarray(np.frombuffer(data, dtype=dtype).reshape(shape))
-                for shape, dtype, data in quadrature
-            )
-        )
-        nodes = np.asarray(quadrature.nodes_nm).ravel()
+    nodes = np.asarray(quadrature.nodes_nm).ravel()
     ephemeris, positions = None, None
     if system.planets:
         times = jnp.atleast_1d(time_d)
@@ -197,32 +196,38 @@ def _reader(
         )
         for w in nodes
     )
-    return grid, quadrature, branches
+    return grid, branches
+
+
+@dataclass(frozen=True, eq=False)
+class _StaticQuadrature:
+    """Keep the concrete wavelength geometry in the kernel closure."""
+
+    rule: Quadrature
+
+    def __hash__(self):
+        return id(self.rule)
+
+    def __eq__(self, other):
+        return isinstance(other, _StaticQuadrature) and self.rule is other.rule
 
 
 def _kernel_arguments(
     system,
     optical_path,
-    bands,
+    quadrature,
     time_d,
     pointing,
-    quadrature_order,
-    quadrature,
     zodi,
     speckle,
     ecliptic_latitude_deg,
     solar_longitude_deg,
 ):
-    """Freeze host quadrature by value and keep observation scalars dynamic."""
-    if quadrature is None:
-        with jax.ensure_compile_time_eval():
-            quadrature = Quadrature.build(bands, None, quadrature_order)
+    """Select concrete geometry and keep observation scalars dynamic."""
     if any(isinstance(x, jax.core.Tracer) for x in jax.tree.leaves(quadrature)):
         raise ValueError(
             "quadrature must be concrete host geometry; close over it under JIT"
         )
-    if quadrature.nodes_nm.shape[0] != len(bands):
-        raise ValueError("quadrature must have one row per band")
     coro = optical_path.coronagraph
     for wavelength_nm in np.unique(np.asarray(quadrature.nodes_nm)):
         band = coro.band(float(wavelength_nm)) if coro is not None else None
@@ -230,16 +235,11 @@ def _kernel_arguments(
             raise TypeError("image formation requires an AbstractImagingCoronagraph")
         if system.disk is not None and not isinstance(band, AbstractSceneCoronagraph):
             raise TypeError("a system with a disk requires an AbstractSceneCoronagraph")
-    quadrature = tuple(
-        (a.shape, a.dtype.str, a.tobytes())
-        for a in map(np.asarray, (quadrature.nodes_nm, quadrature.weights_nm))
-    )
     return (
         system,
         optical_path,
         jnp.asarray(time_d),
         pointing,
-        quadrature,
         zodi,
         speckle,
         jnp.asarray(ecliptic_latitude_deg),
@@ -252,16 +252,18 @@ def _image_impl(
     optical_path,
     time_d,
     pointing,
-    quadrature,
     zodi,
     speckle,
     ecliptic_latitude_deg,
     solar_longitude_deg,
     *,
+    quadrature,
     kind,
+    host_loop=False,
 ):
-    """Render one configuration with array leaves supplied at runtime."""
-    grid, quadrature, branches = _reader(
+    """Render the same concrete node geometries under JIT or host iteration."""
+    quadrature = quadrature.rule
+    grid, branches = _reader(
         system,
         optical_path,
         time_d,
@@ -273,36 +275,54 @@ def _image_impl(
         solar_longitude_deg,
     )
     if kind == "photons":
-        values = jax.lax.map(
-            lambda i: jax.lax.switch(i, branches), jnp.arange(len(branches))
-        )
+        if host_loop:
+            values = jax.tree.map(
+                lambda *x: jnp.stack(x), *(read() for read in branches)
+            )
+        else:
+            values = jax.lax.map(
+                lambda i: jax.lax.switch(i, branches), jnp.arange(len(branches))
+            )
         return jax.tree.map(
             lambda x: x.reshape((*quadrature.nodes_nm.shape, *grid.shape)), values
         )
 
-    n_bands, n_nodes = quadrature.nodes_nm.shape
-    initial = ElectronRates(
-        **{
-            name: jnp.zeros((n_bands, *grid.shape))
-            for name in PhotonRates.__dataclass_fields__
+    # Grid metadata is static, so stage the concrete wavelength branches of
+    # each band. Only its accumulated rate and one node image are live.
+    n_nodes = quadrature.nodes_nm.shape[1]
+
+    def render_band(i):
+        row = quadrature.band(i)
+        band_branches = branches[i * n_nodes : (i + 1) * n_nodes]
+        initial = {
+            name: jnp.zeros(grid.shape) for name in ElectronRates.component_names()
         }
+
+        def accumulate(total, j, components):
+            single = Quadrature(
+                row.bands, row.nodes_nm[:, j, None], row.weights_nm[:, j, None]
+            )
+            photons = PhotonRates(
+                single, **jax.tree.map(lambda x: x[None, None], components)
+            )
+            electrons = optical_path.detector.electrons(photons)
+            return {name: a + getattr(electrons, name)[0] for name, a in total.items()}
+
+        if host_loop:
+            total = initial
+            for j, read in enumerate(band_branches):
+                total = accumulate(total, j, read())
+            return total
+
+        def step(total, j):
+            return accumulate(total, j, jax.lax.switch(j, band_branches)), None
+
+        return jax.lax.scan(step, initial, jnp.arange(n_nodes))[0]
+
+    rows = [render_band(i) for i in range(len(quadrature.bands))]
+    return ElectronRates(
+        quadrature.bands, **jax.tree.map(lambda *x: jnp.stack(x), *rows)
     )
-
-    def accumulate(total, index):
-        photons = jax.lax.switch(index, branches)
-        photons = jax.tree.map(lambda x: x[None, None], photons)
-        single = Quadrature(
-            quadrature.nodes_nm.reshape(-1)[index].reshape(1, 1),
-            quadrature.weights_nm.reshape(-1)[index].reshape(1, 1),
-        )
-        electrons = optical_path.detector.electrons(photons, single)
-        total = jax.tree.map(
-            lambda a, b: a.at[index // n_nodes].add(b[0]), total, electrons
-        )
-        return total, None
-
-    electrons = jax.lax.scan(accumulate, initial, jnp.arange(len(branches)))[0]
-    return electrons
 
 
 def _draw_impl(detector, key, electrons, plan):
@@ -330,6 +350,12 @@ def _image_kernel(*args, _function=_image_impl, **kwargs):
     arrays = jax.tree.leaves(dynamic)
     if any(isinstance(a, jax.core.Tracer) for a in arrays):
         return _function(*args, **kwargs)
+    # Each static wavelength needs its own resampling geometry and switch
+    # branch. A dense spectrum can have thousands of nodes. Keep the eager
+    # compiler footprint bounded by dispatching those node operations directly.
+    quadrature = kwargs.get("quadrature")
+    if quadrature is not None and quadrature.rule.nodes_nm.size > 32:
+        return _function(*args, **kwargs, host_loop=True)
     static_leaves, treedef = jax.tree.flatten(static)
     signature = tuple(
         (a.shape, a.dtype, getattr(a, "weak_type", False)) for a in arrays
@@ -351,12 +377,10 @@ def clear_reader_cache():
 def image_rates(
     system: System,
     optical_path: OpticalPath,
-    bands: Sequence[Band],
+    quadrature: Quadrature,
     *,
     time_d,
     pointing: SkyOrientation,
-    quadrature_order: int = 4,
-    quadrature: Quadrature | None = None,
     zodi: AbstractLocalZodi | None = None,
     speckle: AbstractSpeckleField | None = None,
     ecliptic_latitude_deg=0.0,
@@ -364,40 +388,36 @@ def image_rates(
 ) -> PhotonRates:
     """Return full (W,Q,ny,nx) photon integrands, in photons/s/nm/pixel.
 
-    Pass a host-prepared quadrature to share nodes and weights with other
-    readers; otherwise use Quadrature.build(bands, None, quadrature_order)
-    to integrate this record. The default is unsplit Gauss-Legendre: subdivide
-    bands at spectral breaks and increase order to resolve spectral structure.
+    Build quadrature on the host from the system, path and active backgrounds.
+    Call integrate() on the returned record to integrate its spectral nodes.
     No QE or survival is applied. zodi=None disables local zodi; speckle=None
     uses the path's optional speckle field. Thermal and companion terms are zero.
     """
-    return _image_kernel(
+    components = _image_kernel(
         *_kernel_arguments(
             system,
             optical_path,
-            bands,
+            quadrature,
             time_d,
             pointing,
-            quadrature_order,
-            quadrature,
             zodi,
             speckle,
             ecliptic_latitude_deg,
             solar_longitude_deg,
         ),
+        quadrature=_StaticQuadrature(quadrature),
         kind="photons",
     )
+    return PhotonRates(quadrature, **components)
 
 
 def image_electrons(
     system: System,
     optical_path: OpticalPath,
-    bands: Sequence[Band],
+    quadrature: Quadrature,
     *,
     time_d,
     pointing: SkyOrientation,
-    quadrature_order: int = 4,
-    quadrature: Quadrature | None = None,
     zodi: AbstractLocalZodi | None = None,
     speckle: AbstractSpeckleField | None = None,
     ecliptic_latitude_deg=0.0,
@@ -405,29 +425,26 @@ def image_electrons(
 ) -> ElectronRates:
     """Stream nodes into (W,ny,nx) electrons/s with detector-owned yield.
 
-    quadrature, when supplied, owns the nodes and weights and supersedes
-    quadrature_order. Its arrays become a static key by value; close over
-    this host-prepared geometry under JIT. OpticalPath may be an argument.
-    Each scan step wraps one photon image in (1,1,ny,nx), passes its one-node
-    Quadrature to detector.electrons, and adds that result to its band. No
-    node images are stacked. Static-grid branches grow compile size with Q;
-    forward image storage is the band accumulator plus one node's images.
+    Close over the host-prepared quadrature under JIT. Each scan step sends
+    one photon image and its original wavelength and weight to the detector.
+    The eager cache reuses kernels for the same quadrature object. Static-grid
+    branches grow compile size with Q. Forward storage is the band accumulator
+    plus one node's images.
     JAX reverse-mode may retain residuals for differentiation.
     """
     return _image_kernel(
         *_kernel_arguments(
             system,
             optical_path,
-            bands,
+            quadrature,
             time_d,
             pointing,
-            quadrature_order,
-            quadrature,
             zodi,
             speckle,
             ecliptic_latitude_deg,
             solar_longitude_deg,
         ),
+        quadrature=_StaticQuadrature(quadrature),
         kind="electrons",
     )
 
@@ -436,13 +453,11 @@ def observe(
     key,
     system: System,
     optical_path: OpticalPath,
-    bands: Sequence[Band],
+    quadrature: Quadrature,
     plan: FramePlan,
     *,
     time_d,
     pointing: SkyOrientation,
-    quadrature_order: int = 4,
-    quadrature: Quadrature | None = None,
     zodi: AbstractLocalZodi | None = None,
     speckle: AbstractSpeckleField | None = None,
     ecliptic_latitude_deg=0.0,
@@ -457,11 +472,9 @@ def observe(
     electrons = image_electrons(
         system,
         optical_path,
-        bands,
+        quadrature,
         time_d=time_d,
         pointing=pointing,
-        quadrature_order=quadrature_order,
-        quadrature=quadrature,
         zodi=zodi,
         speckle=speckle,
         ecliptic_latitude_deg=ecliptic_latitude_deg,

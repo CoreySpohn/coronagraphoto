@@ -12,28 +12,28 @@ count. It does not precompute or retain all node images. The table adapter's
 reference sampling is scaled to each concrete node using shared grid tools.
 
 All three public readers share a cache of at most four eager JIT functions.
-The first eager call compiles; later calls reuse that kernel when static
+For rules with up to 32 nodes the first eager call compiles; later calls reuse that kernel when static
 configuration and array shapes/dtypes (including weak scalar types) match.
 The cache evicts the least recently used kernel, so returning to an evicted
 configuration compiles again. `observe` shares the `image_electrons` renderer,
 then draws detector noise in a separate small cached kernel; it does not
 retain a second image-rendering kernel. Rendering and noise share the same
-four-entry limit.
+four-entry limit. For larger rules, eager reads traverse the concrete node
+geometries on the host using the same JAX operations. This bounds the size of
+the compiled image program when dense spectral tables add hundreds of breaks.
+An outer JIT stages every concrete node into the caller's program.
 
 Time, sky-background coordinates, array-valued scene fluxes, detector yield/noise parameters and PRNG keys remain runtime
 inputs. Use arrays for numerical scene parameters that you intend to vary;
-Equinox treats Python scalar leaves as static. Bands, pointing, quadrature
-order, detector pixel scale/shape and coronagraph grids are static geometry.
+Equinox treats Python scalar leaves as static. Pointing, quadrature, detector pixel scale/shape and coronagraph grids are static geometry.
 Changing these requires a new compilation. Numerical tables remain array
 inputs wherever the instrument exposes them as PyTree leaves.
 
-A supplied `Quadrature` is encoded by shape, dtype and exact node/weight bytes
-into an immutable, hashable kernel key. Equal rules share a kernel even when
-they are different objects; changing either array selects a new kernel. This
-small host copy is intentional: each wavelength requires concrete resampling
-geometry. Build the quadrature before tracing and close over it in an outer
-JIT; passing its arrays as traced arguments is unsupported. The default rule
-is built once while tracing the kernel. A supplied rule supersedes the order.
+The cache retains the concrete quadrature object, including its bands.
+Reuse that object across frames. Building a new quadrature selects a new
+kernel, even for equal nodes and weights. Each wavelength sets concrete
+resampling geometry. Prepare the rule before tracing and close over it in
+an outer JIT.
 
 The readers also compose with a caller's own JIT. While tracing they stage
 directly into that program, without adding an eager cache entry. Pass the
@@ -51,7 +51,7 @@ def predict(system, optical_path, key, time_d):
         key,
         system,
         optical_path,
-        bands,
+        quadrature,
         plan,
         time_d=time_d,
         pointing=pointing,

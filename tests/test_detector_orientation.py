@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from conftest import GaussianCoronagraph, centroid, make_path, make_system
 from hwoutils.grids import Frame, PixelGrid, SkyOrientation
-from hwoutils.spectral import Band
+from hwoutils.spectral import Band, Quadrature
 from optixstuff import MultiBandCoronagraph, ScalarCoronagraph
 from skyscapes.disk import ExovistaDisk
 from skyscapes.physical_model import GridPhysicalModel
@@ -28,8 +28,11 @@ def test_cardinal_centroids(sky_pa, roll, expected):
     system = make_system(sky_pa_deg=sky_pa, separation_arcsec=scale)
     # The smaller inscribed diameter enlarges lambda/D in the red band. A sky
     # source must still land on the same detector pixel.
-    second = GaussianCoronagraph(n=32, step=0.35, frame=Frame(600.0, 3.0, "inscribed"))
-    multiband = MultiBandCoronagraph((500.0, 600.0), (path.coronagraph, second))
+    blue = GaussianCoronagraph(bandpass=Band(490, 510))
+    red = GaussianCoronagraph(
+        n=32, step=0.35, frame=Frame(600.0, 3.0, "inscribed"), bandpass=Band(590, 610)
+    )
+    multiband = MultiBandCoronagraph((blue, red))
     two_band_path = replace(
         path,
         primary=replace(
@@ -40,10 +43,11 @@ def test_cardinal_centroids(sky_pa, roll, expected):
     rates = image_rates(
         system,
         two_band_path,
-        (Band(499.5, 500.5), Band(599.5, 600.5)),
+        Quadrature.build(
+            (Band(499.5, 500.5), Band(599.5, 600.5)), system, two_band_path, order=1
+        ),
         time_d=0.0,
         pointing=SkyOrientation(roll),
-        quadrature_order=1,
     )
     for image in rates.planet[:, 0]:
         grid = PixelGrid.regular(path.detector.shape, scale, "arcsec")
@@ -80,10 +84,9 @@ def test_cardinal_centroids(sky_pa, roll, expected):
                 image_rates(
                     scene,
                     path,
-                    (Band(549.5, 550.5),),
+                    Quadrature.build((Band(549.5, 550.5),), scene, path, order=1),
                     time_d=0.0,
                     pointing=SkyOrientation(90),
-                    quadrature_order=1,
                 ).planet[0, 0]
             )
         positions = scene.positions(jnp.array([0.0]))
@@ -148,10 +151,9 @@ def test_roll_moves_disk_and_planet_together(disk_kind):
         rates = image_rates(
             system,
             path,
-            (Band(549.5, 550.5),),
+            Quadrature.build((Band(549.5, 550.5),), system, path, order=1),
             time_d=0.0,
             pointing=SkyOrientation(roll),
-            quadrature_order=1,
         )
         delta = centroid(rates.planet[0, 0], grid) - [grid.center_x, grid.center_y]
         data = np.asarray(rates.exozodi[0, 0])
@@ -200,10 +202,9 @@ def test_compact_disk_planet_centroids():
     rates = image_rates(
         system,
         path,
-        (Band(549.5, 550.5),),
+        Quadrature.build((Band(549.5, 550.5),), system, path, order=1),
         time_d=0.0,
         pointing=SkyOrientation(0),
-        quadrature_order=1,
     )
     np.testing.assert_allclose(
         centroid(rates.planet[0, 0], grid),
@@ -230,7 +231,7 @@ def test_imaging_capability_required(throughput_only):
         image_rates(
             make_system(),
             path,
-            (Band(545.0, 555.0),),
+            Quadrature.monochromatic(550.0),
             time_d=0.0,
             pointing=SkyOrientation(0),
         )

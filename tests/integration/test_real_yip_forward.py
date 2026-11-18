@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from conftest import make_path, write_scene, write_yip
 from hwoutils.grids import SkyOrientation
-from hwoutils.spectral import Band
+from hwoutils.spectral import Band, Quadrature
 from optixstuff import FramePlan
 from yippy import open_yip
 
@@ -25,15 +25,13 @@ def test_fits_scene_yip_observation(tmp_path):
     )
     coro = open_yip(write_yip(tmp_path / "yip")).prepare()
     path = eqx.tree_at(lambda p: p.coronagraph, make_path(n=24, step=0.5), coro)
-    bands = (Band(545.0, 555.0),)
+    q = Quadrature.build((Band(545.0, 555.0),), scene, path, order=1)
     plan = FramePlan(10.0, 1.0)
-    options = dict(
-        time_d=0.0, pointing=SkyOrientation(0), quadrature_order=1, zodi=scene.zodi
-    )
-    rates = image_electrons(scene.system, path, bands, **options)
+    options = dict(time_d=0.0, pointing=SkyOrientation(0), zodi=scene.zodi)
+    rates = image_electrons(scene.system, path, q, **options)
     assert float(rates.planet.sum()) > 0
     assert float(rates.local_zodi.sum()) > 0
     key = jax.random.PRNGKey(0)
-    image = observe(key, scene.system, path, bands, plan, **options)
+    image = observe(key, scene.system, path, q, plan, **options)
     assert image.data.shape == (1, 24, 24)
     np.testing.assert_array_equal(image.data, path.detector.draw(key, rates, plan))

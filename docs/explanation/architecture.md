@@ -28,7 +28,7 @@ and dark scene pixels require no response.
 
 Photon quantities come directly from the scene. `PhotonRates` retains those
 four terms and zero thermal/companion fields. `image_electrons` sends each
-one-node photon record and its one-node quadrature to `detector.electrons`.
+photon record carrying that node's wavelength and integration weight to `detector.electrons`.
 `observe` calls `detector.draw` after all electron terms have been accumulated.
 
 ```mermaid

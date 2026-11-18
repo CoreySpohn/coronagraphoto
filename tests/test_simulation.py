@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 
+@pytest.mark.medium(reason="1600 declared stellar nodes in the worked spectrum")
 def test_worked_example():
     """Fails if the reader omits a spectral factor; 1e-9 quadrature bound."""
     import coronagraphoto as cp
@@ -16,10 +17,10 @@ def test_worked_example():
 
     system, path = worked_setup()
     bands = (Band(500, 600),)
-    rates = cp.image_rates(system, path, bands, time_d=0.0, pointing=SkyOrientation(0))
-    quad = Quadrature.build(bands, None, 4)
-    actual = float(rates.integrate(quad).planet.sum())
-    electrons = float(path.detector.electrons(rates, quad).planet.sum())
+    q = Quadrature.build(bands, system, path)
+    rates = cp.image_rates(system, path, q, time_d=0.0, pointing=SkyOrientation(0))
+    actual = float(rates.integrate().planet.sum())
+    electrons = float(path.detector.electrons(rates).planet.sum())
     nodes, weights = leggauss(128)
     wave, weights = 550 + 50 * nodes, 50 * weights
     # Conventional 3631 Jy AB zero point and SI Planck constant.
@@ -49,10 +50,11 @@ def test_node_yield_once(chromatic):
 
     from coronagraphoto import image_electrons, image_rates
 
-    system, path = worked_setup()
+    # The yield identity needs a color slope and an interior break.
+    system, path = worked_setup(n_wavelengths=7)
     bands = (Band(500, 600),)
-    q = Quadrature.build(bands, None, 4)
-    rates = image_rates(system, path, bands, time_d=0.0, pointing=SkyOrientation(0))
+    q = Quadrature.build(bands, system, path)
+    rates = image_rates(system, path, q, time_d=0.0, pointing=SkyOrientation(0))
     if not chromatic:
         import equinox as eqx
         import jax.numpy as jnp
@@ -63,7 +65,7 @@ def test_node_yield_once(chromatic):
             (jnp.array([500.0, 600.0]), jnp.array([0.8, 0.8])),
         )
     actual = image_electrons(
-        system, path, bands, time_d=0.0, pointing=SkyOrientation(0)
+        system, path, q, time_d=0.0, pointing=SkyOrientation(0)
     ).planet
     expected = np.zeros_like(actual)
     doubled = np.zeros_like(actual)
@@ -78,7 +80,7 @@ def test_node_yield_once(chromatic):
     )
     # Mutation controls on the same observable: >1% and >0.1% respectively.
     assert abs(doubled.sum() / expected.sum() - 1) > 0.01
-    band_mean = 0.9 * 0.8 * rates.integrate(q).planet.sum()
+    band_mean = 0.9 * 0.8 * rates.integrate().planet.sum()
     if chromatic:
         assert abs(float(band_mean) / expected.sum() - 1) > 0.001
     else:
@@ -103,18 +105,18 @@ def test_streaming_jit_and_gradient():
 
     from coronagraphoto import image_electrons, image_rates
 
-    system, path = worked_setup()
+    # Two bands with unequal node counts exercise zero-weight padding under JIT.
+    system, path = worked_setup(n_wavelengths=16)
     bands = (Band(500, 540), Band(550, 600))
+    q = Quadrature.build(bands, system, path)
     pointing = SkyOrientation(17.0)
     options = dict(time_d=jnp.asarray(0.0), pointing=pointing)
 
     def render(s):
-        return image_electrons(s, path, bands, **options)
+        return image_electrons(s, path, q, **options)
 
     eager = render(system)
-    full = path.detector.electrons(
-        image_rates(system, path, bands, **options), Quadrature.build(bands, None, 4)
-    )
+    full = path.detector.electrons(image_rates(system, path, q, **options))
     compiled = eqx.filter_jit(render)(system)
     for a, b, c in zip(
         jax.tree.leaves(eager),
@@ -147,7 +149,7 @@ def test_refused_planet_psf_only_invalidates_lit_source():
     import jax.numpy as jnp
     from conftest import GaussianCoronagraph, make_path, make_system
     from hwoutils.grids import SkyOrientation
-    from hwoutils.spectral import Band
+    from hwoutils.spectral import Quadrature
     from optixstuff import SourcePSFs
 
     from coronagraphoto import image_rates
@@ -166,12 +168,51 @@ def test_refused_planet_psf_only_invalidates_lit_source():
         planet = image_rates(
             make_system(contrast=contrast),
             path,
-            (Band(545.0, 555.0),),
+            Quadrature.monochromatic(550.0),
             time_d=0.0,
             pointing=SkyOrientation(0),
-            quadrature_order=1,
         ).planet
         if contrast == 0.0:
             np.testing.assert_array_equal(planet, 0.0)
         else:
             assert np.isnan(planet).all()
+
+
+def test_image_electrons_integrates_declared_response_kink():
+    """Fails if the image integrates across a declared triangular-filter kink.
+
+    Flat local sky and constant yield isolate the spectral integral at the
+    central pixel. A single unsplit midpoint would overestimate the area.
+    """
+    import equinox as eqx
+    import jax.numpy as jnp
+    from conftest import make_path, make_system
+    from hwoutils.constants import arcsec2rad
+    from hwoutils.grids import SkyOrientation
+    from hwoutils.spectral import Band, Quadrature, Transmission
+    from optixstuff import TransmissiveElement
+    from zodi.jax import PrecomputedZodi
+
+    from coronagraphoto import image_electrons
+
+    band = Band(510.0, 590.0)
+    response = Transmission([510.0, 533.0, 590.0], [0.0, 1.0, 0.0])
+    system, path = make_system(), make_path(n=8)
+    path = eqx.tree_at(
+        lambda p: p.attenuating_elements, path, (TransmissiveElement(response),)
+    )
+    path = eqx.tree_at(
+        lambda p: p.detector._qe_curve,
+        path,
+        (jnp.array([500.0, 600.0]), jnp.full(2, 0.8)),
+    )
+    sky = PrecomputedZodi(jnp.array([500.0, 600.0]), jnp.full(2, 1e12))
+    q = Quadrature.build((band,), system, path, sky, order=1)
+    image = image_electrons(
+        system, path, q, time_d=0.0, pointing=SkyOrientation(0), zodi=sky
+    )
+    omega = (path.detector.pixel_scale_arcsec * arcsec2rad) ** 2
+    expected = 40 * 0.3 * 1e12 * omega * 0.8 * 0.9 * band.width_nm / 2
+    np.testing.assert_allclose(
+        image.local_zodi[0, 4, 4], expected, rtol=32 * np.finfo(float).eps, atol=0
+    )
