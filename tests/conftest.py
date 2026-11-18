@@ -6,6 +6,7 @@
 import importlib.util
 import os
 import sys
+from dataclasses import replace
 
 sys.modules.setdefault("conftest", sys.modules[__name__])
 
@@ -76,11 +77,16 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import Mearth2kg, Msun2kg
 from hwoutils.epoch import Epoch
-from hwoutils.grids import Frame, Image, PixelGrid
+from hwoutils.grids import Frame, Image, PixelGrid, resample
 from hwoutils.spectral import Band
 from optixstuff import ConstantThroughput, Detector, OpticalPath, SimplePrimary
 from optixstuff.apertures import Circular
-from optixstuff.coronagraph import AbstractTableCoronagraph
+from optixstuff.coronagraph import (
+    AbstractSceneCoronagraph,
+    AbstractTableCoronagraph,
+    SceneRender,
+    SourcePSFs,
+)
 from optixstuff.performance import PerformanceCurves, SampledProfile
 from skyscapes.physical_model import GridPhysicalModel
 from skyscapes.scene import FlatStar, Planet, Star, System
@@ -92,46 +98,33 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
     """Analytic flux-fraction Gaussian tables, sigma=.35 lod and tau=.3.
 
     No renormalization at image boundaries. The finite-field truncation is
-    explicitly controlled by the fixture dimensions. Extended scenes use the
-    production full-cube contraction, including its pixel-centre convention.
+    explicitly controlled by the fixture dimensions.
     """
 
     grid: PixelGrid = eqx.field(static=True)
     sky_trans: Image
-    occulter_transmission_profile: SampledProfile
-    psf_datacube: object
+    uniform_sky_profile: SampledProfile
     bandpass: Band | None = None
     outer_working_angle_lod: object = None
     sigma_lod: float = 0.35
     chromatic: bool = eqx.field(static=True, default=False)
 
-    def __init__(self, n=40, step=0.25, *, chromatic=False, cube=False):
+    def __init__(self, n=40, step=0.25, *, chromatic=False, frame=None):
         """Build an n x n focal grid with the given lambda/D step."""
-        self.grid = PixelGrid.focal(
-            n,
-            step,
-            SimplePrimary(circumscribed_diameter_m=6.0, collecting_area_m2=40.0).frame(
-                550.0
-            ),
-        )
+        if frame is None:
+            frame = Frame(550.0, 6.0, "circumscribed")
+        self.grid = PixelGrid.focal(n, step, frame)
         self.chromatic = chromatic
         self.sky_trans = Image(
             jnp.full((n, n), 0.3), self.grid, (), "per_unit_area", "transmission"
         )
-        self.occulter_transmission_profile = SampledProfile(
+        self.uniform_sky_profile = SampledProfile(
             [0.0],
             [0.3],
-            quantity="occulter_transmission",
+            quantity="uniform_sky_response",
             frame=self.grid.frame,
             interpolation="linear",
         )
-        if cube:
-            x, y = self.grid.coordinates()
-            self.psf_datacube = self.source_psfs(
-                550.0, x.ravel(), y.ravel(), grid=None
-            ).data.reshape(n, n, n, n)
-        else:
-            self.psf_datacube = None
 
     def _native_source_psfs(self, x_lod, y_lod):
         """Integrate the sampled Gaussian with its stated native pixel area."""
@@ -145,7 +138,10 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
             / (2 * np.pi * self.sigma_lod**2)
             * jnp.exp(-r2 / (2 * self.sigma_lod**2))
         )
-        return Image(data, self.grid, ("source",), "per_pixel", "stellar_flux_fraction")
+        image = Image(
+            data, self.grid, ("source",), "per_pixel", "stellar_flux_fraction"
+        )
+        return SourcePSFs(image, jnp.ones(data.shape[0], dtype=bool))
 
     def _native_stellar_map(self, stellar_diam_lod):
         """Uniform leakage density with a resolved-diameter response."""
@@ -158,13 +154,13 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
             "stellar_flux_fraction",
         )
 
-    def source_psfs(self, wavelength_nm, x_lod, y_lod, *, grid):
+    def source_psfs(self, wavelength_nm, x_lod, y_lod, *, grid=None):
         """Optional chromatic throughput used by the worked example."""
-        from dataclasses import replace
-
-        image = super().source_psfs(wavelength_nm, x_lod, y_lod, grid=grid)
+        result = super().source_psfs(wavelength_nm, x_lod, y_lod, grid=grid)
         factor = 1 + 0.002 * (wavelength_nm - 550) if self.chromatic else 1.0
-        return replace(image, data=image.data * factor)
+        return SourcePSFs(
+            replace(result.image, data=result.image.data * factor), result.valid
+        )
 
     def curves(self, rule=_RULE, *, leakage_rule="aperture_mean"):
         """Closed-form circular Gaussian and constant leakage integrals."""
@@ -186,6 +182,30 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
             leakage_fraction_variance=[1e-9 * area],
             leakage_density_variance_lod2=[1e-9],
         )
+
+
+class GaussianSceneCoronagraph(GaussianCoronagraph, AbstractSceneCoronagraph):
+    """Full dense operator built from the same synthetic off-axis PSFs."""
+
+    operator: object
+
+    def __init__(self, n=40, step=0.25, *, chromatic=False):
+        """Prepare a full set of native Gaussian source responses."""
+        from yippy import DenseSceneOperator
+
+        super().__init__(n, step, chromatic=chromatic)
+        x, y = self.grid.coordinates()
+        psfs = self.source_psfs(550.0, x.ravel(), y.ravel(), grid=None)
+        self.operator = DenseSceneOperator(
+            psfs.image.data.reshape(n, n, n, n), psfs.valid.reshape(n, n)
+        )
+
+    def render_scene(self, scene, wavelength_nm, *, grid):
+        """Apply the production dense operator to per-pixel incident flux."""
+        flux = resample(scene, self.grid).data
+        data, valid = self.operator.render(flux, self.grid)
+        native = Image(data, self.grid, (), "per_pixel", scene.quantity)
+        return SceneRender(resample(native, grid), valid)
 
 
 def make_system(
@@ -232,7 +252,8 @@ def make_path(
     *, n=40, step=0.25, detector_n=None, detector_step=None, chromatic=False, cube=False
 ):
     """40 m2 collecting area, .4 optical throughput, separate spectral yield."""
-    coro = GaussianCoronagraph(n, step, chromatic=chromatic, cube=cube)
+    model = GaussianSceneCoronagraph if cube else GaussianCoronagraph
+    coro = model(n, step, chromatic=chromatic)
     scale = float(coro.grid.frame.lod_to_arcsec(550.0))
     detector = Detector(
         pixel_scale_arcsec=(step if detector_step is None else detector_step) * scale,
@@ -275,7 +296,7 @@ def centroid(data, grid):
     return np.array([(data * xx).sum(), (data * yy).sum()]) / data.sum()
 
 
-class PlateauCoronagraph(GaussianCoronagraph):
+class PlateauCoronagraph(GaussianSceneCoronagraph):
     """Manufactured square PSF: .3/16 per lod2 in a 4-by-4 lod square.
 
     Half-weight boundary samples give total .3 on the native source lattice.
@@ -291,13 +312,14 @@ class PlateauCoronagraph(GaussianCoronagraph):
         dy = jnp.abs(y[None] - jnp.atleast_1d(y_lod)[:, None, None])
         wx = jnp.where(dx < 2.0, 1.0, jnp.where(dx == 2.0, 0.5, 0.0))
         wy = jnp.where(dy < 2.0, 1.0, jnp.where(dy == 2.0, 0.5, 0.0))
-        return Image(
+        image = Image(
             0.3 / 16 * self.grid.pixel_area * wx * wy,
             self.grid,
             ("source",),
             "per_pixel",
             "stellar_flux_fraction",
         )
+        return SourcePSFs(image, jnp.ones(image.data.shape[0], dtype=bool))
 
     def curves(self, rule=_RULE, *, leakage_rule="aperture_mean"):
         """Independent exact area integrals of the manufactured uniform fields."""

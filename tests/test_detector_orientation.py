@@ -1,12 +1,15 @@
 """Sky offsets and disk geometry on even detector grids."""
 
+from dataclasses import replace
+
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import centroid, make_path, make_system
-from hwoutils.grids import PixelGrid, SkyOrientation
+from conftest import GaussianCoronagraph, centroid, make_path, make_system
+from hwoutils.grids import Frame, PixelGrid, SkyOrientation
 from hwoutils.spectral import Band
+from optixstuff import MultiBandCoronagraph, ScalarCoronagraph
 from skyscapes.disk import ExovistaDisk
 from skyscapes.physical_model import GridPhysicalModel
 from skyscapes.scene import Planet
@@ -23,16 +26,26 @@ def test_cardinal_centroids(sky_pa, roll, expected):
     path = make_path()
     scale = float(path.detector.pixel_scale_arcsec)
     system = make_system(sky_pa_deg=sky_pa, separation_arcsec=scale)
-    # Two wavelengths also guard against a chromatically moving planet.
-    for wave in (500.0, 600.0):
-        image = image_rates(
-            system,
-            path,
-            (Band(wave - 0.5, wave + 0.5),),
-            time_d=0.0,
-            pointing=SkyOrientation(roll),
-            quadrature_order=1,
-        ).planet[0, 0]
+    # The smaller inscribed diameter enlarges lambda/D in the red band. A sky
+    # source must still land on the same detector pixel.
+    second = GaussianCoronagraph(n=32, step=0.35, frame=Frame(600.0, 3.0, "inscribed"))
+    multiband = MultiBandCoronagraph((500.0, 600.0), (path.coronagraph, second))
+    two_band_path = replace(
+        path,
+        primary=replace(
+            path.primary, inscribed_diameter_m=3.0, collecting_area_m2=20.0
+        ),
+        coronagraph=multiband,
+    )
+    rates = image_rates(
+        system,
+        two_band_path,
+        (Band(499.5, 500.5), Band(599.5, 600.5)),
+        time_d=0.0,
+        pointing=SkyOrientation(roll),
+        quadrature_order=1,
+    )
+    for image in rates.planet[:, 0]:
         grid = PixelGrid.regular(path.detector.shape, scale, "arcsec")
         np.testing.assert_allclose(
             centroid(image, grid) - [grid.center_x, grid.center_y],
@@ -80,7 +93,7 @@ def test_cardinal_centroids(sky_pa, roll, expected):
             positions[1, :, 0] / lod_arcsec,
             positions[0, :, 0] / lod_arcsec,
             grid=None,
-        ).data
+        ).image.data
         reference = (
             40
             * 0.4
@@ -198,3 +211,26 @@ def test_compact_disk_planet_centroids():
         atol=0.02,
         rtol=0,
     )
+
+
+@pytest.mark.parametrize("throughput_only", [False, True])
+def test_imaging_capability_required(throughput_only):
+    """ETC-only and throughput-only paths cannot produce detector pixels."""
+    path = make_path(n=8)
+    scalar = ScalarCoronagraph(
+        grid=path.coronagraph.grid,
+        throughput_fraction=0.3,
+        aperture_area_lod2=1.0,
+        stellar_leakage_density_lod2=1e-9,
+    )
+    path = eqx.tree_at(
+        lambda p: p.coronagraph, path, None if throughput_only else scalar
+    )
+    with pytest.raises(TypeError, match="AbstractImagingCoronagraph"):
+        image_rates(
+            make_system(),
+            path,
+            (Band(545.0, 555.0),),
+            time_d=0.0,
+            pointing=SkyOrientation(0),
+        )

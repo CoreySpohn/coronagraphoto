@@ -137,3 +137,41 @@ def test_streaming_jit_and_gradient():
     np.testing.assert_allclose(
         jax.grad(total)(1.0), (total(1 + h) - total(1 - h)) / (2 * h), rtol=1e-9
     )
+
+
+def test_refused_planet_psf_only_invalidates_lit_source():
+    """A refused PSF contributes zero for a dark planet and NaN for a lit one."""
+    from dataclasses import replace
+
+    import equinox as eqx
+    import jax.numpy as jnp
+    from conftest import GaussianCoronagraph, make_path, make_system
+    from hwoutils.grids import SkyOrientation
+    from hwoutils.spectral import Band
+    from optixstuff import SourcePSFs
+
+    from coronagraphoto import image_rates
+
+    class RefusedSource(GaussianCoronagraph):
+        def _native_source_psfs(self, x_lod, y_lod):
+            psfs = super()._native_source_psfs(x_lod, y_lod)
+            return SourcePSFs(
+                replace(psfs.image, data=jnp.full_like(psfs.image.data, jnp.nan)),
+                jnp.zeros_like(psfs.valid),
+            )
+
+    path = make_path(n=8)
+    path = eqx.tree_at(lambda p: p.coronagraph, path, RefusedSource(n=8))
+    for contrast in (0.0, 1e-10):
+        planet = image_rates(
+            make_system(contrast=contrast),
+            path,
+            (Band(545.0, 555.0),),
+            time_d=0.0,
+            pointing=SkyOrientation(0),
+            quadrature_order=1,
+        ).planet
+        if contrast == 0.0:
+            np.testing.assert_array_equal(planet, 0.0)
+        else:
+            assert np.isnan(planet).all()

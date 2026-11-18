@@ -17,8 +17,14 @@ With collecting area A and throughput T excluding the detector, one node is:
 - `planet = A T Phi_planet PSF_pixel`, summed over scene planets.
 - `star_leakage = A T Phi_star stellar_map_pixel`, plus the existing positive
   time-dependent speckle excess.
-- `local_zodi = A T L_zodi Omega_pixel background_transmission_pixel`.
-- `exozodi = A T extended_scene(L_disk Omega_pixel)`.
+- `local_zodi = A T L_zodi Omega_pixel uniform_sky_map_pixel`.
+- `exozodi = A T render_scene(L_disk Omega_pixel)`.
+
+Each wavelength uses the source, stellar and uniform-sky grids of its selected
+imaging band. A system with a disk requires a scene-capable band, such as a
+prepared YIP with `with_scene_operator()`. An unsupported illuminated position
+produces NaN in the corresponding planet or disk rate image. Zero-flux planets
+and dark scene pixels require no response.
 
 Photon quantities come directly from the scene. `PhotonRates` retains those
 four terms and zero thermal/companion fields. `image_electrons` sends each

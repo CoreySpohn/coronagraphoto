@@ -57,7 +57,7 @@ def closure(tmp_path_factory):
         .prepare(
             rules=(rule,),
         )
-        .create_psf_datacube()
+        .with_scene_operator()
     )
     base = eqx.tree_at(lambda p: p.coronagraph, make_path(), coro)
     scale = float(base.primary.frame(550.0).lod_to_arcsec(550.0))
@@ -119,7 +119,7 @@ def closure(tmp_path_factory):
                     # The record integrates native point-density samples.
                     image = coro.source_psfs(
                         550.0, jnp.array([s]), jnp.zeros(1), grid=None
-                    )
+                    ).image
                     return replace(image, data=image.data[0], leading_axes=())
 
                 refined = _performance_curves(
@@ -218,7 +218,9 @@ def closure(tmp_path_factory):
         for row, waves in enumerate(np.asarray(q.nodes_nm)):
             raw_row = []
             for node, wave in enumerate(waves):
-                transmission = coro.background_transmission(wave, grid=coro.grid).data
+                transmission = coro.uniform_sky_map(
+                    wave, grid=coro.at_wavelength(wave).sky_grid
+                ).data
                 # This fixture has spatially constant background transmission.
                 np.testing.assert_allclose(transmission, 0.3, rtol=1e-14)
                 raw_row.append(

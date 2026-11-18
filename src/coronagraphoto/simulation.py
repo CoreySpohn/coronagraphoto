@@ -19,7 +19,7 @@ from hwoutils.constants import arcsec2rad
 from hwoutils.grids import Image, PixelGrid, SkyOrientation, resample
 from hwoutils.spectral import Band, Quadrature
 from optixstuff import ElectronRates, FramePlan, OpticalPath, PhotonRates
-from optixstuff.coronagraph import AbstractTableCoronagraph, MultiBandCoronagraph
+from optixstuff.coronagraph import AbstractImagingCoronagraph, AbstractSceneCoronagraph
 from optixstuff.speckle import AbstractSpeckleField
 from skyscapes.scene import System
 from zodi.jax import AbstractLocalZodi
@@ -52,15 +52,9 @@ def _node_rates(
     solar_longitude_deg,
 ):
     """Render one node; detector yield never enters this photon calculation."""
-    coro = optical_path.coronagraph
-    if isinstance(coro, MultiBandCoronagraph):
-        coro = coro.band(wavelength_nm)
-    native = coro.grid
-    stellar_grid = native
-    background_grid = native
-    if isinstance(coro, AbstractTableCoronagraph):
-        stellar_grid = coro.stellar_map(wavelength_nm, 0.0, grid=None).grid
-        background_grid = coro.sky_trans.grid
+    coro = optical_path.coronagraph.band(wavelength_nm)
+    products = coro.at_wavelength(wavelength_nm)
+    native = products.source_grid
     with jax.ensure_compile_time_eval():
         angular = replace(native.to_arcsec(wavelength_nm), orientation=grid.orientation)
     lod_arcsec = native.frame.lod_to_arcsec(wavelength_nm)
@@ -73,12 +67,8 @@ def _node_rates(
         # the product integrates once over each detector pixel. Native axes
         # are detector axes; only the scale changes with wavelength.
         with jax.ensure_compile_time_eval():
-            scale = float(product_grid.frame.lod_to_arcsec(wavelength_nm))
             return replace(
-                grid,
-                basis=tuple(tuple(b / scale for b in row) for row in grid.basis),
-                unit="lod",
-                frame=product_grid.frame,
+                grid.to_lod(wavelength_nm, product_grid.frame),
                 orientation=product_grid.orientation,
             )
 
@@ -96,8 +86,8 @@ def _node_rates(
     diameter = star.angular_diameter_arcsec(system.dist_pc)
     leakage = coro.stellar_map(
         wavelength_nm,
-        diameter / stellar_grid.frame.lod_to_arcsec(wavelength_nm),
-        grid=detector_pixels(stellar_grid),
+        diameter / products.stellar_grid.frame.lod_to_arcsec(wavelength_nm),
+        grid=detector_pixels(products.stellar_grid),
     ).data
     if speckle is not None:
         # The field owns its native lod grid, Frame, reconstruction and
@@ -118,7 +108,10 @@ def _node_rates(
         psfs = coro.source_psfs(
             wavelength_nm, x / lod_arcsec, y / lod_arcsec, grid=detector_pixels(native)
         )
-        planet = gain * jnp.einsum("k,kyx->yx", phi, psfs.data)
+        # A dark source contributes zero even if its PSF is undefined.
+        samples = jnp.where(psfs.valid[:, None, None], psfs.image.data, 0.0)
+        planet = gain * jnp.einsum("k,kyx->yx", phi, samples)
+        planet = jnp.where(jnp.all(psfs.valid | (phi == 0)), planet, jnp.nan)
 
     omega_sr = grid.pixel_area * arcsec2rad**2
     local = jnp.zeros(grid.shape)
@@ -128,8 +121,8 @@ def _node_rates(
             ecliptic_latitude_deg=ecliptic_latitude_deg,
             solar_longitude_deg=solar_longitude_deg,
         )
-        transmission = coro.background_transmission(
-            wavelength_nm, grid=detector_pixels(background_grid)
+        transmission = coro.uniform_sky_map(
+            wavelength_nm, grid=detector_pixels(products.sky_grid)
         ).data
         local = gain * radiance * omega_sr * transmission
 
@@ -147,13 +140,15 @@ def _node_rates(
         scene = replace(resample(scene, angular), grid=native)
         # Convolution with the band-limited PSF band-limits the output. A finite
         # scene is zero outside; a nonzero extension follows the input scene.
+        rendered = coro.render_scene(scene, wavelength_nm, grid=native)
         disk = gain * onto_detector(
             replace(
-                coro.extended_scene(scene, wavelength_nm, grid=native),
+                rendered.image,
                 reconstruction="band_limited",
                 outside=scene.outside,
             )
         )
+        disk = jnp.where(rendered.valid, disk, jnp.nan)
     zero = jnp.zeros(grid.shape)
     return PhotonRates(planet, leakage, local, disk, zero, zero)
 
@@ -161,10 +156,8 @@ def _node_rates(
 def _reader(
     system,
     optical_path,
-    bands,
     time_d,
     pointing,
-    quadrature_order,
     quadrature,
     zodi,
     speckle,
@@ -174,17 +167,12 @@ def _reader(
     """Prepare static node geometry and solve the orbit once per observation."""
     grid = _detector_grid(optical_path, pointing)
     with jax.ensure_compile_time_eval():
-        if quadrature is None:
-            quadrature = Quadrature.build(bands, None, quadrature_order)
-        else:
-            quadrature = Quadrature(
-                *(
-                    jnp.asarray(np.frombuffer(data, dtype=dtype).reshape(shape))
-                    for shape, dtype, data in quadrature
-                )
+        quadrature = Quadrature(
+            *(
+                jnp.asarray(np.frombuffer(data, dtype=dtype).reshape(shape))
+                for shape, dtype, data in quadrature
             )
-        if quadrature.nodes_nm.shape[0] != len(bands):
-            raise ValueError("quadrature must have one row per band")
+        )
         nodes = np.asarray(quadrature.nodes_nm).ravel()
     ephemeris, positions = None, None
     if system.planets:
@@ -226,22 +214,31 @@ def _kernel_arguments(
     solar_longitude_deg,
 ):
     """Freeze host quadrature by value and keep observation scalars dynamic."""
-    if quadrature is not None:
-        if any(isinstance(x, jax.core.Tracer) for x in jax.tree.leaves(quadrature)):
-            raise ValueError(
-                "quadrature must be concrete host geometry; close over it under JIT"
-            )
-        quadrature = tuple(
-            (a.shape, a.dtype.str, a.tobytes())
-            for a in map(np.asarray, (quadrature.nodes_nm, quadrature.weights_nm))
+    if quadrature is None:
+        with jax.ensure_compile_time_eval():
+            quadrature = Quadrature.build(bands, None, quadrature_order)
+    if any(isinstance(x, jax.core.Tracer) for x in jax.tree.leaves(quadrature)):
+        raise ValueError(
+            "quadrature must be concrete host geometry; close over it under JIT"
         )
+    if quadrature.nodes_nm.shape[0] != len(bands):
+        raise ValueError("quadrature must have one row per band")
+    coro = optical_path.coronagraph
+    for wavelength_nm in np.unique(np.asarray(quadrature.nodes_nm)):
+        band = coro.band(float(wavelength_nm)) if coro is not None else None
+        if not isinstance(band, AbstractImagingCoronagraph):
+            raise TypeError("image formation requires an AbstractImagingCoronagraph")
+        if system.disk is not None and not isinstance(band, AbstractSceneCoronagraph):
+            raise TypeError("a system with a disk requires an AbstractSceneCoronagraph")
+    quadrature = tuple(
+        (a.shape, a.dtype.str, a.tobytes())
+        for a in map(np.asarray, (quadrature.nodes_nm, quadrature.weights_nm))
+    )
     return (
         system,
         optical_path,
-        tuple(bands),
         jnp.asarray(time_d),
         pointing,
-        quadrature_order,
         quadrature,
         zodi,
         speckle,
@@ -253,10 +250,8 @@ def _kernel_arguments(
 def _image_impl(
     system,
     optical_path,
-    bands,
     time_d,
     pointing,
-    quadrature_order,
     quadrature,
     zodi,
     speckle,
@@ -269,10 +264,8 @@ def _image_impl(
     grid, quadrature, branches = _reader(
         system,
         optical_path,
-        bands,
         time_d,
         pointing,
-        quadrature_order,
         quadrature,
         zodi,
         speckle,

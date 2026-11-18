@@ -6,7 +6,12 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import GaussianCoronagraph, PlateauCoronagraph, make_path, make_system
+from conftest import (
+    GaussianSceneCoronagraph,
+    PlateauCoronagraph,
+    make_path,
+    make_system,
+)
 from hwoutils.constants import arcsec2rad
 from hwoutils.grids import Image, PixelGrid, SkyOrientation
 from hwoutils.spectral import Band
@@ -33,7 +38,7 @@ def test_aperture_closure_two_samplings():
     The independently integrated separable DFT supplies the disk oracle;
     256 eps relative allows FFT, contraction and weighted-sum rounding.
     """
-    coro = PlateauCoronagraph(n=32, step=0.25, cube=True)
+    coro = PlateauCoronagraph(n=32, step=0.25)
     lod_arcsec = float(coro.grid.frame.lod_to_arcsec(550.0))
     native_sky = replace(coro.grid.to_arcsec(550.0), orientation=SkyOrientation(0))
     disk = ExovistaDisk(
@@ -56,7 +61,7 @@ def test_aperture_closure_two_samplings():
     omega = (
         float(record.evaluate("core_area_lod2", 0.5)) * lod_arcsec**2 * arcsec2rad**2
     )
-    transmission = float(coro.occulter_transmission(0.5, 550.0))
+    transmission = float(coro.uniform_sky_response(0.5, 550.0))
     reference = (
         40
         * 0.4
@@ -139,8 +144,8 @@ def test_aperture_closure_two_samplings():
         )
 
 
-def test_extended_scene_equals_pixel_center_source():
-    """Fails on an even-grid half-pixel offset or silent missing-cube fallback.
+def test_disk_equals_pixel_center_source():
+    """Fails on an even-grid half-pixel offset or a disk without a scene operator.
 
     A one-pixel scene contracts to its point PSF before reconstruction.
     Both outputs then integrate the same zero-extended band-limited density
@@ -149,15 +154,16 @@ def test_extended_scene_equals_pixel_center_source():
     shift of half a native pixel differs by >.05 of peak.
     """
 
-    class BandLimitedGaussian(GaussianCoronagraph):
+    class BandLimitedGaussian(GaussianSceneCoronagraph):
         def _native_source_psfs(self, x_lod, y_lod):
-            return replace(
-                super()._native_source_psfs(x_lod, y_lod), reconstruction="band_limited"
+            psfs = super()._native_source_psfs(x_lod, y_lod)
+            return psfs._replace(
+                image=replace(psfs.image, reconstruction="band_limited")
             )
 
     path = make_path(n=20, step=0.3)
     path = eqx.tree_at(
-        lambda p: p.coronagraph, path, BandLimitedGaussian(n=20, step=0.3, cube=True)
+        lambda p: p.coronagraph, path, BandLimitedGaussian(n=20, step=0.3)
     )
     grid = PixelGrid.regular(
         (20, 20),
@@ -187,9 +193,9 @@ def test_extended_scene_equals_pixel_center_source():
         jnp.array([float(x) / float(native.frame.lod_to_arcsec(550.0)) + 0.15]),
         jnp.array([float(y) / float(native.frame.lod_to_arcsec(550.0))]),
         grid=None,
-    ).data
+    ).image.data
     correct = a[0] / (40 * 0.4 * 1e6 * flux_fraction)
     assert np.max(abs(shifted - correct)) / correct.max() > 0.05
-    missing = eqx.tree_at(lambda p: p.coronagraph.psf_datacube, path, None)
-    with pytest.raises(ValueError, match="psf_datacube"):
+    missing = make_path(n=20, step=0.3)
+    with pytest.raises(TypeError, match="AbstractSceneCoronagraph"):
         image_rates(system, missing, bands, **options)
