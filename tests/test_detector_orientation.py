@@ -10,7 +10,6 @@ from conftest import GaussianCoronagraph, centroid, make_path, make_system
 from hwoutils.grids import Frame, PixelGrid, SkyOrientation
 from hwoutils.spectral import Band, Quadrature
 from optixstuff import Exposure, MultiBandCoronagraph, ScalarCoronagraph
-from skyscapes import Scene
 from skyscapes.disk import ExovistaDisk
 from skyscapes.physical_model import GridPhysicalModel
 from skyscapes.scene import Planet
@@ -21,7 +20,7 @@ from coronagraphoto import photon_rates
 def rates_at(system, path, quadrature, roll=0):
     """Photon rates of a zodi-free scene at day 0 and a roll in degrees."""
     exposure = Exposure(time_d=0.0, roll_deg=roll, quadrature=quadrature)
-    return photon_rates(Scene(system), path, exposure)
+    return photon_rates(system, path, exposure)
 
 
 @pytest.mark.parametrize(

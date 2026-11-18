@@ -10,17 +10,18 @@ For an existing scene and instrument:
 ```python notest
 from dataclasses import replace
 
+import equinox as eqx
 from hwoutils.spectral import Band
 from orbix.observatory import ObservatoryL2Halo
 from zodi.jax import LeinertZodi
-from skyscapes import Scene
 from coronagraphoto import build_exposure, expected
 
 observer = ObservatoryL2Halo.from_default(equinox_mjd=60575.25)
 lat = observer.ecliptic_latitude_deg(mjd, ra_rad, dec_rad)
 lon = observer.helio_ecliptic_longitude_deg(mjd, ra_rad, dec_rad)
 zodi = LeinertZodi()
-scene = Scene(system, zodi)
+# scene is a skyscapes.Scene, for example from from_exovista
+scene = eqx.tree_at(lambda s: s.zodi, scene, zodi, is_leaf=lambda x: x is None)
 exposure = build_exposure(scene, instrument, (Band(500.0, 600.0),), time_d=time_d)
 exposure = replace(exposure, ecliptic_latitude_deg=lat, solar_longitude_deg=lon)
 rates = expected(scene, instrument, exposure)

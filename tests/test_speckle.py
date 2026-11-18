@@ -9,7 +9,6 @@ from hwoutils.epoch import Epoch
 from hwoutils.grids import Frame, Image, Measure, PixelGrid
 from hwoutils.spectral import Band, Quadrature
 from optixstuff import AbstractSpeckleField, Exposure
-from skyscapes import Scene
 from skyscapes.scene import Star
 
 from coronagraphoto import photon_rates
@@ -61,7 +60,7 @@ def test_speckle_leakage_day_clock():
         star=Star(wavelengths_nm=wave, times_d=times, flux_density_jy=flux)
     )
     q = Quadrature.build((Band(549.5, 550.5),), system, path, Halo(), order=1)
-    scene = Scene(system)
+    scene = system
 
     def rates(scene, path, time_d, roll_deg=0, speckle=None):
         if speckle is not None:
@@ -105,7 +104,7 @@ def test_speckle_leakage_day_clock():
             epoch_d=-shift,
         )
         same_date = rates(
-            Scene(shifted), path, time - shift, speckle=Halo(epoch_d=3.0 - shift)
+            shifted, path, time - shift, speckle=Halo(epoch_d=3.0 - shift)
         )
         for a, b in zip(
             jax.tree.leaves(first), jax.tree.leaves(same_date), strict=True

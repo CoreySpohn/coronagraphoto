@@ -6,7 +6,7 @@ The reader composes shared contracts without owning the underlying physics.
 |---|---|
 | Star and planet photon flux densities; disk photon radiance | skyscapes |
 | Local-zodi photon radiance | zodi.jax |
-| Orbits and sky offsets | orbix, via skyscapes.System |
+| Orbits and sky offsets | orbix, via skyscapes.Scene |
 | Bands, quadrature, frames, grids and resampling | hwoutils |
 | Aperture rules and YIP PSFs | yippy |
 | Collecting area, optical throughput, coronagraph, detector and frame plan | optixstuff |
@@ -33,7 +33,7 @@ photon record carrying that node's wavelength and integration weight to `detecto
 
 ```mermaid
 flowchart LR
-    scene[Scene: system and local zodi] --> node[One-node photon images]
+    scene[Scene: star, planets, disk and local zodi] --> node[One-node photon images]
     optics[Instrument and sky grid] --> node
     node --> photons[photon_rates: retain nodes]
     node --> yield[Detector.electrons per node]

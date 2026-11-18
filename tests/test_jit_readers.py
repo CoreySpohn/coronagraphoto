@@ -8,7 +8,6 @@ import pytest
 from conftest import make_path, make_system
 from hwoutils.spectral import Band, Quadrature
 from optixstuff import Exposure, FramePlan
-from skyscapes import Scene
 from skyscapes.scene import FlatStar
 
 from coronagraphoto import expected, observe, photon_rates
@@ -46,17 +45,17 @@ def test_exposure_argument_matches_closure():
 
     def read(s, p, key, t):
         exposure = Exposure(time_d=t, roll_deg=17, quadrature=quadrature, plan=plan)
-        return observe(key, Scene(s), p, exposure)
+        return observe(key, s, p, exposure)
 
     time_d = jnp.asarray(0.0)
     argument = eqx.filter_jit(read)(system, path, key, time_d)
     closure = eqx.filter_jit(lambda s, k, t: read(s, path, k, t))(system, key, time_d)
     exposure = Exposure(time_d=time_d, roll_deg=17, quadrature=quadrature, plan=plan)
-    whole = eqx.filter_jit(lambda e: observe(key, Scene(system), path, e))(exposure)
+    whole = eqx.filter_jit(lambda e: observe(key, system, path, e))(exposure)
     for other in (closure, whole):
         for a, b in zip(jax.tree.leaves(argument), jax.tree.leaves(other), strict=True):
             assert np.asarray(a).tobytes() == np.asarray(b).tobytes()
-    eager = observe(key, Scene(system), path, exposure)
+    eager = observe(key, system, path, exposure)
     assert eager.grid.orientation.pa_y_deg == 17.0
     assert whole.grid.orientation is None
 
@@ -90,8 +89,8 @@ def test_reader_compiles_once_for_any_values(reader, caplog):
     def args(system, rule, time_d, roll):
         exposure = Exposure(time_d=time_d, roll_deg=roll, quadrature=rule, plan=plan)
         if reader is observe:
-            return key, Scene(system), path, exposure
-        return Scene(system), path, exposure
+            return key, system, path, exposure
+        return system, path, exposure
 
     t0, t1 = jnp.asarray(0.0), jnp.asarray(1.0)
     jax.clear_caches()
@@ -114,7 +113,7 @@ def test_forty_nodes_and_eight_rolls_compile_one_program(caplog):
     """Fails if a node count or a roll sequence compiles more than one program."""
     system = make_system(star=FlatStar(jnp.asarray(1e6)))
     path = make_path(n=8, step=0.5, chromatic=True)
-    scene = Scene(system)
+    scene = system
     band = Band(520.0, 580.0)
     nodes = np.linspace(521.0, 579.0, 40)
     jax.clear_caches()
@@ -138,7 +137,7 @@ def test_roll_and_node_gradients_match_finite_differences():
     """
     system = make_system(star=FlatStar(jnp.asarray(1e6)), sky_pa_deg=40.0)
     path = make_path(n=24, step=0.5, chromatic=True)
-    scene = Scene(system)
+    scene = system
     quadrature = Quadrature(
         (Band(530.0, 570.0),),
         jnp.array([[537.0, 548.0, 561.0]]),
@@ -180,7 +179,7 @@ def test_traced_nodes_select_the_band_model_inside_the_program():
     )
     path = make_path(n=16, step=0.5)
     path = eqx.tree_at(lambda p: p.coronagraph, path, MultiBandCoronagraph((blue, red)))
-    scene = Scene(make_system(star=FlatStar(jnp.asarray(1e6))))
+    scene = make_system(star=FlatStar(jnp.asarray(1e6)))
     quadrature = Quadrature(
         (Band(490.0, 610.0),),
         jnp.array([[495.0, 600.0, 505.0]]),

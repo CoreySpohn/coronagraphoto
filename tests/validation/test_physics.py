@@ -9,7 +9,6 @@ from conftest import make_path, make_system
 from hwoutils.grids import Measure, SkyOrientation
 from hwoutils.spectral import Band, Quadrature
 from optixstuff import Exposure, FramePlan
-from skyscapes import Scene
 
 from coronagraphoto import expected, observe
 
@@ -36,7 +35,7 @@ def test_draw_mean_and_reproducibility():
     system = make_system()
     q = Quadrature.build((Band(549.5, 550.5),), system, path, order=1)
     plan = FramePlan(10.0, 6.0)
-    scene = Scene(system)
+    scene = system
     exposure = Exposure(time_d=0.0, roll_deg=0, quadrature=q, plan=plan)
     electrons = expected(scene, path, exposure)
     mean, var = detector.mean_and_variance(electrons, plan)

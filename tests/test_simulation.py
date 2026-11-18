@@ -14,12 +14,11 @@ def test_worked_example():
     from hwoutils.spectral import Band, Quadrature
     from numpy.polynomial.legendre import leggauss
     from optixstuff import Exposure
-    from skyscapes import Scene
 
     system, path = worked_setup()
     bands = (Band(500, 600),)
     q = Quadrature.build(bands, system, path)
-    scene, exposure = Scene(system), Exposure(time_d=0.0, roll_deg=0, quadrature=q)
+    scene, exposure = system, Exposure(time_d=0.0, roll_deg=0, quadrature=q)
     rates = cp.photon_rates(scene, path, exposure)
     actual = float(rates.integrate().planet.sum())
     electrons = float(path.detector.electrons(rates).planet.sum())
@@ -49,7 +48,6 @@ def test_node_yield_once(chromatic):
     from conftest import worked_setup
     from hwoutils.spectral import Band, Quadrature
     from optixstuff import Exposure
-    from skyscapes import Scene
 
     import coronagraphoto as cp
 
@@ -57,7 +55,7 @@ def test_node_yield_once(chromatic):
     system, path = worked_setup(n_wavelengths=7)
     bands = (Band(500, 600),)
     q = Quadrature.build(bands, system, path)
-    scene, exposure = Scene(system), Exposure(time_d=0.0, roll_deg=0, quadrature=q)
+    scene, exposure = system, Exposure(time_d=0.0, roll_deg=0, quadrature=q)
     rates = cp.photon_rates(scene, path, exposure)
     if not chromatic:
         import equinox as eqx
@@ -104,7 +102,6 @@ def test_streaming_jit_and_gradient():
     from conftest import worked_setup
     from hwoutils.spectral import Band, Quadrature
     from optixstuff import Exposure
-    from skyscapes import Scene
 
     import coronagraphoto as cp
 
@@ -115,10 +112,10 @@ def test_streaming_jit_and_gradient():
     exposure = Exposure(time_d=jnp.asarray(0.0), roll_deg=17.0, quadrature=q)
 
     def render(s):
-        return cp.expected(Scene(s), path, exposure)
+        return cp.expected(s, path, exposure)
 
     eager = render(system)
-    full = path.detector.electrons(cp.photon_rates(Scene(system), path, exposure))
+    full = path.detector.electrons(cp.photon_rates(system, path, exposure))
     compiled = eqx.filter_jit(render)(system)
     for a, b, c in zip(
         jax.tree.leaves(eager),
@@ -152,7 +149,6 @@ def test_refused_planet_psf_only_invalidates_lit_source():
     from conftest import GaussianCoronagraph, make_path, make_system
     from hwoutils.spectral import Quadrature
     from optixstuff import Exposure, SourcePSFs
-    from skyscapes import Scene
 
     import coronagraphoto as cp
 
@@ -168,7 +164,7 @@ def test_refused_planet_psf_only_invalidates_lit_source():
     path = eqx.tree_at(lambda p: p.coronagraph, path, RefusedSource(n=8))
     for contrast in (0.0, 1e-10):
         planet = cp.photon_rates(
-            Scene(make_system(contrast=contrast)),
+            make_system(contrast=contrast),
             path,
             Exposure(
                 time_d=0.0, roll_deg=0, quadrature=Quadrature.monochromatic(550.0)
@@ -188,11 +184,10 @@ def test_expected_integrates_declared_response_kink():
     """
     import equinox as eqx
     import jax.numpy as jnp
-    from conftest import make_path, make_system
+    from conftest import make_path, make_system, with_zodi
     from hwoutils.constants import arcsec2rad
     from hwoutils.spectral import Band, Quadrature, Transmission
     from optixstuff import Exposure, TransmissiveElement
-    from skyscapes import Scene
     from zodi.jax import PrecomputedZodi
 
     import coronagraphoto as cp
@@ -211,7 +206,7 @@ def test_expected_integrates_declared_response_kink():
     sky = PrecomputedZodi(jnp.array([500.0, 600.0]), jnp.full(2, 1e12))
     q = Quadrature.build((band,), system, path, sky, order=1)
     image = cp.expected(
-        Scene(system, sky), path, Exposure(time_d=0.0, roll_deg=0, quadrature=q)
+        with_zodi(system, sky), path, Exposure(time_d=0.0, roll_deg=0, quadrature=q)
     )
     omega = (path.detector.pixel_scale_arcsec * arcsec2rad) ** 2
     expected = 40 * 0.3 * 1e12 * omega * 0.8 * 0.9 * band.width_nm / 2

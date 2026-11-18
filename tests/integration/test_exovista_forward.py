@@ -18,7 +18,7 @@ def test_exovista_native_disk_and_position_angle(tmp_path):
     a 32 float64 epsilon arithmetic bound after that documented rounding.
     """
     scene = from_exovista(write_scene(tmp_path / "scene.fits"))
-    system = scene.system
+    system = scene
     assert system.midplane_position_angle_deg == 120.0
     grid = system.disk.native_grid
     assert grid.shape == (12, 12) and grid.step == 0.01

@@ -41,7 +41,7 @@ Planets use the orbit engine's east/north offsets through
 `SkyOrientation.sky_to_detector`. The disk is evaluated directly on that sky grid;
 there is no additional image rotation or alternative disk PA conversion.
 Stored disks keep their native sky geometry. Parametric disks use
-`System.midplane_position_angle_deg`, also north through east.
+`Scene.midplane_position_angle_deg`, also north through east.
 
 ## Spectral and spatial sampling
 

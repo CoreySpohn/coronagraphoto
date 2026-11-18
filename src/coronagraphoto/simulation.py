@@ -171,7 +171,7 @@ def _band_ids(instrument, scene, quadrature):
     for i in ids:
         if not isinstance(models[i], AbstractImagingCoronagraph):
             raise TypeError("image formation requires an AbstractImagingCoronagraph")
-        if scene.system.disk is not None and not isinstance(
+        if scene.disk is not None and not isinstance(
             models[i], AbstractSceneCoronagraph
         ):
             raise TypeError("a system with a disk requires an AbstractSceneCoronagraph")
@@ -180,7 +180,7 @@ def _band_ids(instrument, scene, quadrature):
 
 def _node_function(models, scene, instrument, exposure, grid):
     """Return node(w): the rates at one traced wavelength, for any model count."""
-    system, zodi = scene.system, scene.zodi
+    system, zodi = scene, scene.zodi
     time_d = jnp.asarray(exposure.time_d)
     ephemeris, positions = None, None
     if system.planets:
