@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import jaxedith as je
 import numpy as np
 import pytest
-from conftest import make_path, make_system, write_yip
+from conftest import make_path, make_system, with_zodi, write_yip
 from hwoutils.constants import arcsec2rad
 from hwoutils.grids import Image, Measure, PixelGrid, SkyOrientation
 from hwoutils.spectral import Band, Quadrature
@@ -22,7 +22,6 @@ from optixstuff import (
 )
 from optixstuff.apertures import Circular
 from optixstuff.performance import _performance_curves
-from skyscapes import Scene
 from skyscapes.disk import GraterDisk
 from yippy import open_yip
 from zodi import SurfaceBrightnessDust
@@ -171,7 +170,7 @@ def closure(tmp_path_factory):
             read_noise_e_rms=0.2,
         )
         path = eqx.tree_at(lambda p: p.detector, base, detector)
-        images = expected_images(Scene(system, zodi), path, exposure)
+        images = expected_images(with_zodi(system, zodi), path, exposure)
         sky = PixelGrid.regular((n, n), pitch * scale, "arcsec", orientation=pointing)
         weights = []
         for band_index, reference in enumerate(prepared.references):
@@ -238,7 +237,7 @@ def closure(tmp_path_factory):
                 zodi=zodi,
                 exozodi="scene",
             )
-            doubled_images = expected_images(Scene(doubled, zodi), path, exposure)
+            doubled_images = expected_images(with_zodi(doubled, zodi), path, exposure)
             dust_ratios = np.stack(
                 (
                     detector.electrons(doubled_rates.mean).exozodi / calculator.exozodi,

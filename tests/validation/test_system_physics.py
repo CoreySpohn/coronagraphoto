@@ -11,13 +11,13 @@ from conftest import (
     PlateauCoronagraph,
     make_path,
     make_system,
+    with_zodi,
 )
 from hwoutils.constants import arcsec2rad
 from hwoutils.grids import Image, Measure, PixelGrid, SkyOrientation
 from hwoutils.spectral import Band, Quadrature
 from optixstuff import Exposure
 from optixstuff.apertures import Circular
-from skyscapes import Scene
 from skyscapes.disk import ExovistaDisk
 from zodi.jax import PrecomputedZodi
 
@@ -84,7 +84,7 @@ def test_aperture_closure_two_samplings():
             (Band(549.5, 550.5),), system, path, zodi, order=1
         )
         rates = photon_rates(
-            Scene(system, zodi),
+            with_zodi(system, zodi),
             path,
             Exposure(time_d=0.0, roll_deg=0, quadrature=quadrature),
         )
@@ -187,7 +187,7 @@ def test_disk_equals_pixel_center_source():
         sky_pa_deg=float(jnp.rad2deg(jnp.arctan2(east, north))),
         disk=disk,
     )
-    scene = Scene(system)
+    scene = system
     exposure = Exposure(
         time_d=0.0,
         roll_deg=0,

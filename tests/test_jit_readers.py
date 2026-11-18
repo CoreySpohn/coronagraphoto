@@ -11,7 +11,6 @@ import pytest
 from conftest import make_path, make_system
 from hwoutils.spectral import Band, Quadrature
 from optixstuff import Exposure, FramePlan
-from skyscapes import Scene
 from skyscapes.scene import FlatStar
 
 from coronagraphoto import clear_reader_cache, expected, observe, photon_rates
@@ -36,7 +35,7 @@ def test_path_argument_matches_closure():
 
     def read(s, p, key, t):
         exposure = Exposure(time_d=t, roll_deg=17, quadrature=quadrature, plan=plan)
-        return observe(key, Scene(s), p, exposure)
+        return observe(key, s, p, exposure)
 
     key, time_d = jax.random.key(0), jnp.asarray(0.0)
     argument = eqx.filter_jit(read)(system, path, key, time_d)
@@ -44,7 +43,7 @@ def test_path_argument_matches_closure():
     for a, b in zip(jax.tree.leaves(argument), jax.tree.leaves(closure), strict=True):
         assert np.asarray(a).tobytes() == np.asarray(b).tobytes()
     with pytest.raises(ValueError, match="quadrature must be concrete host geometry"):
-        eqx.filter_jit(lambda e: observe(key, Scene(system), path, e))(
+        eqx.filter_jit(lambda e: observe(key, system, path, e))(
             Exposure(time_d=time_d, roll_deg=17, quadrature=quadrature, plan=plan)
         )
 
@@ -82,8 +81,8 @@ def test_eager_kernel_reuse(reader, caplog):
     def args(system, rule, time_d):
         exposure = Exposure(time_d=time_d, roll_deg=23, quadrature=rule, plan=plan)
         if reader is observe:
-            return key, Scene(system), path, exposure
-        return Scene(system), path, exposure
+            return key, system, path, exposure
+        return system, path, exposure
 
     # Build all inputs before capturing logs: the guard concerns reader calls.
     t0, t1 = jnp.asarray(0.0), jnp.asarray(1.0)
@@ -129,7 +128,7 @@ def test_cache_eviction_is_bitwise(caplog, monkeypatch):
     path = make_path(n=8, step=0.5)
     bands = (Band(540.0, 560.0),)
     q = Quadrature.build(bands, system, path, order=1)
-    scene = Scene(system)
+    scene = system
 
     def at_roll(angle):
         return photon_rates(

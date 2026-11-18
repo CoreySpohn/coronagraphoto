@@ -360,7 +360,7 @@ def _run(scene, instrument, exposure, kind):
     """Run the shared kernel for one scene, instrument and exposure."""
     return _image_kernel(
         *_kernel_arguments(
-            scene.system,
+            scene,
             instrument,
             exposure.quadrature,
             exposure.time_d,

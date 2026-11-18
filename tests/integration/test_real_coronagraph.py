@@ -6,12 +6,11 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import make_path, make_system, write_yip
+from conftest import make_path, make_system, with_zodi, write_yip
 from hwoutils.constants import arcsec2rad
 from hwoutils.grids import PixelGrid, SkyOrientation, resample
 from hwoutils.spectral import Band, Quadrature
 from optixstuff import Exposure
-from skyscapes import Scene
 from skyscapes.scene import BlackbodyStar, FlatStar
 from yippy import open_yip
 from zodi.jax import PrecomputedZodi
@@ -67,7 +66,7 @@ def test_yip_image_absolute_photon_fraction(tmp_path, distinct_products):
     zodi = PrecomputedZodi(jnp.array([500.0, 600.0]), jnp.full(2, 1e12))
     quadrature = Quadrature.build((Band(549.5, 550.5),), system, path, zodi, order=1)
     rates = photon_rates(
-        Scene(system, zodi),
+        with_zodi(system, zodi),
         path,
         Exposure(time_d=0.0, roll_deg=90, quadrature=quadrature),
     )

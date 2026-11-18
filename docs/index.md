@@ -7,7 +7,7 @@ streams those nodes through the detector yield into band electron rates.
 `observe` draws an electron `Image` on the detector sky grid. Individual source
 terms remain accessible through the shared records.
 
-Inputs are a `skyscapes.Scene` (system and local zodi), an
+Inputs are a `skyscapes.Scene` (star, planets, disk and local zodi), an
 `optixstuff.Instrument`, and an `optixstuff.Exposure` built once with
 `build_exposure` from wavelength `Band`s, a scalar time in days from the scene
 epoch, and a roll in degrees.
