@@ -1,15 +1,18 @@
 """Per-pixel readers of the shared photon and electron rate budgets.
 
 Arrays are (band, node, y, x) for photons/s/nm and (band, y, x) for
-band-integrated electrons/s. Geometry is concrete host metadata; readers cache
-compiled kernels for each static configuration. Instruments and scenes can
-be arguments of JAX transformations; an Exposure holds host geometry, so close
-over it. A roll changes the position angle of detector +y, north through east.
+band-integrated electrons/s. Detector shape, grid axes, frame and band
+selection are static; the wavelength nodes and weights, the roll and the epoch
+are traced leaves, so one compiled program serves any node values and any roll
+(a new node count or band count is a new array shape and compiles once).
+Scenes, instruments and exposures can all be arguments of JAX
+transformations. Every node is rendered through resampling operators built
+from the traced lambda/D scale. A roll changes the position angle of detector
++y, north through east.
 """
 
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
-from functools import lru_cache, partial
+from dataclasses import replace
 
 import equinox as eqx
 import jax
@@ -18,25 +21,29 @@ import numpy as np
 from hwoutils.grids import Image, Measure, PixelGrid, SkyOrientation, resample
 from hwoutils.spectral import Band, Quadrature
 from optixstuff import ElectronRates, Exposure, FramePlan, Instrument, PhotonRates
-from optixstuff.coronagraph import AbstractImagingCoronagraph, AbstractSceneCoronagraph
+from optixstuff.coronagraph import (
+    AbstractImagingCoronagraph,
+    AbstractSceneCoronagraph,
+    MultiBandCoronagraph,
+)
 from skyscapes import Scene
 
 
-def _detector_grid(instrument, pointing):
+def _detector_grid(instrument, orientation):
     """Construct the one sky grid shared by planets, disks and observations."""
-    if pointing.parity != -1:
+    if orientation is not None and orientation.parity != -1:
         raise ValueError("detector pointing must have parity=-1")
-    with jax.ensure_compile_time_eval():
-        return PixelGrid.regular(
-            instrument.detector.shape,
-            instrument.detector.pixel_scale_arcsec,
-            "arcsec",
-            orientation=pointing,
-        )
+    return PixelGrid.regular(
+        instrument.detector.shape,
+        instrument.detector.pixel_scale_arcsec,
+        "arcsec",
+        orientation=orientation,
+    )
 
 
 def _node_rates(
     wavelength_nm,
+    coro,
     system,
     instrument,
     time_d,
@@ -49,11 +56,9 @@ def _node_rates(
 ):
     """Render one node; detector yield never enters this photon calculation."""
     speckle = instrument.speckle
-    coro = instrument.coronagraph.band(wavelength_nm)
     products = coro.at_wavelength(wavelength_nm)
     native = products.source_grid
-    with jax.ensure_compile_time_eval():
-        angular = replace(native.to_arcsec(wavelength_nm), orientation=grid.orientation)
+    angular = replace(native.to_arcsec(wavelength_nm), orientation=grid.orientation)
     lod_arcsec = native.frame.lod_to_arcsec(wavelength_nm)
     gain = instrument.primary.collecting_area_m2 * instrument.system_throughput(
         wavelength_nm
@@ -63,19 +68,17 @@ def _node_rates(
         # The detector pixels in a product's lambda/D frame at this node, so
         # the product integrates once over each detector pixel. Native axes
         # are detector axes; only the scale changes with wavelength.
-        with jax.ensure_compile_time_eval():
-            return replace(
-                grid.to_lod(wavelength_nm, product_grid.frame),
-                orientation=product_grid.orientation,
-            )
+        return replace(
+            grid.to_lod(wavelength_nm, product_grid.frame),
+            orientation=product_grid.orientation,
+        )
 
     def onto_detector(image):
         # Native coordinates describe detector axes, so attach the live pointing
         # only after the coronagraph has rendered its instrumental response.
-        with jax.ensure_compile_time_eval():
-            product_grid = replace(
-                image.grid.to_arcsec(wavelength_nm), orientation=grid.orientation
-            )
+        product_grid = replace(
+            image.grid.to_arcsec(wavelength_nm), orientation=grid.orientation
+        )
         return resample(replace(image, grid=product_grid), grid).data
 
     star = system.star
@@ -148,28 +151,47 @@ def _node_rates(
     )
 
 
-def _reader(
-    system,
-    instrument,
-    time_d,
-    pointing,
-    quadrature,
-    zodi,
-    ecliptic_latitude_deg,
-    solar_longitude_deg,
-):
-    """Prepare static node geometry and solve the orbit once per observation."""
-    grid = _detector_grid(instrument, pointing)
-    nodes = np.asarray(quadrature.nodes_nm).ravel()
+def _band_ids(instrument, scene, quadrature):
+    """Select, on the host, which coronagraph models the program needs.
+
+    Band selection is structure, not a traced value: the program holds one
+    branch per model the concrete nodes fall in (every model when the nodes are
+    traced) and picks among them from the traced node wavelength.
+    """
+    coro = instrument.coronagraph
+    models = coro.bands if isinstance(coro, MultiBandCoronagraph) else (coro,)
+    nodes = quadrature.nodes_nm
+    if isinstance(coro, MultiBandCoronagraph) and not isinstance(
+        nodes, jax.core.Tracer
+    ):
+        chosen = [coro.band(float(w)) for w in np.unique(np.asarray(nodes))]
+        ids = tuple(i for i, m in enumerate(models) if any(m is c for c in chosen))
+    else:
+        ids = tuple(range(len(models)))
+    for i in ids:
+        if not isinstance(models[i], AbstractImagingCoronagraph):
+            raise TypeError("image formation requires an AbstractImagingCoronagraph")
+        if scene.system.disk is not None and not isinstance(
+            models[i], AbstractSceneCoronagraph
+        ):
+            raise TypeError("a system with a disk requires an AbstractSceneCoronagraph")
+    return ids
+
+
+def _node_function(models, scene, instrument, exposure, grid):
+    """Return node(w): the rates at one traced wavelength, for any model count."""
+    system, zodi = scene.system, scene.zodi
+    time_d = jnp.asarray(exposure.time_d)
     ephemeris, positions = None, None
     if system.planets:
         times = jnp.atleast_1d(time_d)
         ephemeris = system.ephemeris(times)
         positions = system.positions(times, ephemeris=ephemeris)[:, :, 0]
-    branches = tuple(
-        partial(
-            _node_rates,
-            float(w),
+
+    def with_model(model):
+        return lambda w: _node_rates(
+            w,
+            model,
             system,
             instrument,
             time_d,
@@ -177,129 +199,64 @@ def _reader(
             ephemeris,
             positions,
             zodi,
-            ecliptic_latitude_deg,
-            solar_longitude_deg,
+            jnp.asarray(exposure.ecliptic_latitude_deg),
+            jnp.asarray(exposure.solar_longitude_deg),
         )
-        for w in nodes
-    )
-    return grid, branches
 
+    if len(models) == 1:
+        return with_model(models[0])
 
-@dataclass(frozen=True, eq=False)
-class _StaticQuadrature:
-    """Keep the concrete wavelength geometry in the kernel closure."""
-
-    rule: Quadrature
-
-    def __hash__(self):
-        return id(self.rule)
-
-    def __eq__(self, other):
-        return isinstance(other, _StaticQuadrature) and self.rule is other.rule
-
-
-def _kernel_arguments(
-    system,
-    instrument,
-    quadrature,
-    time_d,
-    pointing,
-    zodi,
-    ecliptic_latitude_deg,
-    solar_longitude_deg,
-):
-    """Select concrete geometry and keep observation scalars dynamic."""
-    if any(isinstance(x, jax.core.Tracer) for x in jax.tree.leaves(quadrature)):
-        raise ValueError(
-            "quadrature must be concrete host geometry; close over it under JIT"
+    def node(w):
+        covered = jnp.stack(
+            [(m.bandpass.lo_nm <= w) & (w <= m.bandpass.hi_nm) for m in models]
         )
+        rates = jax.lax.switch(jnp.argmax(covered), [with_model(m) for m in models], w)
+        # A node outside every declared band has no performance model.
+        return jax.tree.map(lambda x: jnp.where(jnp.any(covered), x, jnp.nan), rates)
+
+    return node
+
+
+@eqx.filter_jit
+def _render(scene, instrument, exposure, *, kind, band_ids):
+    """Render every node of one observation as a single traced program."""
     coro = instrument.coronagraph
-    for wavelength_nm in np.unique(np.asarray(quadrature.nodes_nm)):
-        band = coro.band(float(wavelength_nm)) if coro is not None else None
-        if not isinstance(band, AbstractImagingCoronagraph):
-            raise TypeError("image formation requires an AbstractImagingCoronagraph")
-        if system.disk is not None and not isinstance(band, AbstractSceneCoronagraph):
-            raise TypeError("a system with a disk requires an AbstractSceneCoronagraph")
-    return (
-        system,
-        instrument,
-        jnp.asarray(time_d),
-        pointing,
-        zodi,
-        jnp.asarray(ecliptic_latitude_deg),
-        jnp.asarray(solar_longitude_deg),
+    models = (
+        tuple(coro.bands[i] for i in band_ids)
+        if isinstance(coro, MultiBandCoronagraph)
+        else (coro,)
     )
-
-
-def _image_impl(
-    system,
-    instrument,
-    time_d,
-    pointing,
-    zodi,
-    ecliptic_latitude_deg,
-    solar_longitude_deg,
-    *,
-    quadrature,
-    kind,
-    host_loop=False,
-):
-    """Render the same concrete node geometries under JIT or host iteration."""
-    quadrature = quadrature.rule
-    grid, branches = _reader(
-        system,
-        instrument,
-        time_d,
-        pointing,
-        quadrature,
-        zodi,
-        ecliptic_latitude_deg,
-        solar_longitude_deg,
-    )
+    quadrature = exposure.quadrature
+    grid = _detector_grid(instrument, SkyOrientation(exposure.roll_deg))
+    node = _node_function(models, scene, instrument, exposure, grid)
     if kind == "photons":
-        if host_loop:
-            values = jax.tree.map(
-                lambda *x: jnp.stack(x), *(read() for read in branches)
-            )
-        else:
-            values = jax.lax.map(
-                lambda i: jax.lax.switch(i, branches), jnp.arange(len(branches))
-            )
+        values = jax.lax.map(node, quadrature.nodes_nm.ravel())
         return jax.tree.map(
             lambda x: x.reshape((*quadrature.nodes_nm.shape, *grid.shape)), values
         )
 
-    # Grid metadata is static, so stage the concrete wavelength branches of
-    # each band. Only its accumulated rate and one node image are live.
-    n_nodes = quadrature.nodes_nm.shape[1]
-
+    # Stream the nodes of each band: only its accumulated rate and one node
+    # image are live.
     def render_band(i):
         row = quadrature.band(i)
-        band_branches = branches[i * n_nodes : (i + 1) * n_nodes]
         initial = {
             name: jnp.zeros(grid.shape) for name in ElectronRates.component_names()
         }
 
-        def accumulate(total, j, components):
-            single = Quadrature(
-                row.bands, row.nodes_nm[:, j, None], row.weights_nm[:, j, None]
-            )
+        def step(total, node_and_weight):
+            w, weight = node_and_weight
+            components = node(w)
+            single = Quadrature(row.bands, w[None, None], weight[None, None])
             photons = PhotonRates(
                 single, **jax.tree.map(lambda x: x[None, None], components)
             )
             electrons = instrument.detector.electrons(photons)
-            return {name: a + getattr(electrons, name)[0] for name, a in total.items()}
+            return {
+                name: a + getattr(electrons, name)[0] for name, a in total.items()
+            }, None
 
-        if host_loop:
-            total = initial
-            for j, read in enumerate(band_branches):
-                total = accumulate(total, j, read())
-            return total
-
-        def step(total, j):
-            return accumulate(total, j, jax.lax.switch(j, band_branches)), None
-
-        return jax.lax.scan(step, initial, jnp.arange(n_nodes))[0]
+        xs = (row.nodes_nm[0], row.weights_nm[0])
+        return jax.lax.scan(step, initial, xs)[0]
 
     rows = [render_band(i) for i in range(len(quadrature.bands))]
     return ElectronRates(
@@ -307,70 +264,20 @@ def _image_impl(
     )
 
 
-def _draw_impl(detector, key, electrons, plan):
+@eqx.filter_jit
+def _draw(detector, key, electrons, plan):
     """Stage detector noise separately so observations share the renderer."""
     return detector.draw(key, electrons, plan)
 
 
-@lru_cache(maxsize=4)
-def _cached_image_kernel(function, treedef, static_leaves, signature):
-    """Own at most four eager JIT functions, including shape/dtype variants."""
-    static = jax.tree.unflatten(treedef, static_leaves)
-
-    def run(dynamic):
-        args, kwargs = eqx.combine(dynamic, static)
-        return function(*args, **kwargs)
-
-    # Only arrays are passed to jit; host metadata is in the bounded closure.
-    # A separate function per entry lets eviction release its JAX cache too.
-    return jax.jit(run)
-
-
-def _image_kernel(*args, _function=_image_impl, **kwargs):
-    """Reuse eager kernels; let caller transformations own their staging cache."""
-    dynamic, static = eqx.partition((args, kwargs), eqx.is_array)
-    arrays = jax.tree.leaves(dynamic)
-    if any(isinstance(a, jax.core.Tracer) for a in arrays):
-        return _function(*args, **kwargs)
-    # Each static wavelength needs its own resampling geometry and switch
-    # branch. A dense spectrum can have thousands of nodes. Keep the eager
-    # compiler footprint bounded by dispatching those node operations directly.
-    quadrature = kwargs.get("quadrature")
-    if quadrature is not None and quadrature.rule.nodes_nm.size > 32:
-        return _function(*args, **kwargs, host_loop=True)
-    static_leaves, treedef = jax.tree.flatten(static)
-    signature = tuple(
-        (a.shape, a.dtype, getattr(a, "weak_type", False)) for a in arrays
-    )
-    return _cached_image_kernel(_function, treedef, tuple(static_leaves), signature)(
-        dynamic
-    )
-
-
-def clear_reader_cache():
-    """Release all eager reader kernels; the next eager call compiles again.
-
-    Caller-owned JIT executables and live output arrays are unaffected. JAX
-    and the system allocator can retain memory after executable release.
-    """
-    _cached_image_kernel.cache_clear()
-
-
 def _run(scene, instrument, exposure, kind):
-    """Run the shared kernel for one scene, instrument and exposure."""
-    return _image_kernel(
-        *_kernel_arguments(
-            scene.system,
-            instrument,
-            exposure.quadrature,
-            exposure.time_d,
-            SkyOrientation(exposure.roll_deg),
-            scene.zodi,
-            exposure.ecliptic_latitude_deg,
-            exposure.solar_longitude_deg,
-        ),
-        quadrature=_StaticQuadrature(exposure.quadrature),
+    """Run the shared program for one scene, instrument and exposure."""
+    return _render(
+        scene,
+        instrument,
+        exposure,
         kind=kind,
+        band_ids=_band_ids(instrument, scene, exposure.quadrature),
     )
 
 
@@ -390,7 +297,7 @@ def build_exposure(
     declare, and an ``order``-point rule is applied to every piece (four nodes
     per band when no break falls inside it). The star is left out of the
     breaks. ``roll_deg`` is the position angle of detector +y, north through
-    east, and must be a concrete number. ``plan`` is only needed by
+    east. ``plan`` is only needed by
     :func:`observe`. The local-zodi line of sight keeps the Exposure defaults
     (ecliptic latitude 0 deg, solar longitude 135 deg).
     """
@@ -420,12 +327,12 @@ def expected(scene: Scene, instrument: Instrument, exposure: Exposure) -> Electr
     """Stream nodes into (W,ny,nx) electrons/s with detector-owned yield.
 
     These are the expected rates for the instantaneous scene at
-    ``exposure.time_d``; ``exposure.plan`` does not enter. Close over the
-    host-built exposure under JIT. Each scan step sends one photon image and
-    its original wavelength and weight to the detector. The eager cache reuses
-    kernels for the same quadrature object. Static-grid branches grow compile
-    size with Q. Forward storage is the band accumulator plus one node's
-    images. JAX reverse-mode may retain residuals for differentiation.
+    ``exposure.time_d``; ``exposure.plan`` does not enter. The exposure may be
+    an argument of JIT, vmap and grad: node wavelengths, weights and roll are
+    traced, and one program serves any of their values. Each scan step sends
+    one photon image and its wavelength and weight to the detector, so forward
+    storage is the band accumulator plus one node's images. JAX reverse-mode
+    may retain residuals for differentiation.
     """
     return _run(scene, instrument, exposure, "electrons")
 
@@ -441,11 +348,13 @@ def observe(key, scene: Scene, instrument: Instrument, exposure: Exposure) -> Im
     if exposure.plan is None:
         raise ValueError("observe needs an exposure built with a FramePlan")
     electrons = expected(scene, instrument, exposure)
+    # A traced roll cannot live in static grid metadata, so the returned grid
+    # then carries no orientation.
+    roll = exposure.roll_deg
+    orientation = None if isinstance(roll, jax.core.Tracer) else SkyOrientation(roll)
     return Image(
-        _image_kernel(
-            instrument.detector, key, electrons, exposure.plan, _function=_draw_impl
-        ),
-        _detector_grid(instrument, SkyOrientation(exposure.roll_deg)),
+        _draw(instrument.detector, key, electrons, exposure.plan),
+        _detector_grid(instrument, orientation),
         ("band",),
         Measure.integral(),
         "electrons",

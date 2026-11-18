@@ -2,7 +2,6 @@
 
 from coronagraphoto.simulation import (
     build_exposure,
-    clear_reader_cache,
     expected,
     observe,
     photon_rates,
@@ -10,7 +9,6 @@ from coronagraphoto.simulation import (
 
 __all__ = [
     "build_exposure",
-    "clear_reader_cache",
     "expected",
     "observe",
     "photon_rates",
