@@ -1,17 +1,17 @@
-"""Per-pixel photon budgets and detector observations of skyscapes systems."""
+"""Per-pixel photon budgets and detector observations of skyscapes scenes."""
 
-from coronagraphoto.loaders import load_scene_from_exovista
 from coronagraphoto.simulation import (
+    build_exposure,
     clear_reader_cache,
-    image_electrons,
-    image_rates,
+    expected,
     observe,
+    photon_rates,
 )
 
 __all__ = [
+    "build_exposure",
     "clear_reader_cache",
-    "image_electrons",
-    "image_rates",
-    "load_scene_from_exovista",
+    "expected",
     "observe",
+    "photon_rates",
 ]

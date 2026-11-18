@@ -27,21 +27,21 @@ produces NaN in the corresponding planet or disk rate image. Zero-flux planets
 and dark scene pixels require no response.
 
 Photon quantities come directly from the scene. `PhotonRates` retains those
-four terms and zero thermal/companion fields. `image_electrons` sends each
+four terms and zero thermal/companion fields. `expected` sends each
 photon record carrying that node's wavelength and integration weight to `detector.electrons`.
 `observe` calls `detector.draw` after all electron terms have been accumulated.
 
 ```mermaid
 flowchart LR
-    scene[System and local zodi] --> node[One-node photon images]
-    optics[OpticalPath and sky grid] --> node
-    node --> photons[image_rates: retain nodes]
+    scene[Scene: system and local zodi] --> node[One-node photon images]
+    optics[Instrument and sky grid] --> node
+    node --> photons[photon_rates: retain nodes]
     node --> yield[Detector.electrons per node]
-    yield --> bands[image_electrons: accumulate bands]
+    yield --> bands[expected: accumulate bands]
     bands --> draw[Detector.draw with FramePlan]
     draw --> image[observe: electron Image]
 ```
 
-The ExoVista loader delegates the scene and native stored-disk geometry to
-skyscapes and adds an AYO photon background. Arrays use `(y,x)`, pixel centres
-use `(x,y)`, and a single `SkyOrientation` describes the observation roll.
+The ExoVista loader (`skyscapes.from_exovista`) builds the scene and native
+stored-disk geometry and adds an AYO photon background. Arrays use `(y,x)`, pixel centres
+use `(x,y)`, and the exposure's `roll_deg` describes the observation roll.

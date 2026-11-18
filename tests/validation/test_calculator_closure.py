@@ -13,15 +13,22 @@ from conftest import make_path, make_system, write_yip
 from hwoutils.constants import arcsec2rad
 from hwoutils.grids import Image, Measure, PixelGrid, SkyOrientation
 from hwoutils.spectral import Band, Quadrature
-from optixstuff import Detector, ElectronRates, FramePlan, prepare_aperture
+from optixstuff import (
+    Detector,
+    ElectronRates,
+    Exposure,
+    FramePlan,
+    prepare_aperture,
+)
 from optixstuff.apertures import Circular
 from optixstuff.performance import _performance_curves
+from skyscapes import Scene
 from skyscapes.disk import GraterDisk
 from yippy import open_yip
 from zodi import SurfaceBrightnessDust
 from zodi.jax import PrecomputedZodi
 
-from coronagraphoto import image_electrons
+from coronagraphoto import expected as expected_images
 
 TERMS = ("planet", "star_leakage", "local_zodi", "exozodi")
 
@@ -81,6 +88,7 @@ def closure(tmp_path_factory):
     zodi = PrecomputedZodi(jnp.array([500.0, 600.0]), jnp.full(2, 1e12))
     pointing, time_d = SkyOrientation(0.0), 0.0
     q = Quadrature.build(bands, system, base, zodi)
+    exposure = Exposure(time_d=time_d, roll_deg=0.0, quadrature=q)
     prepared = prepare_aperture(base, q, rule=rule)
     rates = je.aperture_rates(
         system,
@@ -163,14 +171,7 @@ def closure(tmp_path_factory):
             read_noise_e_rms=0.2,
         )
         path = eqx.tree_at(lambda p: p.detector, base, detector)
-        images = image_electrons(
-            system,
-            path,
-            q,
-            time_d=time_d,
-            pointing=pointing,
-            zodi=zodi,
-        )
+        images = expected_images(Scene(system, zodi), path, exposure)
         sky = PixelGrid.regular((n, n), pitch * scale, "arcsec", orientation=pointing)
         weights = []
         for band_index, reference in enumerate(prepared.references):
@@ -237,14 +238,7 @@ def closure(tmp_path_factory):
                 zodi=zodi,
                 exozodi="scene",
             )
-            doubled_images = image_electrons(
-                doubled,
-                path,
-                q,
-                time_d=time_d,
-                pointing=pointing,
-                zodi=zodi,
-            )
+            doubled_images = expected_images(Scene(doubled, zodi), path, exposure)
             dust_ratios = np.stack(
                 (
                     detector.electrons(doubled_rates.mean).exozodi / calculator.exozodi,

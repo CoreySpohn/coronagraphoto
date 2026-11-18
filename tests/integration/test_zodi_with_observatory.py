@@ -4,12 +4,13 @@ import jax.numpy as jnp
 import numpy as np
 from conftest import make_path, make_system
 from hwoutils.constants import arcsec2rad
-from hwoutils.grids import SkyOrientation
 from hwoutils.spectral import Band, Quadrature
+from optixstuff import Exposure
 from orbix.observatory import ObservatoryL2Halo
+from skyscapes import Scene
 from zodi.jax import LeinertZodi
 
-from coronagraphoto import image_rates
+from coronagraphoto import photon_rates
 
 
 def test_observatory_zodi_radiance_reaches_pixels():
@@ -27,16 +28,16 @@ def test_observatory_zodi_radiance_reaches_pixels():
         mjd = 60575.25 + day
         lat = orbit.ecliptic_latitude_deg(mjd, jnp.array(1.0), jnp.array(0.4))
         lon = orbit.helio_ecliptic_longitude_deg(mjd, jnp.array(1.0), jnp.array(0.4))
-        rate = image_rates(
-            system,
-            path,
-            Quadrature.build((Band(549.5, 550.5),), system, path, zodi, order=1),
+        exposure = Exposure(
             time_d=day,
-            pointing=SkyOrientation(0),
-            zodi=zodi,
+            roll_deg=0,
+            quadrature=Quadrature.build(
+                (Band(549.5, 550.5),), system, path, zodi, order=1
+            ),
             ecliptic_latitude_deg=lat,
             solar_longitude_deg=lon,
-        ).local_zodi[0, 0, 4, 4]
+        )
+        rate = photon_rates(Scene(system, zodi), path, exposure).local_zodi[0, 0, 4, 4]
         radiance = zodi.photon_radiance(
             550.0, ecliptic_latitude_deg=lat, solar_longitude_deg=lon
         )

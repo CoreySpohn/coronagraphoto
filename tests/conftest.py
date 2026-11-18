@@ -79,7 +79,7 @@ from hwoutils.constants import Mearth2kg, Msun2kg
 from hwoutils.epoch import Epoch
 from hwoutils.grids import Frame, Image, Measure, PixelGrid, resample
 from hwoutils.spectral import Band
-from optixstuff import ConstantThroughput, Detector, OpticalPath, SimplePrimary
+from optixstuff import ConstantThroughput, Detector, Instrument, SimplePrimary
 from optixstuff.apertures import Circular
 from optixstuff.coronagraph import (
     AbstractSceneCoronagraph,
@@ -275,7 +275,7 @@ def make_path(
         detector,
         (jnp.array([500.0, 600.0]), jnp.array([0.9, 0.7])),
     )
-    return OpticalPath(
+    return Instrument(
         SimplePrimary(circumscribed_diameter_m=6.0, collecting_area_m2=40.0),
         (ConstantThroughput(0.4),),
         coro,

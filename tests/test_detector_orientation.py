@@ -9,12 +9,19 @@ import pytest
 from conftest import GaussianCoronagraph, centroid, make_path, make_system
 from hwoutils.grids import Frame, PixelGrid, SkyOrientation
 from hwoutils.spectral import Band, Quadrature
-from optixstuff import MultiBandCoronagraph, ScalarCoronagraph
+from optixstuff import Exposure, MultiBandCoronagraph, ScalarCoronagraph
+from skyscapes import Scene
 from skyscapes.disk import ExovistaDisk
 from skyscapes.physical_model import GridPhysicalModel
 from skyscapes.scene import Planet
 
-from coronagraphoto import image_rates
+from coronagraphoto import photon_rates
+
+
+def rates_at(system, path, quadrature, roll=0):
+    """Photon rates of a zodi-free scene at day 0 and a roll in degrees."""
+    exposure = Exposure(time_d=0.0, roll_deg=roll, quadrature=quadrature)
+    return photon_rates(Scene(system), path, exposure)
 
 
 @pytest.mark.parametrize(
@@ -40,14 +47,13 @@ def test_cardinal_centroids(sky_pa, roll, expected):
         ),
         coronagraph=multiband,
     )
-    rates = image_rates(
+    rates = rates_at(
         system,
         two_band_path,
         Quadrature.build(
             (Band(499.5, 500.5), Band(599.5, 600.5)), system, two_band_path, order=1
         ),
-        time_d=0.0,
-        pointing=SkyOrientation(roll),
+        roll,
     )
     for image in rates.planet[:, 0]:
         grid = PixelGrid.regular(path.detector.shape, scale, "arcsec")
@@ -81,12 +87,11 @@ def test_cardinal_centroids(sky_pa, roll, expected):
                 planet_groups=groups, separation_arcsec=jnp.array([scale, 2 * scale])
             )
             images.append(
-                image_rates(
+                rates_at(
                     scene,
                     path,
                     Quadrature.build((Band(549.5, 550.5),), scene, path, order=1),
-                    time_d=0.0,
-                    pointing=SkyOrientation(90),
+                    90,
                 ).planet[0, 0]
             )
         positions = scene.positions(jnp.array([0.0]))
@@ -148,12 +153,11 @@ def test_roll_moves_disk_and_planet_together(disk_kind):
     system = make_system(separation_arcsec=5 * scale, disk=disk)
     system = eqx.tree_at(lambda s: s.midplane_inc_deg, system, 60.0)
     for roll in (0.0, 30.0):
-        rates = image_rates(
+        rates = rates_at(
             system,
             path,
             Quadrature.build((Band(549.5, 550.5),), system, path, order=1),
-            time_d=0.0,
-            pointing=SkyOrientation(roll),
+            roll,
         )
         delta = centroid(rates.planet[0, 0], grid) - [grid.center_x, grid.center_y]
         data = np.asarray(rates.exozodi[0, 0])
@@ -199,12 +203,8 @@ def test_compact_disk_planet_centroids():
         sky_pa_deg=float(jnp.rad2deg(jnp.arctan2(east, north))),
         disk=disk,
     )
-    rates = image_rates(
-        system,
-        path,
-        Quadrature.build((Band(549.5, 550.5),), system, path, order=1),
-        time_d=0.0,
-        pointing=SkyOrientation(0),
+    rates = rates_at(
+        system, path, Quadrature.build((Band(549.5, 550.5),), system, path, order=1)
     )
     np.testing.assert_allclose(
         centroid(rates.planet[0, 0], grid),
@@ -228,10 +228,4 @@ def test_imaging_capability_required(throughput_only):
         lambda p: p.coronagraph, path, None if throughput_only else scalar
     )
     with pytest.raises(TypeError, match="AbstractImagingCoronagraph"):
-        image_rates(
-            make_system(),
-            path,
-            Quadrature.monochromatic(550.0),
-            time_d=0.0,
-            pointing=SkyOrientation(0),
-        )
+        rates_at(make_system(), path, Quadrature.monochromatic(550.0))

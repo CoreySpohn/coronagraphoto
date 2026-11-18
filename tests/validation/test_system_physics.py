@@ -15,11 +15,13 @@ from conftest import (
 from hwoutils.constants import arcsec2rad
 from hwoutils.grids import Image, Measure, PixelGrid, SkyOrientation
 from hwoutils.spectral import Band, Quadrature
+from optixstuff import Exposure
 from optixstuff.apertures import Circular
+from skyscapes import Scene
 from skyscapes.disk import ExovistaDisk
 from zodi.jax import PrecomputedZodi
 
-from coronagraphoto import image_rates
+from coronagraphoto import photon_rates
 
 
 def test_aperture_closure_two_samplings():
@@ -78,13 +80,13 @@ def test_aperture_closure_two_samplings():
     for n, step in ((32, 0.25), (64, 0.125)):
         path = make_path(n=32, step=0.25, detector_n=n, detector_step=step)
         path = eqx.tree_at(lambda p: p.coronagraph, path, coro)
-        rates = image_rates(
-            system,
+        quadrature = Quadrature.build(
+            (Band(549.5, 550.5),), system, path, zodi, order=1
+        )
+        rates = photon_rates(
+            Scene(system, zodi),
             path,
-            Quadrature.build((Band(549.5, 550.5),), system, path, zodi, order=1),
-            time_d=0.0,
-            pointing=SkyOrientation(0),
-            zodi=zodi,
+            Exposure(time_d=0.0, roll_deg=0, quadrature=quadrature),
         )
         aperture_grid = PixelGrid.regular((n, n), step, "lod", frame=coro.grid.frame)
         psf = Image(
@@ -185,9 +187,13 @@ def test_disk_equals_pixel_center_source():
         sky_pa_deg=float(jnp.rad2deg(jnp.arctan2(east, north))),
         disk=disk,
     )
-    options = dict(time_d=0.0, pointing=SkyOrientation(0))
-    q = Quadrature.build((Band(549.5, 550.5),), system, path, order=1)
-    rates = image_rates(system, path, q, **options)
+    scene = Scene(system)
+    exposure = Exposure(
+        time_d=0.0,
+        roll_deg=0,
+        quadrature=Quadrature.build((Band(549.5, 550.5),), system, path, order=1),
+    )
+    rates = photon_rates(scene, path, exposure)
     a, b = np.asarray(rates.planet), np.asarray(rates.exozodi)
     np.testing.assert_allclose(a, b, atol=64 * np.finfo(float).eps * a.max(), rtol=0)
     native = path.coronagraph.grid
@@ -201,4 +207,4 @@ def test_disk_equals_pixel_center_source():
     assert np.max(abs(shifted - correct)) / correct.max() > 0.05
     missing = make_path(n=20, step=0.3)
     with pytest.raises(TypeError, match="AbstractSceneCoronagraph"):
-        image_rates(system, missing, q, **options)
+        photon_rates(scene, missing, exposure)

@@ -2,11 +2,12 @@
 
 Arrays are (band, node, y, x) for photons/s/nm and (band, y, x) for
 band-integrated electrons/s. Geometry is concrete host metadata; readers cache
-compiled kernels for each static configuration. Optical paths and scenes can
-be arguments of JAX transformations. A roll changes the
-position angle of detector +y, north through east, in SkyOrientation.
+compiled kernels for each static configuration. Instruments and scenes can
+be arguments of JAX transformations; an Exposure holds host geometry, so close
+over it. A roll changes the position angle of detector +y, north through east.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from functools import lru_cache, partial
 
@@ -15,22 +16,20 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.grids import Image, Measure, PixelGrid, SkyOrientation, resample
-from hwoutils.spectral import Quadrature
-from optixstuff import ElectronRates, FramePlan, OpticalPath, PhotonRates
+from hwoutils.spectral import Band, Quadrature
+from optixstuff import ElectronRates, Exposure, FramePlan, Instrument, PhotonRates
 from optixstuff.coronagraph import AbstractImagingCoronagraph, AbstractSceneCoronagraph
-from optixstuff.speckle import AbstractSpeckleField
-from skyscapes.scene import System
-from zodi.jax import AbstractLocalZodi
+from skyscapes import Scene
 
 
-def _detector_grid(optical_path, pointing):
+def _detector_grid(instrument, pointing):
     """Construct the one sky grid shared by planets, disks and observations."""
     if pointing.parity != -1:
         raise ValueError("detector pointing must have parity=-1")
     with jax.ensure_compile_time_eval():
         return PixelGrid.regular(
-            optical_path.detector.shape,
-            optical_path.detector.pixel_scale_arcsec,
+            instrument.detector.shape,
+            instrument.detector.pixel_scale_arcsec,
             "arcsec",
             orientation=pointing,
         )
@@ -39,24 +38,24 @@ def _detector_grid(optical_path, pointing):
 def _node_rates(
     wavelength_nm,
     system,
-    optical_path,
+    instrument,
     time_d,
     grid,
     ephemeris,
     positions,
     zodi,
-    speckle,
     ecliptic_latitude_deg,
     solar_longitude_deg,
 ):
     """Render one node; detector yield never enters this photon calculation."""
-    coro = optical_path.coronagraph.band(wavelength_nm)
+    speckle = instrument.speckle
+    coro = instrument.coronagraph.band(wavelength_nm)
     products = coro.at_wavelength(wavelength_nm)
     native = products.source_grid
     with jax.ensure_compile_time_eval():
         angular = replace(native.to_arcsec(wavelength_nm), orientation=grid.orientation)
     lod_arcsec = native.frame.lod_to_arcsec(wavelength_nm)
-    gain = optical_path.primary.collecting_area_m2 * optical_path.system_throughput(
+    gain = instrument.primary.collecting_area_m2 * instrument.system_throughput(
         wavelength_nm
     )
 
@@ -151,36 +150,33 @@ def _node_rates(
 
 def _reader(
     system,
-    optical_path,
+    instrument,
     time_d,
     pointing,
     quadrature,
     zodi,
-    speckle,
     ecliptic_latitude_deg,
     solar_longitude_deg,
 ):
     """Prepare static node geometry and solve the orbit once per observation."""
-    grid = _detector_grid(optical_path, pointing)
+    grid = _detector_grid(instrument, pointing)
     nodes = np.asarray(quadrature.nodes_nm).ravel()
     ephemeris, positions = None, None
     if system.planets:
         times = jnp.atleast_1d(time_d)
         ephemeris = system.ephemeris(times)
         positions = system.positions(times, ephemeris=ephemeris)[:, :, 0]
-    speckle = optical_path.speckle if speckle is None else speckle
     branches = tuple(
         partial(
             _node_rates,
             float(w),
             system,
-            optical_path,
+            instrument,
             time_d,
             grid,
             ephemeris,
             positions,
             zodi,
-            speckle,
             ecliptic_latitude_deg,
             solar_longitude_deg,
         )
@@ -204,12 +200,11 @@ class _StaticQuadrature:
 
 def _kernel_arguments(
     system,
-    optical_path,
+    instrument,
     quadrature,
     time_d,
     pointing,
     zodi,
-    speckle,
     ecliptic_latitude_deg,
     solar_longitude_deg,
 ):
@@ -218,7 +213,7 @@ def _kernel_arguments(
         raise ValueError(
             "quadrature must be concrete host geometry; close over it under JIT"
         )
-    coro = optical_path.coronagraph
+    coro = instrument.coronagraph
     for wavelength_nm in np.unique(np.asarray(quadrature.nodes_nm)):
         band = coro.band(float(wavelength_nm)) if coro is not None else None
         if not isinstance(band, AbstractImagingCoronagraph):
@@ -227,11 +222,10 @@ def _kernel_arguments(
             raise TypeError("a system with a disk requires an AbstractSceneCoronagraph")
     return (
         system,
-        optical_path,
+        instrument,
         jnp.asarray(time_d),
         pointing,
         zodi,
-        speckle,
         jnp.asarray(ecliptic_latitude_deg),
         jnp.asarray(solar_longitude_deg),
     )
@@ -239,11 +233,10 @@ def _kernel_arguments(
 
 def _image_impl(
     system,
-    optical_path,
+    instrument,
     time_d,
     pointing,
     zodi,
-    speckle,
     ecliptic_latitude_deg,
     solar_longitude_deg,
     *,
@@ -255,12 +248,11 @@ def _image_impl(
     quadrature = quadrature.rule
     grid, branches = _reader(
         system,
-        optical_path,
+        instrument,
         time_d,
         pointing,
         quadrature,
         zodi,
-        speckle,
         ecliptic_latitude_deg,
         solar_longitude_deg,
     )
@@ -295,7 +287,7 @@ def _image_impl(
             photons = PhotonRates(
                 single, **jax.tree.map(lambda x: x[None, None], components)
             )
-            electrons = optical_path.detector.electrons(photons)
+            electrons = instrument.detector.electrons(photons)
             return {name: a + getattr(electrons, name)[0] for name, a in total.items()}
 
         if host_loop:
@@ -364,117 +356,96 @@ def clear_reader_cache():
     _cached_image_kernel.cache_clear()
 
 
-def image_rates(
-    system: System,
-    optical_path: OpticalPath,
-    quadrature: Quadrature,
-    *,
-    time_d,
-    pointing: SkyOrientation,
-    zodi: AbstractLocalZodi | None = None,
-    speckle: AbstractSpeckleField | None = None,
-    ecliptic_latitude_deg=0.0,
-    solar_longitude_deg=135.0,
-) -> PhotonRates:
-    """Return full (W,Q,ny,nx) photon integrands, in photons/s/nm/pixel.
-
-    Build quadrature on the host from the system, path and active backgrounds.
-    Call integrate() on the returned record to integrate its spectral nodes.
-    No QE or survival is applied. zodi=None disables local zodi; speckle=None
-    uses the path's optional speckle field. Thermal and companion terms are zero.
-    """
-    components = _image_kernel(
-        *_kernel_arguments(
-            system,
-            optical_path,
-            quadrature,
-            time_d,
-            pointing,
-            zodi,
-            speckle,
-            ecliptic_latitude_deg,
-            solar_longitude_deg,
-        ),
-        quadrature=_StaticQuadrature(quadrature),
-        kind="photons",
-    )
-    return PhotonRates(quadrature, **components)
-
-
-def image_electrons(
-    system: System,
-    optical_path: OpticalPath,
-    quadrature: Quadrature,
-    *,
-    time_d,
-    pointing: SkyOrientation,
-    zodi: AbstractLocalZodi | None = None,
-    speckle: AbstractSpeckleField | None = None,
-    ecliptic_latitude_deg=0.0,
-    solar_longitude_deg=135.0,
-) -> ElectronRates:
-    """Stream nodes into (W,ny,nx) electrons/s with detector-owned yield.
-
-    Close over the host-prepared quadrature under JIT. Each scan step sends
-    one photon image and its original wavelength and weight to the detector.
-    The eager cache reuses kernels for the same quadrature object. Static-grid
-    branches grow compile size with Q. Forward storage is the band accumulator
-    plus one node's images.
-    JAX reverse-mode may retain residuals for differentiation.
-    """
+def _run(scene, instrument, exposure, kind):
+    """Run the shared kernel for one scene, instrument and exposure."""
     return _image_kernel(
         *_kernel_arguments(
-            system,
-            optical_path,
-            quadrature,
-            time_d,
-            pointing,
-            zodi,
-            speckle,
-            ecliptic_latitude_deg,
-            solar_longitude_deg,
+            scene.system,
+            instrument,
+            exposure.quadrature,
+            exposure.time_d,
+            SkyOrientation(exposure.roll_deg),
+            scene.zodi,
+            exposure.ecliptic_latitude_deg,
+            exposure.solar_longitude_deg,
         ),
-        quadrature=_StaticQuadrature(quadrature),
-        kind="electrons",
+        quadrature=_StaticQuadrature(exposure.quadrature),
+        kind=kind,
     )
 
 
-def observe(
-    key,
-    system: System,
-    optical_path: OpticalPath,
-    quadrature: Quadrature,
-    plan: FramePlan,
+def build_exposure(
+    scene: Scene,
+    instrument: Instrument,
+    bands: Sequence[Band],
     *,
     time_d,
-    pointing: SkyOrientation,
-    zodi: AbstractLocalZodi | None = None,
-    speckle: AbstractSpeckleField | None = None,
-    ecliptic_latitude_deg=0.0,
-    solar_longitude_deg=135.0,
-) -> Image:
+    roll_deg=0.0,
+    plan: FramePlan | None = None,
+    order: int = 4,
+) -> Exposure:
+    """Build the host-side Exposure for one observation of a scene.
+
+    Each band is split at the breaks the instrument and the scene's zodi
+    declare, and an ``order``-point rule is applied to every piece (four nodes
+    per band when no break falls inside it). The star is left out of the
+    breaks. ``roll_deg`` is the position angle of detector +y, north through
+    east, and must be a concrete number. ``plan`` is only needed by
+    :func:`observe`. The local-zodi line of sight keeps the Exposure defaults
+    (ecliptic latitude 0 deg, solar longitude 135 deg).
+    """
+    models = [m for m in (instrument, scene.zodi) if m is not None]
+    return Exposure(
+        time_d=time_d,
+        roll_deg=roll_deg,
+        quadrature=Quadrature.build(bands, *models, order=order),
+        plan=plan,
+    )
+
+
+def photon_rates(scene: Scene, instrument: Instrument, exposure: Exposure):
+    """Return full (W,Q,ny,nx) photon integrands, in photons/s/nm/pixel.
+
+    One entry per source term and wavelength node of ``exposure.quadrature``.
+    Call integrate() on the returned record to integrate its spectral nodes.
+    No QE or survival is applied. Local zodi comes from ``scene.zodi`` (None
+    disables it); the speckle field from ``instrument.speckle`` (None adds
+    none). Thermal and companion terms are zero.
+    """
+    components = _run(scene, instrument, exposure, "photons")
+    return PhotonRates(exposure.quadrature, **components)
+
+
+def expected(scene: Scene, instrument: Instrument, exposure: Exposure) -> ElectronRates:
+    """Stream nodes into (W,ny,nx) electrons/s with detector-owned yield.
+
+    These are the expected rates for the instantaneous scene at
+    ``exposure.time_d``; ``exposure.plan`` does not enter. Close over the
+    host-built exposure under JIT. Each scan step sends one photon image and
+    its original wavelength and weight to the detector. The eager cache reuses
+    kernels for the same quadrature object. Static-grid branches grow compile
+    size with Q. Forward storage is the band accumulator plus one node's
+    images. JAX reverse-mode may retain residuals for differentiation.
+    """
+    return _run(scene, instrument, exposure, "electrons")
+
+
+def observe(key, scene: Scene, instrument: Instrument, exposure: Exposure) -> Image:
     """Draw one electron Image (W,ny,nx), integrated on the detector sky grid.
 
-    Rates describe the instantaneous scene at time_d, held throughout plan.
-    Plan fields are scalar or (W,), with W matching the band axis.
-    Detector noise is drawn once after combining all source terms.
+    Rates describe the instantaneous scene at ``exposure.time_d``, held
+    throughout ``exposure.plan``, which is required. Plan fields are scalar or
+    (W,), with W matching the band axis. Detector noise is drawn once after
+    combining all source terms.
     """
-    electrons = image_electrons(
-        system,
-        optical_path,
-        quadrature,
-        time_d=time_d,
-        pointing=pointing,
-        zodi=zodi,
-        speckle=speckle,
-        ecliptic_latitude_deg=ecliptic_latitude_deg,
-        solar_longitude_deg=solar_longitude_deg,
-    )
+    if exposure.plan is None:
+        raise ValueError("observe needs an exposure built with a FramePlan")
+    electrons = expected(scene, instrument, exposure)
     return Image(
         _image_kernel(
-            optical_path.detector, key, electrons, plan, _function=_draw_impl
+            instrument.detector, key, electrons, exposure.plan, _function=_draw_impl
         ),
-        _detector_grid(optical_path, pointing),
+        _detector_grid(instrument, SkyOrientation(exposure.roll_deg)),
         ("band",),
         Measure.integral(),
         "electrons",

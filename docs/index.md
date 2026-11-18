@@ -2,14 +2,15 @@
 
 Coronagraphic image readers for shared photon and electron budgets.
 
-`image_rates` returns per-pixel spectral photon integrands; `image_electrons`
+`photon_rates` returns per-pixel spectral photon integrands; `expected`
 streams those nodes through the detector yield into band electron rates.
 `observe` draws an electron `Image` on the detector sky grid. Individual source
 terms remain accessible through the shared records.
 
-Inputs are a `skyscapes.System`, an `optixstuff.OpticalPath`, wavelength `Band`s,
-a scalar time in days from the scene epoch, and a `SkyOrientation` describing
-roll. Supply local zodi separately, for example `zodi=scene.zodi`.
+Inputs are a `skyscapes.Scene` (system and local zodi), an
+`optixstuff.Instrument`, and an `optixstuff.Exposure` built once with
+`build_exposure` from wavelength `Band`s, a scalar time in days from the scene
+epoch, and a roll in degrees.
 
 See the [README quick start](https://github.com/CoreySpohn/coronagraphoto#quick-start),
 [rate contracts](explanation/rate_vs_readout), and

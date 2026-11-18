@@ -1,7 +1,7 @@
 # JAX and memory
 
-`image_rates` retains a `(W,Q,ny,nx)` image per source term. Prefer
-`image_electrons` for band-integrated output: its `lax.scan` carries only
+`photon_rates` retains a `(W,Q,ny,nx)` image per source term. Prefer
+`expected` for band-integrated output: its `lax.scan` carries only
 `(W,ny,nx)` electron arrays, renders one node, applies detector yield with a
 one-node `Quadrature`, and discards that node's images. `observe` uses this
 streaming path. Reverse-mode differentiation can retain scan residuals.
@@ -11,11 +11,11 @@ static node branches selected by the scan, so compile size grows with node
 count. It does not precompute or retain all node images. The table adapter's
 reference sampling is scaled to each concrete node using shared grid tools.
 
-All three public readers share a cache of at most four eager JIT functions.
+The three public readers share a cache of at most four eager JIT functions.
 For rules with up to 32 nodes the first eager call compiles; later calls reuse that kernel when static
 configuration and array shapes/dtypes (including weak scalar types) match.
 The cache evicts the least recently used kernel, so returning to an evicted
-configuration compiles again. `observe` shares the `image_electrons` renderer,
+configuration compiles again. `observe` shares the `expected` renderer,
 then draws detector noise in a separate small cached kernel; it does not
 retain a second image-rendering kernel. Rendering and noise share the same
 four-entry limit. For larger rules, eager reads traverse the concrete node
@@ -25,41 +25,37 @@ An outer JIT stages every concrete node into the caller's program.
 
 Time, sky-background coordinates, array-valued scene fluxes, detector yield/noise parameters and PRNG keys remain runtime
 inputs. Use arrays for numerical scene parameters that you intend to vary;
-Equinox treats Python scalar leaves as static. Pointing, quadrature, detector pixel scale/shape and coronagraph grids are static geometry.
+Equinox treats Python scalar leaves as static. Roll, quadrature, detector pixel scale/shape and coronagraph grids are static geometry.
 Changing these requires a new compilation. Numerical tables remain array
 inputs wherever the instrument exposes them as PyTree leaves.
 
 The cache retains the concrete quadrature object, including its bands.
-Reuse that object across frames. Building a new quadrature selects a new
-kernel, even for equal nodes and weights. Each wavelength sets concrete
+Reuse one `Exposure` across frames, changing fields with
+`dataclasses.replace`. Building a new exposure builds a new quadrature and
+selects a new kernel, even for equal nodes and weights. Each wavelength sets concrete
 resampling geometry. Prepare the rule before tracing and close over it in
 an outer JIT.
 
 The readers also compose with a caller's own JIT. While tracing they stage
 directly into that program, without adding an eager cache entry. Pass the
-optical path as an argument, or close over it. Its detector pixel scale is a
+instrument as an argument, or close over it. Its detector pixel scale is a
 validated host float and stays static in either form:
 
 ```python notest
+from dataclasses import replace
+
 import equinox as eqx
-from coronagraphoto import observe
+from coronagraphoto import build_exposure, observe
+
+exposure = build_exposure(scene, instrument, bands, time_d=0.0, plan=plan)
 
 
 @eqx.filter_jit
-def predict(system, optical_path, key, time_d):
-    return observe(
-        key,
-        system,
-        optical_path,
-        quadrature,
-        plan,
-        time_d=time_d,
-        pointing=pointing,
-        zodi=local_zodi,
-    )
+def predict(scene, instrument, key, time_d):
+    return observe(key, scene, instrument, replace(exposure, time_d=time_d))
 
 
-image = predict(system, optical_path, key, time_d)
+image = predict(scene, instrument, key, time_d)
 image.data.block_until_ready()
 ```
 
@@ -71,7 +67,7 @@ an observation. Prefer `lax.map` when frames would exhaust memory:
 import jax
 
 images = jax.lax.map(
-    lambda kt: predict(system, optical_path, kt[0], kt[1]).data,
+    lambda kt: predict(scene, instrument, kt[0], kt[1]).data,
     (keys, times_d),
 )
 images.block_until_ready()
@@ -94,7 +90,7 @@ node image accumulators are much smaller than those FFT workspaces.
 Executables, staging graphs, constants and allocator pools contribute to
 resident memory in addition to the buffers reported by `memory_analysis()`.
 The eager cache retains up to four configurations across all three readers;
-new reader kinds, pointings, bands or shapes can consume additional entries.
+new reader kinds, rolls, bands or shapes can consume additional entries.
 A JIT function can hold more than one executable when device, sharding or JAX
 compilation context changes. The four-entry limit bounds functions rather
 than bytes or all possible backend executable variants.
