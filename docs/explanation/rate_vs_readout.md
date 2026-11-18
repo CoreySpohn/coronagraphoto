@@ -14,7 +14,7 @@ form avoids retaining the node image cube.
 
 `observe(key, system, optical_path, quadrature, plan, *, time_d, pointing, ...)`
 accepts the same optional keywords. It calls `detector.draw` on the electron
-rates and returns `Image(data, detector_grid, ("band",), "per_pixel", "electrons")`.
+rates and returns `Image(data, detector_grid, ("band",), Measure.integral(), "electrons")`.
 The observation holds the instantaneous scene at `time_d` throughout the
 `FramePlan`. The detector owns source noise, dark current, CIC, excess noise
 and read noise. It is called once per observation, so those noise terms are

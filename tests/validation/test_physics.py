@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import make_path, make_system
-from hwoutils.grids import SkyOrientation
+from hwoutils.grids import Measure, SkyOrientation
 from hwoutils.spectral import Band, Quadrature
 from optixstuff import FramePlan
 
@@ -41,7 +41,7 @@ def test_draw_mean_and_reproducibility():
     draw = eqx.filter_jit(lambda key: observe(key, system, path, q, plan, **options))
     key = jax.random.PRNGKey(0)
     first, second = draw(key), draw(key)
-    assert first.quantity == "electrons" and first.measure == "per_pixel"
+    assert first.quantity == "electrons" and first.measure == Measure.integral()
     assert first.grid.orientation == options["pointing"]
     np.testing.assert_array_equal(first.data, second.data)
     np.testing.assert_array_equal(first.data, detector.draw(key, electrons, plan))

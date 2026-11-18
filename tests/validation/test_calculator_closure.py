@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 from conftest import make_path, make_system, write_yip
 from hwoutils.constants import arcsec2rad
-from hwoutils.grids import Image, PixelGrid, SkyOrientation
+from hwoutils.grids import Image, Measure, PixelGrid, SkyOrientation
 from hwoutils.spectral import Band, Quadrature
 from optixstuff import Detector, ElectronRates, FramePlan, prepare_aperture
 from optixstuff.apertures import Circular
@@ -185,7 +185,7 @@ def closure(tmp_path_factory):
                 images.planet[band_index],
                 grid,
                 (),
-                "per_pixel",
+                Measure.integral(),
                 "stellar_flux_fraction",
             )
             weights.append(

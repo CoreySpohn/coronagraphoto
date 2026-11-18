@@ -19,7 +19,7 @@ from coronagraphoto import image_rates
 
 @pytest.mark.parametrize("distinct_products", [False, True])
 def test_yip_image_absolute_photon_fraction(tmp_path, distinct_products):
-    """Fails if a YIP per-pixel fraction is interpreted as a density.
+    """Fails if the YIP centre density is summed without its native cell area.
 
     Gaussian omitted tails <2e-8 at this offset; float32 YIP interpolation
     adds <2e-6 relative. A pixel-area error changes the result by a factor 4.
@@ -84,7 +84,7 @@ def test_yip_image_absolute_photon_fraction(tmp_path, distinct_products):
         orientation=SkyOrientation(90),
     )
     for product, term, scale in (
-        (stellar, rates.star_leakage[0, 0], 40 * 0.4 * phi_star),
+        (stellar.integrated(), rates.star_leakage[0, 0], 40 * 0.4 * phi_star),
         (
             coro.sky_trans,
             rates.local_zodi[0, 0],

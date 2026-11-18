@@ -14,8 +14,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.constants import arcsec2rad
-from hwoutils.grids import Image, PixelGrid, SkyOrientation, resample
+from hwoutils.grids import Image, Measure, PixelGrid, SkyOrientation, resample
 from hwoutils.spectral import Quadrature
 from optixstuff import ElectronRates, FramePlan, OpticalPath, PhotonRates
 from optixstuff.coronagraph import AbstractImagingCoronagraph, AbstractSceneCoronagraph
@@ -112,7 +111,6 @@ def _node_rates(
         planet = gain * jnp.einsum("k,kyx->yx", phi, samples)
         planet = jnp.where(jnp.all(psfs.valid | (phi == 0)), planet, jnp.nan)
 
-    omega_sr = grid.pixel_area * arcsec2rad**2
     local = jnp.zeros(grid.shape)
     if zodi is not None:
         radiance = zodi.photon_radiance(
@@ -123,30 +121,22 @@ def _node_rates(
         transmission = coro.uniform_sky_map(
             wavelength_nm, grid=detector_pixels(products.sky_grid)
         ).data
-        local = gain * radiance * omega_sr * transmission
+        sky = Image(
+            jnp.broadcast_to(gain * radiance, grid.shape),
+            grid,
+            (),
+            Measure.density("sr"),
+            "ph s^-1 nm^-1",
+        )
+        local = sky.integrated().data * transmission
 
     disk = jnp.zeros(grid.shape)
     if system.disk is not None:
         radiance = system.photon_radiance(wavelength_nm, time_d, grid=grid)
-        scene = Image(
-            radiance.data * omega_sr,
-            grid,
-            (),
-            "per_pixel",
-            "ph s^-1 m^-2 nm^-1",
-            reconstruction="linear",
-        )
+        scene = radiance.integrated()
         scene = replace(resample(scene, angular), grid=native)
-        # Convolution with the band-limited PSF band-limits the output. A finite
-        # scene is zero outside; a nonzero extension follows the input scene.
-        rendered = coro.render_scene(scene, wavelength_nm, grid=native)
-        disk = gain * onto_detector(
-            replace(
-                rendered.image,
-                reconstruction="band_limited",
-                outside=scene.outside,
-            )
-        )
+        rendered = coro.render_scene(scene, wavelength_nm, grid=detector_pixels(native))
+        disk = gain * rendered.image.data
         disk = jnp.where(rendered.valid, disk, jnp.nan)
     zero = jnp.zeros(grid.shape)
     return dict(
@@ -463,7 +453,7 @@ def observe(
     ecliptic_latitude_deg=0.0,
     solar_longitude_deg=135.0,
 ) -> Image:
-    """Draw one electron Image (W,ny,nx), per_pixel on the detector sky grid.
+    """Draw one electron Image (W,ny,nx), integrated on the detector sky grid.
 
     Rates describe the instantaneous scene at time_d, held throughout plan.
     Plan fields are scalar or (W,), with W matching the band axis.
@@ -486,6 +476,6 @@ def observe(
         ),
         _detector_grid(optical_path, pointing),
         ("band",),
-        "per_pixel",
+        Measure.integral(),
         "electrons",
     )

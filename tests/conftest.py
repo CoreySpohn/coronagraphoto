@@ -77,7 +77,7 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import Mearth2kg, Msun2kg
 from hwoutils.epoch import Epoch
-from hwoutils.grids import Frame, Image, PixelGrid, resample
+from hwoutils.grids import Frame, Image, Measure, PixelGrid, resample
 from hwoutils.spectral import Band
 from optixstuff import ConstantThroughput, Detector, OpticalPath, SimplePrimary
 from optixstuff.apertures import Circular
@@ -117,7 +117,7 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
         self.grid = PixelGrid.focal(n, step, frame)
         self.chromatic = chromatic
         self.sky_trans = Image(
-            jnp.full((n, n), 0.3), self.grid, (), "per_unit_area", "transmission"
+            jnp.full((n, n), 0.3), self.grid, (), Measure.intensive(), "transmission"
         )
         self.uniform_sky_profile = SampledProfile(
             [0.0],
@@ -140,7 +140,7 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
             * jnp.exp(-r2 / (2 * self.sigma_lod**2))
         )
         image = Image(
-            data, self.grid, ("source",), "per_pixel", "stellar_flux_fraction"
+            data, self.grid, ("source",), Measure.integral(), "stellar_flux_fraction"
         )
         return SourcePSFs(image, jnp.ones(data.shape[0], dtype=bool))
 
@@ -151,7 +151,7 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
             * (1 + stellar_diam_lod**2),
             self.grid,
             (),
-            "per_pixel",
+            Measure.integral(),
             "stellar_flux_fraction",
         )
 
@@ -205,7 +205,14 @@ class GaussianSceneCoronagraph(GaussianCoronagraph, AbstractSceneCoronagraph):
         """Apply the production dense operator to per-pixel incident flux."""
         flux = resample(scene, self.grid).data
         data, valid = self.operator.render(flux, self.grid)
-        native = Image(data, self.grid, (), "per_pixel", scene.quantity)
+        native = Image(
+            data,
+            self.grid,
+            (),
+            Measure.integral(),
+            scene.quantity,
+            reconstruction="band_limited",
+        )
         return SceneRender(resample(native, grid), valid)
 
 
@@ -317,7 +324,7 @@ class PlateauCoronagraph(GaussianSceneCoronagraph):
             0.3 / 16 * self.grid.pixel_area * wx * wy,
             self.grid,
             ("source",),
-            "per_pixel",
+            Measure.integral(),
             "stellar_flux_fraction",
         )
         return SourcePSFs(image, jnp.ones(image.data.shape[0], dtype=bool))

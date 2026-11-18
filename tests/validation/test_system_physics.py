@@ -13,7 +13,7 @@ from conftest import (
     make_system,
 )
 from hwoutils.constants import arcsec2rad
-from hwoutils.grids import Image, PixelGrid, SkyOrientation
+from hwoutils.grids import Image, Measure, PixelGrid, SkyOrientation
 from hwoutils.spectral import Band, Quadrature
 from optixstuff.apertures import Circular
 from skyscapes.disk import ExovistaDisk
@@ -88,7 +88,11 @@ def test_aperture_closure_two_samplings():
         )
         aperture_grid = PixelGrid.regular((n, n), step, "lod", frame=coro.grid.frame)
         psf = Image(
-            rates.planet[0, 0], aperture_grid, (), "per_pixel", "stellar_flux_fraction"
+            rates.planet[0, 0],
+            aperture_grid,
+            (),
+            Measure.integral(),
+            "stellar_flux_fraction",
         )
         weights = rule.weights(psf, (0.5, 0.0))
         # Independent finite-source convolution and exact Fourier pixel integrals.
