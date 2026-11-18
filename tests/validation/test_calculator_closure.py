@@ -17,7 +17,7 @@ from optixstuff import Detector, ElectronRates, FramePlan, prepare_aperture
 from optixstuff.apertures import Circular
 from optixstuff.performance import _performance_curves
 from skyscapes.disk import GraterDisk
-from yippy import Coronagraph
+from yippy import open_yip
 from zodi import SurfaceBrightnessDust
 from zodi.jax import PrecomputedZodi
 
@@ -52,10 +52,13 @@ def closure(tmp_path_factory):
     lod, with nonzero curved wings. No response is mocked or renormalized.
     """
     rule = Circular(0.7)
-    coro = Coronagraph(
-        write_yip(tmp_path_factory.mktemp("calculator-closure") / "yip"),
-        rules=(rule,),
-    ).create_psf_datacube()
+    coro = (
+        open_yip(write_yip(tmp_path_factory.mktemp("calculator-closure") / "yip"))
+        .prepare(
+            rules=(rule,),
+        )
+        .create_psf_datacube()
+    )
     base = eqx.tree_at(lambda p: p.coronagraph, make_path(), coro)
     scale = float(base.primary.frame(550.0).lod_to_arcsec(550.0))
     disk = GraterDisk(

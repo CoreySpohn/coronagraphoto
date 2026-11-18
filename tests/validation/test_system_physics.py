@@ -56,6 +56,7 @@ def test_aperture_closure_two_samplings():
     omega = (
         float(record.evaluate("core_area_lod2", 0.5)) * lod_arcsec**2 * arcsec2rad**2
     )
+    transmission = float(coro.occulter_transmission(0.5, 550.0))
     reference = (
         40
         * 0.4
@@ -63,8 +64,8 @@ def test_aperture_closure_two_samplings():
             [
                 float(record.evaluate("throughput", 0.5)) * phi_p,
                 float(record.evaluate("leakage_fraction", 0.5)) * phi_s,
-                float(record.evaluate("occulter_transmission", 0.5)) * lz * omega,
-                float(record.evaluate("occulter_transmission", 0.5)) * ld * omega,
+                transmission * lz * omega,
+                transmission * ld * omega,
             ]
         )
     )

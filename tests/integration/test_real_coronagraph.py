@@ -11,7 +11,7 @@ from hwoutils.constants import arcsec2rad
 from hwoutils.grids import PixelGrid, SkyOrientation, resample
 from hwoutils.spectral import Band
 from skyscapes.scene import BlackbodyStar, FlatStar
-from yippy import Coronagraph
+from yippy import open_yip
 from zodi.jax import PrecomputedZodi
 
 from coronagraphoto import image_rates
@@ -29,7 +29,9 @@ def test_yip_image_absolute_photon_fraction(tmp_path, distinct_products):
     by clipping negative leakage to 64 eps of total absolute stellar flux;
     the nonnegative-rate guard must not hide finite-field ringing.
     """
-    coro = Coronagraph(write_yip(tmp_path / "yip", distinct_products=distinct_products))
+    coro = open_yip(
+        write_yip(tmp_path / "yip", distinct_products=distinct_products)
+    ).prepare()
     if distinct_products:
         # A YIP has one FITS grid for the stellar/off-axis pair. Give the
         # in-memory products distinct frames to exercise the reader contract.

@@ -76,12 +76,12 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import Mearth2kg, Msun2kg
 from hwoutils.epoch import Epoch
-from hwoutils.grids import Image, PixelGrid
+from hwoutils.grids import Frame, Image, PixelGrid
 from hwoutils.spectral import Band
 from optixstuff import ConstantThroughput, Detector, OpticalPath, SimplePrimary
 from optixstuff.apertures import Circular
 from optixstuff.coronagraph import AbstractTableCoronagraph
-from optixstuff.performance import PerformanceCurves
+from optixstuff.performance import PerformanceCurves, SampledProfile
 from skyscapes.physical_model import GridPhysicalModel
 from skyscapes.scene import FlatStar, Planet, Star, System
 
@@ -98,6 +98,7 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
 
     grid: PixelGrid = eqx.field(static=True)
     sky_trans: Image
+    occulter_transmission_profile: SampledProfile
     psf_datacube: object
     bandpass: Band | None = None
     outer_working_angle_lod: object = None
@@ -116,6 +117,13 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
         self.chromatic = chromatic
         self.sky_trans = Image(
             jnp.full((n, n), 0.3), self.grid, (), "per_unit_area", "transmission"
+        )
+        self.occulter_transmission_profile = SampledProfile(
+            [0.0],
+            [0.3],
+            quantity="occulter_transmission",
+            frame=self.grid.frame,
+            interpolation="linear",
         )
         if cube:
             x, y = self.grid.coordinates()
@@ -177,7 +185,6 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
             core_area_variance_lod2=[area],
             leakage_fraction_variance=[1e-9 * area],
             leakage_density_variance_lod2=[1e-9],
-            extra={"occulter_transmission": [0.3]},
         )
 
 
@@ -311,7 +318,6 @@ class PlateauCoronagraph(GaussianCoronagraph):
             core_area_variance_lod2=[area],
             leakage_fraction_variance=[ell],
             leakage_density_variance_lod2=[1e-9],
-            extra={"occulter_transmission": [0.3]},
         )
 
 
@@ -365,9 +371,9 @@ def write_scene(path):
 
 def write_yip(path, *, distinct_products=False):
     """Synthetic YIP package with SI-labelled wavelength headers and even centre."""
-    from astropy.io import fits
+    from yippy.testing import write_synthetic_yip
+    from yippy.writer import yip_header
 
-    path.mkdir(exist_ok=True)
     n, step, sigma = 24, 0.5, 0.7
     yy, xx = np.indices((n, n))
     xx, yy = (xx - (n - 1) / 2) * step, (yy - (n - 1) / 2) * step
@@ -383,43 +389,38 @@ def write_yip(path, *, distinct_products=False):
             for x, y in offsets
         ]
     )
-    header = fits.Header(
-        {
-            "D": 6.0,
-            "D_INSC": 4.7,
-            "OBSCURED": 0.2,
-            "PIXSCALE": step,
-            "LAMBDA": 550.0,
-            "MINLAM": 500.0,
-            "MAXLAM": 600.0,
-            "XCENTER": n / 2,
-            "YCENTER": n / 2,
-            "N_LAM": 1,
-            "N_STAR": 3,
-        }
+    grid = PixelGrid.focal(n, step, Frame(550.0, 6.0, "circumscribed"))
+    diameters = np.array([0.0, 0.1, 0.2])
+    stellar = np.full((len(diameters), n, n), 1e-9 * step**2)
+    sky = np.full((n, n), 0.3)
+    metadata = dict(
+        inscribed_diameter_m=4.7,
+        obscured=0.2,
+        min_wavelength_nm=500.0,
+        max_wavelength_nm=600.0,
+        n_wavelengths=1,
+        n_pointings=3,
     )
-    for key, unit in (
-        ("D", "m"),
-        ("D_INSC", "m"),
-        ("LAMBDA", "nm"),
-        ("MINLAM", "nm"),
-        ("MAXLAM", "nm"),
-    ):
-        header.comments[key] = f"value in {unit}"
-    for name, data in (
-        ("offax_psf", psfs),
-        ("offax_psf_offset_list", offsets),
-        ("stellar_intens", np.full((3, n, n), 1e-9 * step**2)),
-        ("stellar_intens_diam_list", np.array([0.0, 0.1, 0.2])),
-        ("sky_trans", np.full((n, n), 0.3)),
-    ):
-        product_header = header.copy()
-        if distinct_products and name == "stellar_intens":
-            data = data * (1 + np.array([0.0, 0.1, 0.2])[:, None, None] ** 2)
-            data = data * (1 + 0.02 * xx)
-        if distinct_products and name == "sky_trans":
-            product_header["D"] = 4.0
-            product_header["LAMBDA"] = 750.0
-            data = data + 0.01 * xx
-        fits.PrimaryHDU(data, product_header).writeto(path / f"{name}.fits")
+    headers = yip_header(grid, **metadata)
+    if distinct_products:
+        stellar *= 1 + diameters[:, None, None] ** 2
+        stellar *= 1 + 0.02 * xx
+        sky += 0.01 * xx
+        sky_grid = PixelGrid.focal(n, step, Frame(750.0, 4.0, "circumscribed"))
+        headers = {
+            "offaxis_psfs": headers,
+            "offsets_xy_lod": headers,
+            "stellar_intensity": headers,
+            "stellar_diameters_lod": headers,
+            "sky_transmission": yip_header(sky_grid, **metadata),
+        }
+    write_synthetic_yip(
+        path,
+        grid=grid,
+        offsets_xy_lod=offsets,
+        psfs=psfs,
+        stellar=(diameters, stellar),
+        sky=sky,
+        headers=headers,
+    )
     return str(path)
