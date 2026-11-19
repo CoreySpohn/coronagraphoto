@@ -330,7 +330,7 @@ def test_local_zodi_follows_the_read_time(sloped):
             nodes,
             **dict(
                 zip(
-                    ("ecliptic_latitude_deg", "solar_longitude_deg"),
+                    ("ecliptic_latitude_deg", "helioecliptic_longitude_deg"),
                     sightline(scene, t),
                     strict=True,
                 )

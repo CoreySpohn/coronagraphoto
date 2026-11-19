@@ -44,7 +44,7 @@ def test_derived_sightline_reaches_pixels():
         radiance = zodi.photon_radiance(
             550.0,
             ecliptic_latitude_deg=jnp.asarray(lat),
-            solar_longitude_deg=jnp.asarray(lon),
+            helioecliptic_longitude_deg=jnp.asarray(lon),
         )
         expected = (
             40

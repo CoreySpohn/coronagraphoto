@@ -137,7 +137,7 @@ class _UnitSky(AbstractLocalZodi):
         return np.empty(0)
 
     def photon_radiance(
-        self, wavelength_nm, *, ecliptic_latitude_deg, solar_longitude_deg
+        self, wavelength_nm, *, ecliptic_latitude_deg, helioecliptic_longitude_deg
     ):
         """One, in the shape of the wavelengths."""
         return jnp.ones_like(wavelength_nm)
@@ -455,7 +455,7 @@ def aperture_rates(
         local_zodi = local_zodi * record.local_zodi.photon_radiance(
             record.quadrature.nodes_nm,
             ecliptic_latitude_deg=latitude_deg,
-            solar_longitude_deg=longitude_deg,
+            helioecliptic_longitude_deg=longitude_deg,
         )
     planet = contrast * _linear(
         record.planet, separation / record.separation_step_arcsec

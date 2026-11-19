@@ -56,7 +56,7 @@ def test_aperture_closure_two_samplings():
     phi_s = float(system.star.photon_flux_density(550.0, 0.0, dist_pc=10.0))
     lz = float(
         zodi.photon_radiance(
-            550.0, ecliptic_latitude_deg=0.0, solar_longitude_deg=135.0
+            550.0, ecliptic_latitude_deg=0.0, helioecliptic_longitude_deg=135.0
         )
     )
     ld = float(system.photon_radiance(550.0, 0.0, grid=native_sky).data[16, 16])

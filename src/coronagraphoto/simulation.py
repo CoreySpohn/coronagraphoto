@@ -82,7 +82,7 @@ def _node_rates(
     positions,
     zodi,
     ecliptic_latitude_deg,
-    solar_longitude_deg,
+    helioecliptic_longitude_deg,
 ):
     """Render one node; detector yield never enters this photon calculation."""
     speckle = instrument.speckle
@@ -148,7 +148,7 @@ def _node_rates(
         radiance = zodi.photon_radiance(
             wavelength_nm,
             ecliptic_latitude_deg=ecliptic_latitude_deg,
-            solar_longitude_deg=solar_longitude_deg,
+            helioecliptic_longitude_deg=helioecliptic_longitude_deg,
         )
         transmission = coro.uniform_sky_map(
             wavelength_nm, grid=detector_pixels(products.sky_grid)
