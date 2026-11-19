@@ -49,7 +49,8 @@ Scenes come from `skyscapes`; hardware and detector statistics come from
 | `observe` | `Image`, data `(W, ny, nx)` | electrons/pixel |
 
 The fields are `planet`, `star_leakage`, `local_zodi`, `exozodi`, `thermal`
-and `stellar_companions`; the last two are currently zero. Call `.total()`
+and `stellar_companions`; the reader does not model the last two, so they hold
+zeros. Call `.total()`
 to combine terms. Optical throughput excludes detector yield. Only
 `detector.electrons` applies QE and survival, at the quadrature nodes.
 `observe` calls `detector.draw` once on the combined electron budget.
@@ -62,9 +63,9 @@ detector QE knots. Reuse that quadrature across readers.
 
 ## Quick start
 
-Enable float64 before loading orbital state vectors. This example uses
-user-supplied public scene and YIP files; the epoch must lie in the scene's
-recorded time range.
+Enable float64 before loading orbital state vectors. This example downloads
+a public scene and YIP on first use; the epoch must lie in the scene's recorded
+time range.
 
 ```python notest
 import jax
@@ -73,15 +74,15 @@ jax.config.update("jax_enable_x64", True)
 
 from hwoutils.grids import SkyOrientation
 from hwoutils.spectral import Band, Quadrature
-from yippy import open_yip
 from optixstuff import FramePlan, OpticalPath
+from skyscapes.datasets import fetch_scene
+from yippy import fetch_yip, open_yip
 from coronagraphoto import image_electrons, load_scene_from_exovista, observe
 
-scene = load_scene_from_exovista("scene.fits", load_disk=False)
-coronagraph = open_yip("yip").prepare()
+scene = load_scene_from_exovista(fetch_scene(), load_disk=False)
+coronagraph = open_yip(fetch_yip("eac1_aavc_2d")).prepare()
 optical_path = OpticalPath.from_default_setup(
     coronagraph,
-    circumscribed_diameter_m=6.0,
     attenuating_throughput=0.4,
     qe=0.8,
     detector_shape=(128, 128),
@@ -103,8 +104,8 @@ image = observe(
 # imshow(image.data[0], origin="lower")
 ```
 
-For disks, load the disk and construct the coronagraph with a PSF datacube.
-The reader requests disk photon radiance on the detector sky grid and passes
+For disks, load the disk and give the coronagraph a scene renderer with
+`coronagraph.with_scene_operator()`. The reader requests disk photon radiance on the detector sky grid and passes
 its per-pixel flux through the coronagraph's field-dependent PSFs.
 
 Rows increase along detector +y and columns along detector +x. Pixel `(j,i)`
@@ -119,7 +120,6 @@ physics is retained. The reader calls `realize(wavelength_nm=..., time_d=...)`
 and leaves epoch conversion to the field. The speckle pattern remains fixed
 in detector coordinates as pointing rolls.
 
-The former per-source rate/readout functions and bin-centre helper are removed
-without aliases. Select record fields for per-source access. See
+Select record fields for per-source access. See
 [rate and observation contracts](docs/explanation/rate_vs_readout.md) and
 [JAX and memory](docs/explanation/performance.md) for details.
