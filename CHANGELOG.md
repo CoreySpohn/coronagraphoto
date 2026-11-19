@@ -1,5 +1,45 @@
 # Changelog
 
+## [6.0.0](https://github.com/CoreySpohn/coronagraphoto/compare/v5.0.0...v6.0.0) (2026-11-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* integrate radiance through Image measures and apply the detector response once
+* take a quadrature in the image readers and honour declared spectral breaks
+* check imaging and scene capabilities on the host and render on named product grids
+* read stellar angular diameter through the stellar interface
+* remove datasets module; fetch from skyscapes and yippy
+* local-zodi models come from zodi.jax
+* **simulation:** consume speckle Images on their own grid and keep the excess signed
+* render images as the per-pixel reader of the shared photon-rate budget with one orientation and one detector draw
+
+### Features
+
+* accept a shared quadrature, declare image reconstruction, and close the calculator-to-image seam ([ea387eb](https://github.com/CoreySpohn/coronagraphoto/commit/ea387eb00ea93557f80c8f8ddd063fe12f214373))
+* check imaging and scene capabilities on the host and render on named product grids ([18bebbe](https://github.com/CoreySpohn/coronagraphoto/commit/18bebbe715d0a7412ecb2ba87aa25fb512ee2f20))
+* render images as the per-pixel reader of the shared photon-rate budget with one orientation and one detector draw ([57030d3](https://github.com/CoreySpohn/coronagraphoto/commit/57030d3a511fbced62783c9173ec9e40c419bc12))
+* **simulation:** consume speckle Images on their own grid and keep the excess signed ([9ba8a77](https://github.com/CoreySpohn/coronagraphoto/commit/9ba8a77ae3176a2ea86ed6e74b8c85abce59e8d3))
+* take a quadrature in the image readers and honour declared spectral breaks ([2473548](https://github.com/CoreySpohn/coronagraphoto/commit/2473548e48597a784366278d28101448298c1048))
+
+
+### Bug Fixes
+
+* **simulation:** integrate coronagraph products once, directly over detector pixels ([4a6b12d](https://github.com/CoreySpohn/coronagraphoto/commit/4a6b12d8a913577864af9fe52313f5bd95b3ba7c))
+
+
+### Performance Improvements
+
+* cache compiled reader kernels per static configuration and accept the optical path as a jit argument ([9880dd7](https://github.com/CoreySpohn/coronagraphoto/commit/9880dd7b1bff11df49321b0d816497c3c186029c))
+
+
+### Code Refactoring
+
+* integrate radiance through Image measures and apply the detector response once ([8d3dcd5](https://github.com/CoreySpohn/coronagraphoto/commit/8d3dcd5403637f62682236b63594f0109bec0626))
+* local-zodi models come from zodi.jax ([3db9346](https://github.com/CoreySpohn/coronagraphoto/commit/3db93462bf541108881d18e294271eee82ac167f))
+* read stellar angular diameter through the stellar interface ([040535c](https://github.com/CoreySpohn/coronagraphoto/commit/040535cf4059fd2e459e865df102d77dfd07caf2))
+* remove datasets module; fetch from skyscapes and yippy ([3dcfd5f](https://github.com/CoreySpohn/coronagraphoto/commit/3dcfd5faa9ccfaadebe38d19fd7e01ce9f55727e))
+
 ## [5.0.0](https://github.com/CoreySpohn/coronagraphoto/compare/v4.2.0...v5.0.0) (2026-11-16)
 
 
