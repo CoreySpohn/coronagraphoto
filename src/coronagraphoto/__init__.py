@@ -14,6 +14,7 @@ from coronagraphoto.calculator import (
     snr,
 )
 from coronagraphoto.simulation import (
+    BuiltExposure,
     build_exposure,
     expected,
     observe,
@@ -23,6 +24,7 @@ from coronagraphoto.simulation import (
 __all__ = [
     "ApertureRecord",
     "ApertureResponse",
+    "BuiltExposure",
     "ExposureTime",
     "ResidualFractions",
     "aperture_rates",

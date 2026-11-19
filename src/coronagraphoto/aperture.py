@@ -111,6 +111,10 @@ class ApertureRecord(eqx.Module):
         sky_frame: The scene's ``SkyFrame``: its right ascension and
             declination (None for an unplaced scene) and the epoch, which is
             day zero of the read's ``time_d``.
+        reads: Paths, relative to the scene, of every scene value the record was
+            built from, each a whole leaf or a node covering the paths under it.
+            Changing one of them leaves the record stale; rebuild it or hold the
+            value.
     """
 
     quadrature: Quadrature
@@ -122,6 +126,7 @@ class ApertureRecord(eqx.Module):
     n_pix: Array
     local_zodi: AbstractLocalZodi | None
     sky_frame: SkyFrame
+    reads: tuple[str, ...] = eqx.field(static=True, default=())
 
 
 class _UnitSky(AbstractLocalZodi):
@@ -307,6 +312,11 @@ def aperture_record(
 
     ``response`` must have been built for this instrument and for
     ``exposure.quadrature``.
+
+    The record's ``reads`` lists the scene paths it was built from: the ``star``
+    and the ``dynamics.frame`` (distance, position and epoch), plus the
+    ``local_zodi`` when there is one and the ``disk`` with its two midplane angles
+    when there is one. The planets and their orbits are not read.
     """
     quadrature = exposure.quadrature
     nodes, built = quadrature.nodes_nm, response.quadrature.nodes_nm
@@ -353,6 +363,16 @@ def aperture_record(
         n_pix,
         local_zodi,
         sky_frame,
+        reads=(
+            "star",
+            "dynamics.frame",
+            *(() if local_zodi is None else ("local_zodi",)),
+            *(
+                ()
+                if scene.disk is None
+                else ("disk", "midplane_inc_deg", "midplane_position_angle_deg")
+            ),
+        ),
     )
 
 
