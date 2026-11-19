@@ -12,8 +12,13 @@ Inputs are a `skyscapes.Scene` (star, planets, disk and local zodi), an
 `build_exposure` from wavelength `Band`s, a scalar time in days from the scene
 epoch, and a roll in degrees.
 
+`aperture_record` tabulates one target's aperture rates from the same images,
+and `aperture_rates`, `snr` and `exposure_time` read that table once per
+planet under `jax.vmap`.
+
 See the [README quick start](https://github.com/CoreySpohn/coronagraphoto#quick-start),
-[rate contracts](explanation/rate_vs_readout), and
+[rate contracts](explanation/rate_vs_readout),
+[aperture rates and exposure time](explanation/exposure_time), and
 [JAX and memory](explanation/performance).
 
 ```{toctree}
@@ -34,6 +39,7 @@ dependency-floors
 :hidden:
 
 explanation/rate_vs_readout
+explanation/exposure_time
 explanation/architecture
 explanation/performance
 ```
