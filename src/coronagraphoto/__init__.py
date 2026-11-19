@@ -9,7 +9,7 @@ from coronagraphoto.aperture import (
 )
 from coronagraphoto.calculator import (
     ExposureTime,
-    PostProcessing,
+    ResidualFractions,
     exposure_time,
     snr,
 )
@@ -24,7 +24,7 @@ __all__ = [
     "ApertureCalibration",
     "ApertureRecord",
     "ExposureTime",
-    "PostProcessing",
+    "ResidualFractions",
     "aperture_calibration",
     "aperture_rates",
     "aperture_record",

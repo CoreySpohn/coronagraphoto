@@ -68,7 +68,7 @@ def test_snr_is_detector_statistics_plus_residual_squares():
             detector,
             3600.0,
             frame_time_s=100.0,
-            post_processing=cp.PostProcessing(f, g),
+            residuals=cp.ResidualFractions(f, g),
         )
         expected = base + (f * e.star_leakage * 3600) ** 2 + (g * e.exozodi * 3600) ** 2
         np.testing.assert_allclose(
@@ -89,9 +89,9 @@ def test_snr_is_detector_statistics_plus_residual_squares():
     np.testing.assert_array_equal(cp.snr(rates, detector, 0.0, **kwargs), [0.0])
     for bad in (-0.01, 1.01, np.nan):
         with pytest.raises(ValueError, match=r"\[0, 1\]"):
-            cp.PostProcessing(bad, 0)
+            cp.ResidualFractions(bad, 0)
         with pytest.raises(ValueError, match=r"\[0, 1\]"):
-            cp.PostProcessing(0, bad)
+            cp.ResidualFractions(0, bad)
 
 
 @vv.case("aperture-photon-budget", "code-verification")
@@ -103,13 +103,13 @@ def test_exposure_time_inverts_snr_and_flags_unreachable_targets():
     O(h^2) truncation allows 1e-7 relative.
     """
     rates, detector = _rates(), _detector()
-    pp = cp.PostProcessing(0.1, 0.2)
-    kwargs = dict(frame_time_s=100.0, post_processing=pp)
+    pp = cp.ResidualFractions(0.1, 0.2)
+    kwargs = dict(frame_time_s=100.0, residuals=pp)
     times = jnp.array([100.0, 723.4, 3600.0, 1e5])
     targets = jax.vmap(lambda t: cp.snr(rates, detector, t, **kwargs)[0])(times)
 
     def solve(target):
-        return cp.exposure_time(target, rates, detector, **kwargs)
+        return cp.exposure_time(rates, detector, target, **kwargs)
 
     solved = jax.jit(jax.vmap(solve))(targets)
     np.testing.assert_allclose(solved.time_s[:, 0], times, rtol=1e-12)
@@ -148,7 +148,7 @@ def test_unknown_rates_stay_unknown():
     for where in (lambda r: r.planet, lambda r: r.variance.local_zodi):
         unknown = eqx.tree_at(where, rates, nan)
         assert jnp.isnan(cp.snr(unknown, detector, 3600.0, frame_time_s=100.0)).all()
-        solved = cp.exposure_time(5.0, unknown, detector, frame_time_s=100.0)
+        solved = cp.exposure_time(unknown, detector, 5.0, frame_time_s=100.0)
         assert not solved.valid.any()
         np.testing.assert_array_equal(solved.time_s, [0.0])
 
@@ -162,22 +162,20 @@ def test_per_band_targets_and_frame_times():
     """
     bands = (Band(500.0, 550.0), Band(550.0, 600.0))
     rates, detector = _rates(bands), _detector()
-    pp = cp.PostProcessing(0.05, 0.1)
+    pp = cp.ResidualFractions(0.05, 0.1)
     target, frame, time = jnp.array([4.0, 6.0]), jnp.array([50.0, 200.0]), 5000.0
-    both = cp.exposure_time(
-        target, rates, detector, frame_time_s=frame, post_processing=pp
-    )
-    snrs = cp.snr(rates, detector, time, frame_time_s=frame, post_processing=pp)
+    both = cp.exposure_time(rates, detector, target, frame_time_s=frame, residuals=pp)
+    snrs = cp.snr(rates, detector, time, frame_time_s=frame, residuals=pp)
     assert both.time_s.shape == snrs.shape == (2,)
     for i, band in enumerate(bands):
         one = _rates((band,))
         single = cp.exposure_time(
-            target[i], one, detector, frame_time_s=frame[i], post_processing=pp
+            one, detector, target[i], frame_time_s=frame[i], residuals=pp
         )
         np.testing.assert_allclose(both.time_s[i], single.time_s[0], rtol=1e-12)
         np.testing.assert_allclose(
             snrs[i],
-            cp.snr(one, detector, time, frame_time_s=frame[i], post_processing=pp)[0],
+            cp.snr(one, detector, time, frame_time_s=frame[i], residuals=pp)[0],
             rtol=1e-12,
         )
     with pytest.raises(ValueError, match="scalar or shape"):

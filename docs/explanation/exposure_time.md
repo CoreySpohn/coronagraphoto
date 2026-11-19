@@ -90,7 +90,7 @@ north through east, and `roll_deg` is the position angle of detector +y, as in
 ## S/N and exposure time
 
 `snr(rates, detector, time_s, frame_time_s=...)` and
-`exposure_time(target_snr, rates, detector, frame_time_s=...)` take the read.
+`exposure_time(rates, detector, target_snr, frame_time_s=...)` take the read.
 With planet electrons/s `p`, the detector variance of one frame divided by
 its live seconds `b`, and the squared residual rate `f2`:
 
@@ -99,7 +99,7 @@ its live seconds `b`, and the squared residual rate `f2`:
 
 `b` comes from `detector.mean_and_variance`: source shot noise from the
 squared-weight rates, dark current, clock-induced charge and read noise over
-the aperture's pixels. `PostProcessing` sets the residual speckle and exozodi
+the aperture's pixels. `ResidualFractions` sets the residual speckle and exozodi
 fractions behind `f2`; without it the residual is zero.
 
 `exposure_time` returns `ExposureTime(time_s, valid)`. The time is continuous;
@@ -124,7 +124,7 @@ def time_to_snr(separation_arcsec, position_angle_deg, contrast, time_d):
         position_angle_deg=position_angle_deg,
         time_d=time_d,
     )
-    return cp.exposure_time(7.0, rates, instrument.detector, frame_time_s=100.0)
+    return cp.exposure_time(rates, instrument.detector, 7.0, frame_time_s=100.0)
 
 
 # One observation time for the whole batch of planets, then a batch of times.

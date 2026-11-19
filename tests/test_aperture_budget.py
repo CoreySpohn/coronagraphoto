@@ -81,16 +81,16 @@ def test_record_meets_the_planner_budget(tmp_path):
     record, first_build_s = build()
     build_s = np.median([build()[1] for _ in range(5)])
 
-    pp = cp.PostProcessing(1e-4, 0.01)
+    pp = cp.ResidualFractions(1e-4, 0.01)
 
     def read(separation, angle, contrast, time_d):
         rates = cp.aperture_rates(
             record, separation, contrast, position_angle_deg=angle, time_d=time_d
         )
-        kwargs = dict(frame_time_s=100.0, post_processing=pp)
+        kwargs = dict(frame_time_s=100.0, residuals=pp)
         return (
             cp.snr(rates, detector, 36000.0, **kwargs),
-            cp.exposure_time(7.0, rates, detector, **kwargs).time_s,
+            cp.exposure_time(rates, detector, 7.0, **kwargs).time_s,
         )
 
     def timed(function, *args, repeats):

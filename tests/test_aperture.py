@@ -411,7 +411,7 @@ def test_reads_outside_the_tables_and_unsupported_builds(sloped):
         )
         assert np.all(np.isnan(outside.planet))
         assert np.isnan(cp.snr(outside, detector, 3600.0, frame_time_s=100.0)).all()
-        solved = cp.exposure_time(5.0, outside, detector, frame_time_s=100.0)
+        solved = cp.exposure_time(outside, detector, 5.0, frame_time_s=100.0)
         assert not solved.valid.any() and float(solved.time_s[0]) == 0.0
     # The aperture leaves the detector before the pixel centre does.
     half = 24 * float(detector.pixel_scale_arcsec)

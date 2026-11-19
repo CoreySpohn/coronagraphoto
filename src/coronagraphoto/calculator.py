@@ -18,7 +18,7 @@ from optixstuff import FramePlan, Rates
 from optixstuff.detector import AbstractDetector
 
 
-class PostProcessing(eqx.Module):
+class ResidualFractions(eqx.Module):
     """Residual fractions in [0, 1]; zero means perfect subtraction.
 
     The residual speckle and exozodi rates are these fractions of the mean
@@ -59,17 +59,17 @@ def _per_band(value, ndim):
     return value.reshape(value.shape + (1,) * (ndim - 1)) if value.ndim else value
 
 
-def _statistics(rates, detector, frame_time_s, post_processing):
+def _statistics(rates, detector, frame_time_s, residuals):
     """Return planet electrons/s, variance per live second and squared floor."""
     electrons = detector.electrons(rates) if rates.carrier == "photon" else rates
     _, one_frame = detector.mean_and_variance(electrons, FramePlan(frame_time_s, 1))
     b = one_frame / _per_band(frame_time_s, one_frame.ndim)
     floor_sq = jnp.zeros_like(b)
-    if post_processing is not None:
+    if residuals is not None:
         floor_sq = (
             floor_sq
             + (
-                _per_band(post_processing.speckle_residual_fraction, b.ndim)
+                _per_band(residuals.speckle_residual_fraction, b.ndim)
                 * electrons.star_leakage
             )
             ** 2
@@ -77,7 +77,7 @@ def _statistics(rates, detector, frame_time_s, post_processing):
         floor_sq = (
             floor_sq
             + (
-                _per_band(post_processing.exozodi_residual_fraction, b.ndim)
+                _per_band(residuals.exozodi_residual_fraction, b.ndim)
                 * electrons.exozodi
             )
             ** 2
@@ -91,7 +91,7 @@ def snr(
     time_s: ArrayLike,
     *,
     frame_time_s: ArrayLike,
-    post_processing: PostProcessing | None = None,
+    residuals: ResidualFractions | None = None,
 ) -> Array:
     """Return S/N per band, shape (W,), after ``time_s`` live seconds.
 
@@ -100,7 +100,7 @@ def snr(
     time. The detector supplies all independent count variance: source shot
     noise from the squared-weight ``rates.variance``, dark current, clock
     induced charge and read noise over the aperture's pixels, with CIC and
-    read noise accruing once per ``frame_time_s``. ``post_processing`` adds
+    read noise accruing once per ``frame_time_s``. ``residuals`` adds
     the squared residual speckle and exozodi counts; None means no residual.
 
     ``time_s`` and ``frame_time_s`` are scalar or shape (W,). The result
@@ -108,7 +108,7 @@ def snr(
     interpolates between them. Zero time gives zero. NaN rates, as read
     outside an aperture record, give NaN.
     """
-    p, b, floor_sq = _statistics(rates, detector, frame_time_s, post_processing)
+    p, b, floor_sq = _statistics(rates, detector, frame_time_s, residuals)
     time_s = _per_band(time_s, p.ndim)
     variance = b * time_s + floor_sq * time_s**2
     # Only an exact zero is replaced; a NaN variance propagates.
@@ -116,12 +116,12 @@ def snr(
 
 
 def exposure_time(
-    target_snr: ArrayLike,
     rates: Rates,
     detector: AbstractDetector,
+    target_snr: ArrayLike,
     *,
     frame_time_s: ArrayLike,
-    post_processing: PostProcessing | None = None,
+    residuals: ResidualFractions | None = None,
 ) -> ExposureTime:
     """Return the continuous live time reaching each band's target S/N.
 
@@ -134,7 +134,7 @@ def exposure_time(
     any time: ``valid`` is False and ``time_s`` is zero. The same holds for
     rates that are not finite. A nonpositive target needs zero time.
     """
-    p, b, floor_sq = _statistics(rates, detector, frame_time_s, post_processing)
+    p, b, floor_sq = _statistics(rates, detector, frame_time_s, residuals)
     target_snr = _per_band(target_snr, p.ndim)
     denominator = p**2 - target_snr**2 * floor_sq
     # Feasibility compares rates, not a difference of squares, so a target

@@ -83,7 +83,7 @@ def closure(tmp_path_factory):
     separation = jnp.hypot(east, north)
     angle = jnp.rad2deg(jnp.arctan2(east, north))
     x, y = SkyOrientation(roll).sky_to_detector(east, north)
-    pp = cp.PostProcessing(1e-4, 0.01)
+    pp = cp.ResidualFractions(1e-4, 0.01)
     frame_time, n_frames = 100.0, 360.0
     plan = FramePlan(frame_time, n_frames)
     levels = []
@@ -180,8 +180,8 @@ def closure(tmp_path_factory):
         )
         _, variance = detector.mean_and_variance(image_rates, plan)
         image_snr = image[0, 0] * live / np.sqrt(variance + residual_sq(image[0], live))
-        kwargs = dict(frame_time_s=frame_time, post_processing=pp)
-        solved = cp.exposure_time(image_snr, rates, detector, **kwargs)
+        kwargs = dict(frame_time_s=frame_time, residuals=pp)
+        solved = cp.exposure_time(rates, detector, image_snr, **kwargs)
 
         doubled = eqx.tree_at(lambda s: s.disk.amplitude.level, system, 6.0)
         doubled_record = cp.aperture_record(doubled, path, exposure, calibration)
