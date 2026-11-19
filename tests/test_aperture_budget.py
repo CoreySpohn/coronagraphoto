@@ -83,10 +83,8 @@ def test_record_meets_the_planner_budget(tmp_path):
 
     pp = cp.ResidualFractions(1e-4, 0.01)
 
-    def read(separation, angle, contrast, time_d):
-        rates = cp.aperture_rates(
-            record, separation, contrast, position_angle_deg=angle, time_d=time_d
-        )
+    def read(east, north, contrast, time_d):
+        rates = cp.aperture_rates(record, east, north, contrast, time_d=time_d)
         kwargs = dict(frame_time_s=100.0, residuals=pp)
         return (
             cp.snr(rates, detector, 36000.0, **kwargs),
@@ -106,9 +104,10 @@ def test_record_meets_the_planner_budget(tmp_path):
     shape = (4000, 10)
     last = float(response.separation_step_arcsec) * 32
     separations = jnp.asarray(rng.uniform(0.05 * last, 0.95 * last, shape))
-    angles = jnp.asarray(rng.uniform(0.0, 360.0, shape))
+    angles = jnp.deg2rad(jnp.asarray(rng.uniform(0.0, 360.0, shape)))
+    easts, norths = separations * jnp.sin(angles), separations * jnp.cos(angles)
     contrasts = jnp.asarray(10 ** rng.uniform(-10.5, -9.0, shape))
-    planets = (separations, angles, contrasts)
+    planets = (easts, norths, contrasts)
     shared = (0, 0, 0, None)
     batched = jax.jit(jax.vmap(jax.vmap(read, shared), shared))
     read_us = 1e6 * timed(batched, *planets, 200.0, repeats=60) / separations.size
@@ -121,7 +120,7 @@ def test_record_meets_the_planner_budget(tmp_path):
     each = jax.jit(jax.vmap(jax.vmap(read)))
     every = jnp.asarray(rng.uniform(0.0, 3650.0, shape))
     each_us = 1e6 * timed(each, *planets, every, repeats=60) / separations.size
-    exposure_s = timed(jax.jit(read), 0.05, 30.0, 1e-10, 200.0, repeats=20)
+    exposure_s = timed(jax.jit(read), 0.025, 0.043, 1e-10, 200.0, repeats=20)
     print(
         f"aperture budget: read {read_us:.3f} us per draw-planet at one time, "
         f"{times_us:.3f} us with 16 times batched, {each_us:.3f} us with a time "
@@ -133,11 +132,7 @@ def test_record_meets_the_planner_budget(tmp_path):
     assert np.all(np.isfinite(batched(*planets, 200.0)[0]))
     assert np.all(np.isfinite(each(*planets, every)[0]))
     zodi = jax.vmap(
-        lambda t: (
-            cp.aperture_rates(
-                record, 0.05, 1e-10, position_angle_deg=30.0, time_d=t
-            ).local_zodi
-        )
+        lambda t: cp.aperture_rates(record, 0.025, 0.043, 1e-10, time_d=t).local_zodi
     )(times)
     assert np.all(zodi > 0) and float(zodi.max() / zodi.min()) > 1.5
     assert read_us < 5.0

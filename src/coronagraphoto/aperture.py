@@ -387,17 +387,17 @@ def _bilinear(table, row, column):
 
 def aperture_rates(
     record: ApertureRecord,
-    separation_arcsec: ArrayLike,
+    east_arcsec: ArrayLike,
+    north_arcsec: ArrayLike,
     contrast: ArrayLike,
     *,
-    position_angle_deg: ArrayLike,
     time_d: ArrayLike,
     roll_deg: ArrayLike | None = None,
 ) -> Rates:
     """Read one planet's aperture rates, in photons/s/nm, from a record.
 
-    The planet sits ``separation_arcsec`` from the star at
-    ``position_angle_deg``, north through east, with planet-to-star
+    The planet sits ``east_arcsec`` east and ``north_arcsec`` north of the
+    star, the order and convention of ``Scene.positions``, with planet-to-star
     ``contrast``: a scalar, or shape (W, Q) for one value per wavelength node.
     The aperture is centred on the planet.
 
@@ -428,9 +428,8 @@ def aperture_rates(
     ``jax.vmap``; a ``time_d`` shared by a batch of planets (``in_axes`` None,
     or closed over) costs one radiance evaluation for the whole batch.
     """
-    separation = jnp.asarray(separation_arcsec)
-    angle = jnp.deg2rad(position_angle_deg)
-    east, north = separation * jnp.sin(angle), separation * jnp.cos(angle)
+    east, north = jnp.asarray(east_arcsec), jnp.asarray(north_arcsec)
+    separation = jnp.hypot(east, north)
     ny, nx = record.n_pix.shape[-2] // 2, record.n_pix.shape[-1] // 2
 
     def lattice_index(roll):

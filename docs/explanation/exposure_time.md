@@ -11,7 +11,7 @@ too slow, so the answer is read from tables that the image path fills once.
 |---|---|---|---|
 | Response | `aperture_response(instrument, quadrature, rule=...)` | once per instrument and band set | seconds to minutes |
 | Record | `aperture_record(scene, instrument, exposure, response)` | once per target, instrument and band set | one background render |
-| Read | `aperture_rates(record, separation_arcsec, contrast, position_angle_deg=..., time_d=...)` | once per planet and observation time | a few gathers |
+| Read | `aperture_rates(record, east_arcsec, north_arcsec, contrast, time_d=...)` | once per planet and observation time | a few gathers |
 
 **Response.** Point sources are placed on rings around the star, imaged on
 the detector pixels by the coronagraph, and summed in a circular aperture
@@ -116,22 +116,18 @@ response = cp.aperture_response(instrument, exposure.quadrature)
 record = cp.aperture_record(scene, instrument, exposure, response)
 
 
-def time_to_snr(separation_arcsec, position_angle_deg, contrast, time_d):
+def time_to_snr(east_arcsec, north_arcsec, contrast, time_d):
     rates = cp.aperture_rates(
-        record,
-        separation_arcsec,
-        contrast,
-        position_angle_deg=position_angle_deg,
-        time_d=time_d,
+        record, east_arcsec, north_arcsec, contrast, time_d=time_d
     )
     return cp.exposure_time(rates, instrument.detector, 7.0, frame_time_s=100.0)
 
 
 # One observation time for the whole batch of planets, then a batch of times.
 per_planet = jax.vmap(time_to_snr, in_axes=(0, 0, 0, None))
-times = jax.jit(per_planet)(separations, angles, contrasts, 120.0)
+times = jax.jit(per_planet)(easts, norths, contrasts, 120.0)
 by_time = jax.jit(jax.vmap(per_planet, in_axes=(None, None, None, 0)))
-times = by_time(separations, angles, contrasts, observation_times_d)
+times = by_time(easts, norths, contrasts, observation_times_d)
 ```
 
 ## What the tables do not hold
