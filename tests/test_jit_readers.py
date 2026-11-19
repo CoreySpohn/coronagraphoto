@@ -41,8 +41,13 @@ def test_path_argument_matches_closure():
     key, time_d = jax.random.key(0), jnp.asarray(0.0)
     argument = eqx.filter_jit(read)(system, path, key, time_d)
     closure = eqx.filter_jit(lambda s, k, t: read(s, path, k, t))(system, key, time_d)
+    # XLA may fuse the closed-over constants differently; agree to a few ULP.
     for a, b in zip(jax.tree.leaves(argument), jax.tree.leaves(closure), strict=True):
-        assert np.asarray(a).tobytes() == np.asarray(b).tobytes()
+        a, b = np.asarray(a), np.asarray(b)
+        if np.issubdtype(a.dtype, np.inexact):
+            np.testing.assert_array_max_ulp(a, b, maxulp=4)
+        else:
+            np.testing.assert_array_equal(a, b)
     with pytest.raises(ValueError, match="quadrature must be concrete host geometry"):
         eqx.filter_jit(
             lambda q: observe(

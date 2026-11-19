@@ -23,6 +23,14 @@ from zodi.jax import PrecomputedZodi
 
 from coronagraphoto import image_electrons
 
+# The closure needs the jaxedith photon-budget API; xfail strictly until it is released.
+pytestmark = pytest.mark.xfail(
+    not hasattr(je, "aperture_rates"),
+    reason="needs jaxedith.aperture_rates, not in the released jaxedith yet",
+    raises=AttributeError,
+    strict=True,
+)
+
 TERMS = ("planet", "star_leakage", "local_zodi", "exozodi")
 
 

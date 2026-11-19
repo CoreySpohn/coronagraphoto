@@ -5,6 +5,7 @@ import pytest
 
 
 @pytest.mark.medium(reason="1600 declared stellar nodes in the worked spectrum")
+@pytest.mark.fail_slow("90s")  # over 30 s on the hosted runner
 def test_worked_example():
     """Fails if the reader omits a spectral factor; 1e-9 quadrature bound."""
     import coronagraphoto as cp
@@ -90,6 +91,7 @@ def test_node_yield_once(chromatic):
 
 
 @pytest.mark.medium(reason="two bands, reverse-mode scan and JIT compilation")
+@pytest.mark.fail_slow("90s")  # over 30 s on the hosted runner
 def test_streaming_jit_and_gradient():
     """Fails on incorrect scan band indexing or broken contrast gradients.
 
