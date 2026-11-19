@@ -23,6 +23,7 @@ exact fractional pixel coverage ``w``; the second moment of each table uses
 """
 
 from dataclasses import replace
+from typing import ClassVar
 
 import equinox as eqx
 import jax
@@ -128,6 +129,8 @@ class ApertureRecord(eqx.Module):
 
 class _UnitSky(AbstractLocalZodi):
     """A sky of 1 photon/s/m^2/nm/sr at every wavelength and sightline."""
+
+    uses_pointing: ClassVar[bool] = False
 
     def spectral_breaks_nm(self):
         """No breaks: the radiance is constant."""

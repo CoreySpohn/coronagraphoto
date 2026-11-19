@@ -46,27 +46,13 @@ def _star_sky_position(scene):
     return scene.ra_deg, scene.dec_deg
 
 
-def _uses_pointing(local_zodi):
-    """Whether a local-zodi model reads its sightline, probed by omitting it."""
-    try:
-        jax.eval_shape(
-            lambda w: local_zodi.photon_radiance(
-                w, ecliptic_latitude_deg=None, solar_longitude_deg=None
-            ),
-            jnp.zeros(1),
-        )
-    except (TypeError, ValueError):
-        return True
-    return False
-
-
 def _require_position(scene):
     """Raise when a pointing-dependent local zodi sits on an unplaced scene."""
     local_zodi = scene.local_zodi
     if (
         local_zodi is not None
         and _star_sky_position(scene)[0] is None
-        and _uses_pointing(local_zodi)
+        and local_zodi.uses_pointing
     ):
         raise ValueError(
             f"scene.local_zodi is a {type(local_zodi).__name__}, which depends on the "
