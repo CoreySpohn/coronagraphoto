@@ -500,10 +500,47 @@ def test_aperture_record_needs_a_position_only_for_a_pointing_dependent_zodi(pla
     record = cp.aperture_record(
         with_zodi(scene, AYOZodi()), instrument, exposure, response
     )
-    assert record.ra_deg is None
+    assert record.sky_frame.ra_deg is None
     rates = cp.aperture_rates(record, *_offsets(0.02, 0.0), 1e-10, time_d=5.0)
     assert float(jnp.sum(rates.local_zodi)) > 0
     with pytest.raises(ValueError, match="no sky position"):
         cp.aperture_record(
             with_zodi(scene, LeinertZodi()), instrument, exposure, response
         )
+
+
+@vv.case("aperture-photon-budget", "code-verification")
+def test_records_of_two_targets_stack_and_read_under_vmap(sloped):
+    """Fails if a record carries static per-target data a stack cannot hold.
+
+    Basis: two targets of one shape differ only in sky position, so their
+    records stack leaf by leaf and one ``vmap`` over the stack equals the two
+    separate reads to a 1e-13 relative rounding allowance. The local zodi
+    follows the pointing, so the two reads must also differ.
+    """
+    scene, instrument, exposure, response, _ = sloped
+    scene = with_zodi(scene, LeinertZodi())
+    other = eqx.tree_at(
+        lambda s: (s.dynamics.frame.ra_deg, s.dynamics.frame.dec_deg),
+        scene,
+        (jnp.asarray(250.0), jnp.asarray(35.0)),
+    )
+    records = [
+        cp.aperture_record(target, instrument, exposure, response)
+        for target in (scene, other)
+    ]
+    stacked = jax.tree_util.tree_map(lambda *leaves: jnp.stack(leaves), *records)
+    east, north = _offsets(0.04, 60.0)
+
+    def read(record):
+        return cp.aperture_rates(record, east, north, 1e-10, time_d=60.0)
+
+    together = eqx.filter_vmap(read)(stacked)
+    for i, record in enumerate(records):
+        single = read(record)
+        for name in ("planet", "star_leakage", "local_zodi", "exozodi", "n_pix"):
+            np.testing.assert_allclose(
+                getattr(together, name)[i], getattr(single, name), rtol=1e-13
+            )
+    zodi = np.asarray(together.local_zodi)
+    assert np.all(abs(zodi[0] / zodi[1] - 1) > 0.01)

@@ -29,7 +29,6 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.epoch import Epoch
 from jax.typing import ArrayLike
 from jaxtyping import Array
 from optixstuff import Exposure, Instrument, Rates
@@ -38,10 +37,11 @@ from optixstuff.coronagraph import AbstractImagingCoronagraph, MultiBandCoronagr
 from optixstuff.grids import Image, Measure, PixelGrid, SkyOrientation
 from optixstuff.spectral import Quadrature
 from orbix.observatory import ecliptic_pointing
+from orbix.system import SkyFrame
 from skyscapes import Scene
 from zodi.jax import AbstractLocalZodi
 
-from coronagraphoto.simulation import _require_position, _run, _star_sky_position
+from coronagraphoto.simulation import _require_position, _run
 
 _BACKGROUNDS = ("star_leakage", "local_zodi", "exozodi")
 # Successive rings start a golden-ratio fraction of the angular step apart, so
@@ -108,10 +108,9 @@ class ApertureRecord(eqx.Module):
         n_pix: Sum of the aperture weights at each lattice position, shape
             (2, W, 2 ny, 2 nx).
         local_zodi: The scene's local-zodi model, or None for no local zodi.
-        ra_deg: Right ascension of the scene when the record was built, or
-            None when the scene has no local zodi or no sky position.
-        dec_deg: Declination of the scene, likewise.
-        epoch: Day zero of the read's ``time_d``: the scene epoch.
+        sky_frame: The scene's ``SkyFrame``: its right ascension and
+            declination (None for an unplaced scene) and the epoch, which is
+            day zero of the read's ``time_d``.
     """
 
     quadrature: Quadrature
@@ -122,9 +121,7 @@ class ApertureRecord(eqx.Module):
     background: Array
     n_pix: Array
     local_zodi: AbstractLocalZodi | None
-    ra_deg: Array | None
-    dec_deg: Array | None
-    epoch: Epoch = eqx.field(static=True)
+    sky_frame: SkyFrame
 
 
 class _UnitSky(AbstractLocalZodi):
@@ -300,9 +297,9 @@ def aperture_record(
     sky of unit radiance and the scene's disk are rendered once by the image
     path at ``exposure.time_d`` and ``exposure.roll_deg``, without planets,
     then summed in the response's aperture at every half-pixel position.
-    The record keeps ``scene.local_zodi``, the scene's sky position and the scene
-    epoch, from which :func:`aperture_rates` computes the local-zodi radiance
-    at the time of each read; nothing of the local zodi is fixed at
+    The record keeps ``scene.local_zodi`` and the scene's sky frame (position
+    and epoch), from which :func:`aperture_rates` computes the local-zodi
+    radiance at the time of each read; nothing of the local zodi is fixed at
     ``exposure.time_d``. The planet table is the response's throughput
     times the star's photon flux density and the collecting area and optical
     throughput, so a planet enters the read only as a separation, a position
@@ -320,13 +317,10 @@ def aperture_record(
     ):
         raise ValueError("the response was built for other wavelength nodes")
     _require_position(scene)
-    local_zodi, sky_position = scene.local_zodi, (None, None)
+    local_zodi = scene.local_zodi
     if local_zodi is not None:
-        if scene.ra_deg is not None:
-            sky_position = tuple(
-                jnp.asarray(angle) for angle in _star_sky_position(scene)
-            )
         scene = eqx.tree_at(lambda s: s.local_zodi, scene, _UnitSky())
+    sky_frame = scene.dynamics.frame
     components = _run(scene, instrument, exposure, "photons", planets=False)
     maps = jnp.stack([components[name] for name in _BACKGROUNDS], axis=1)
     n_bands, n_nodes = nodes.shape
@@ -358,8 +352,7 @@ def aperture_record(
         jnp.moveaxis(background, 2, 0),
         n_pix,
         local_zodi,
-        *sky_position,
-        scene.epoch,
+        sky_frame,
     )
 
 
@@ -447,9 +440,10 @@ def aperture_rates(
         exozodi = _bilinear(record.background[2], *lattice_index(record.roll_deg))
     if record.local_zodi is not None:
         latitude_deg, longitude_deg = (None, None)
-        if record.ra_deg is not None:
+        frame = record.sky_frame
+        if frame.ra_deg is not None:
             latitude_deg, longitude_deg = ecliptic_pointing(
-                record.ra_deg, record.dec_deg, record.epoch, time_d
+                frame.ra_deg, frame.dec_deg, frame.epoch, time_d
             )
         local_zodi = local_zodi * record.local_zodi.photon_radiance(
             record.quadrature.nodes_nm,

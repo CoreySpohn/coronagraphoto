@@ -37,23 +37,10 @@ def _detector_grid(instrument, orientation):
     return replace(instrument.detector.grid, orientation=orientation)
 
 
-def _star_sky_position(scene):
-    """Right ascension and declination of the scene, in degrees (ICRS), or None.
-
-    The one place this package reads where the target is on the sky. Both are
-    None for an unplaced scene.
-    """
-    return scene.ra_deg, scene.dec_deg
-
-
 def _require_position(scene):
     """Raise when a pointing-dependent local zodi sits on an unplaced scene."""
     local_zodi = scene.local_zodi
-    if (
-        local_zodi is not None
-        and _star_sky_position(scene)[0] is None
-        and local_zodi.uses_pointing
-    ):
+    if local_zodi is not None and scene.ra_deg is None and local_zodi.uses_pointing:
         raise ValueError(
             f"scene.local_zodi is a {type(local_zodi).__name__}, which depends on the "
             "sightline, but the scene has no sky position; build it with "
@@ -67,7 +54,7 @@ def _sightline(scene, time_d):
     _require_position(scene)
     sightline = (None, None)
     if scene.local_zodi is not None and scene.ra_deg is not None:
-        sightline = ecliptic_pointing(*_star_sky_position(scene), scene.epoch, time_d)
+        sightline = ecliptic_pointing(scene.ra_deg, scene.dec_deg, scene.epoch, time_d)
     return sightline
 
 
