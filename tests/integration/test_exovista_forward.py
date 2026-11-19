@@ -34,7 +34,7 @@ def test_exovista_native_disk_and_position_angle(tmp_path):
     )
     # Absolute incoming local-zodi normalization, on an interior pixel.
     lat, lon = sightline(scene, 0.0)
-    lz = scene.zodi.photon_radiance(
+    lz = scene.local_zodi.photon_radiance(
         550.0, ecliptic_latitude_deg=lat, solar_longitude_deg=lon
     )
     expected_z = (

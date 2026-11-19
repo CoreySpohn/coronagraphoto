@@ -7,8 +7,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import (
-    PointedBlackbodyStar,
-    PointedFlatStar,
     make_path,
     make_system,
     with_zodi,
@@ -18,6 +16,7 @@ from hwoutils.constants import arcsec2rad
 from optixstuff import Exposure
 from optixstuff.grids import PixelGrid, SkyOrientation, resample
 from optixstuff.spectral import Band, Quadrature
+from skyscapes.scene import BlackbodyStar, FlatStar
 from yippy import open_yip
 from zodi.jax import PrecomputedZodi
 
@@ -53,12 +52,12 @@ def test_yip_image_absolute_photon_fraction(tmp_path, distinct_products):
     path = eqx.tree_at(lambda p: p.coronagraph, path, coro)
     # Exactly a measured source offset: 1 lod north at the reference wavelength.
     stellar = coro.stellar_map(550.0, 0.1, grid=None)
-    star = PointedFlatStar(
+    star = FlatStar(
         flux_phot_per_nm_m2=1e6,
         fixed_diameter_arcsec=0.1 * stellar.grid.frame.lod_to_arcsec(550.0),
     )
     if distinct_products:
-        star = PointedBlackbodyStar(teff_K=5772.0, radius_m=6.957e8)
+        star = BlackbodyStar(teff_K=5772.0, radius_m=6.957e8)
         stellar = coro.stellar_map(
             550.0,
             star.angular_diameter_arcsec(10.0)

@@ -24,7 +24,7 @@ def test_derived_sightline_reaches_pixels():
     zodi = LeinertZodi()
     path = make_path(n=8, step=0.5)
     system = with_zodi(make_system(), zodi)
-    ra, dec = np.radians(system.star.ra_deg), np.radians(system.star.dec_deg)
+    ra, dec = np.radians(system.ra_deg), np.radians(system.dec_deg)
     sin_beta = np.sin(dec) * np.cos(np.radians(_OBLIQUITY_DEG)) - np.cos(dec) * np.sin(
         np.radians(_OBLIQUITY_DEG)
     ) * np.sin(ra)

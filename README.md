@@ -78,7 +78,7 @@ path fills tables once and the answer is read from them:
 | `exposure_time(target_snr, rates, detector, frame_time_s=...)` | once per planet | `ExposureTime(time_s, valid)` per band |
 
 The last three are pure array functions for `jax.jit`, `jax.vmap` and
-`jax.grad`. The local zodi is read from `scene.zodi` and the disk from the
+`jax.grad`. The local zodi is read from `scene.local_zodi` and the disk from the
 scene, exactly as in the images. See
 [aperture rates and exposure time](docs/explanation/exposure_time.md).
 

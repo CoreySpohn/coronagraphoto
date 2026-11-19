@@ -26,7 +26,7 @@ not multiplied by the number of sources. Reusing a key reproduces the image.
 Use deterministic rates for gradients and likelihood means; discrete noisy
 draws are not differentiable physical forward models. Access individual
 sources through record fields and `.total()` for their sum. A scene with
-`zodi=None` has no local zodi. The speckle model is `instrument.speckle`;
+`local_zodi=None` has no local zodi. The speckle model is `instrument.speckle`;
 construct an instrument without that field to disable an attached model.
 
 ## Image orientation and roll
@@ -46,7 +46,7 @@ Stored disks keep their native sky geometry. Parametric disks use
 ## Spectral and spatial sampling
 
 `build_exposure` builds the quadrature on the host from the instrument and the
-scene's zodi, which declare their spectral breaks (the instrument includes an
+scene's local zodi, which declare their spectral breaks (the instrument includes an
 attached speckle field). The star is left out of the breaks. The rule splits each positive-width band at the declared breaks and
 applies its Gauss-Legendre order within each interval. The photon record
 carries the quadrature, whose nm weights enter once at integration.

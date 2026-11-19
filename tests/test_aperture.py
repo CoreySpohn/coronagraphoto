@@ -285,7 +285,7 @@ def test_local_zodi_follows_the_read_time(sloped):
     """
     scene, instrument, _, calibration, _ = sloped
     scene = with_zodi(scene, LeinertZodi())
-    scene = eqx.tree_at(lambda s: s.star.dec_deg, scene, 23.0)
+    scene = eqx.tree_at(lambda s: s.dynamics.frame.dec_deg, scene, jnp.asarray(23.0))
     exposures = [
         cp.build_exposure(scene, instrument, _BANDS, time_d=t) for t in (0.0, 137.0)
     ]
@@ -326,7 +326,7 @@ def test_local_zodi_follows_the_read_time(sloped):
     # The time is seen, and by exactly the radiance ratio of the sightlines.
     nodes = exposures[0].quadrature.nodes_nm
     radiance = [
-        scene.zodi.photon_radiance(
+        scene.local_zodi.photon_radiance(
             nodes,
             **dict(
                 zip(
@@ -488,3 +488,28 @@ def test_variance_matches_weighted_pixel_draws(sloped):
     np.testing.assert_allclose(variance[0], expected, rtol=2e-2)
     # Counting whole pixels (weights w, not w**2) lands outside that band.
     assert np.sum(weights * (poisson + 0.3**2 * 4)) > 1.04 * expected
+
+
+def test_aperture_record_needs_a_position_only_for_a_pointing_dependent_zodi(plateau):
+    """An unplaced scene records with AYOZodi and refuses LeinertZodi by name."""
+    from zodi.jax import AYOZodi
+
+    _, instrument, _, calibration, _ = plateau
+    scene = make_system(separation_arcsec=0.03)
+    scene = eqx.tree_at(
+        lambda s: (s.dynamics.frame.ra_deg, s.dynamics.frame.dec_deg),
+        scene,
+        (None, None),
+        is_leaf=lambda x: x is None,
+    )
+    exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0)
+    record = cp.aperture_record(
+        with_zodi(scene, AYOZodi()), instrument, exposure, calibration
+    )
+    assert record.ra_deg is None
+    rates = cp.aperture_rates(record, 0.02, 1e-10, position_angle_deg=0.0, time_d=5.0)
+    assert float(jnp.sum(rates.local_zodi)) > 0
+    with pytest.raises(ValueError, match="no sky position"):
+        cp.aperture_record(
+            with_zodi(scene, LeinertZodi()), instrument, exposure, calibration
+        )

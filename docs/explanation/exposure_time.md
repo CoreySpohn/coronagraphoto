@@ -52,8 +52,11 @@ opposite it.
 
 The record therefore holds the two parts separately. It tabulates the response
 per unit radiance (1 photon/s/m^2/nm/sr) and keeps what the radiance is
-computed from: `scene.zodi`, the star's right ascension and declination as the
-scene gave them at build time, and the scene epoch. Each read takes `time_d`,
+computed from: `scene.local_zodi`, the scene's right ascension and declination
+(`scene.ra_deg`, `scene.dec_deg`) as the scene gave them at build time, and the
+scene epoch. A scene with no sky position is allowed only with a local zodi that
+ignores the sightline, such as `AYOZodi`; a pointing-dependent model raises a
+`ValueError`. Each read takes `time_d`,
 days from that epoch, and
 
 1. finds the star's ecliptic latitude and its longitude from the Sun at

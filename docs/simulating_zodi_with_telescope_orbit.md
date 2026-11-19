@@ -1,7 +1,7 @@
 # Local zodi from telescope geometry
 
 The image path derives the ecliptic latitude and the Sun-relative longitude of
-the star from its RA and Dec, the scene epoch and the exposure's `time_d`
+the target from the scene's RA and Dec, the scene epoch and the exposure's `time_d`
 (`orbix.observatory.ecliptic_pointing`).
 `LeinertZodi.photon_radiance` returns photons/s/m2/nm/sr; the image reader
 multiplies by collecting area, optical throughput, detector pixel solid angle
@@ -17,7 +17,7 @@ from coronagraphoto import build_exposure, expected
 
 zodi = LeinertZodi()
 # scene is a skyscapes.Scene, for example from from_exovista
-scene = eqx.tree_at(lambda s: s.zodi, scene, zodi, is_leaf=lambda x: x is None)
+scene = eqx.tree_at(lambda s: s.local_zodi, scene, zodi, is_leaf=lambda x: x is None)
 exposure = build_exposure(scene, instrument, (Band(500.0, 600.0),), time_d=time_d)
 rates = expected(scene, instrument, exposure)
 local_zodi_e_per_s = rates.local_zodi

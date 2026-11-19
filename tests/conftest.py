@@ -90,33 +90,19 @@ from optixstuff.performance import PerformanceCurves, SampledProfile
 from optixstuff.spectral import Band
 from orbix.observatory import ecliptic_pointing
 from skyscapes.physical_model import GridPhysicalModel
-from skyscapes.scene import BlackbodyStar, FlatStar, Planet, Scene, Star
+from skyscapes.scene import FlatStar, Planet, Scene, Star
 
 _RULE = Circular(0.7)
 
 
-class PointedFlatStar(FlatStar):
-    """FlatStar with the sky position the local-zodi sightline is derived from."""
-
-    ra_deg: float = 100.0
-    dec_deg: float = -20.0
-
-
-class PointedBlackbodyStar(BlackbodyStar):
-    """BlackbodyStar with the sky position the local-zodi sightline needs."""
-
-    ra_deg: float = 100.0
-    dec_deg: float = -20.0
-
-
 def sightline(scene, time_d):
-    """Ecliptic latitude and solar longitude of the scene's star at ``time_d``."""
-    return ecliptic_pointing(scene.star.ra_deg, scene.star.dec_deg, scene.epoch, time_d)
+    """Ecliptic latitude and solar longitude of the scene at ``time_d``."""
+    return ecliptic_pointing(scene.ra_deg, scene.dec_deg, scene.epoch, time_d)
 
 
 def with_zodi(scene, zodi):
     """The scene with its local zodi replaced."""
-    return eqx.tree_at(lambda s: s.zodi, scene, zodi, is_leaf=lambda x: x is None)
+    return eqx.tree_at(lambda s: s.local_zodi, scene, zodi, is_leaf=lambda x: x is None)
 
 
 class GaussianCoronagraph(AbstractTableCoronagraph):
@@ -253,7 +239,7 @@ def make_system(
     planet_groups=None,
 ):
     """Real static-spectrum photometry with a circular orbit at its node."""
-    star = PointedFlatStar(flux_phot_per_nm_m2=1e6) if star is None else star
+    star = FlatStar(flux_phot_per_nm_m2=1e6) if star is None else star
     wavelengths = jnp.array([400.0, 500.0, 600.0, 700.0])
     contrast = jnp.asarray(contrast)
     values = jnp.broadcast_to(contrast, (4,))
@@ -270,6 +256,8 @@ def make_system(
         planet_mass_Msun=Mearth2kg / Msun2kg,
         dist_pc=10.0,
         epoch=Epoch(2451545.0) if epoch is None else epoch,
+        ra_deg=100.0,
+        dec_deg=-20.0,
         a_AU=jnp.atleast_1d(separation_arcsec) * 10,
         e=0.0,
         W_rad=jnp.deg2rad(sky_pa_deg),
@@ -394,6 +382,8 @@ def write_scene(path):
         {
             "MASS": 1.0,
             "DIST": 10.0,
+            "RA": 100.0,
+            "DEC": -20.0,
             "RSTAR": 1.0,
             "ANGDIAM": 0.9,
             "LSTAR": 1.0,

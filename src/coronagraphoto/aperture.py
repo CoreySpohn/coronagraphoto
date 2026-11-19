@@ -40,7 +40,7 @@ from orbix.observatory import ecliptic_pointing
 from skyscapes import Scene
 from zodi.jax import AbstractLocalZodi
 
-from coronagraphoto.simulation import _run, _star_sky_position
+from coronagraphoto.simulation import _require_position, _run, _star_sky_position
 
 _BACKGROUNDS = ("star_leakage", "local_zodi", "exozodi")
 # Successive rings start a golden-ratio fraction of the angular step apart, so
@@ -106,10 +106,10 @@ class ApertureRecord(eqx.Module):
             detector.
         n_pix: Sum of the aperture weights at each lattice position, shape
             (2, W, 2 ny, 2 nx).
-        zodi: The scene's local-zodi model, or None for no local zodi.
-        ra_deg: Right ascension of the star when the record was built, or
-            None without a local zodi.
-        dec_deg: Declination of the star, likewise.
+        local_zodi: The scene's local-zodi model, or None for no local zodi.
+        ra_deg: Right ascension of the scene when the record was built, or
+            None when the scene has no local zodi or no sky position.
+        dec_deg: Declination of the scene, likewise.
         epoch: Day zero of the read's ``time_d``: the scene epoch.
     """
 
@@ -120,7 +120,7 @@ class ApertureRecord(eqx.Module):
     planet: Array
     background: Array
     n_pix: Array
-    zodi: AbstractLocalZodi | None
+    local_zodi: AbstractLocalZodi | None
     ra_deg: Array | None
     dec_deg: Array | None
     epoch: Epoch = eqx.field(static=True)
@@ -297,7 +297,7 @@ def aperture_record(
     sky of unit radiance and the scene's disk are rendered once by the image
     path at ``exposure.time_d`` and ``exposure.roll_deg``, without planets,
     then summed in the calibration's aperture at every half-pixel position.
-    The record keeps ``scene.zodi``, the star's sky position and the scene
+    The record keeps ``scene.local_zodi``, the scene's sky position and the scene
     epoch, from which :func:`aperture_rates` computes the local-zodi radiance
     at the time of each read; nothing of the local zodi is fixed at
     ``exposure.time_d``. The planet table is the calibration's throughput
@@ -316,10 +316,14 @@ def aperture_record(
         and not np.array_equal(np.asarray(nodes), np.asarray(built))
     ):
         raise ValueError("the calibration was built for other wavelength nodes")
-    zodi, sky_position = scene.zodi, (None, None)
-    if zodi is not None:
-        sky_position = tuple(jnp.asarray(angle) for angle in _star_sky_position(scene))
-        scene = eqx.tree_at(lambda s: s.zodi, scene, _UnitSky())
+    _require_position(scene)
+    local_zodi, sky_position = scene.local_zodi, (None, None)
+    if local_zodi is not None:
+        if scene.ra_deg is not None:
+            sky_position = tuple(
+                jnp.asarray(angle) for angle in _star_sky_position(scene)
+            )
+        scene = eqx.tree_at(lambda s: s.local_zodi, scene, _UnitSky())
     components = _run(scene, instrument, exposure, "photons", planets=False)
     maps = jnp.stack([components[name] for name in _BACKGROUNDS], axis=1)
     n_bands, n_nodes = nodes.shape
@@ -350,7 +354,7 @@ def aperture_record(
         star[None, :, :, None] * calibration.throughput,
         jnp.moveaxis(background, 2, 0),
         n_pix,
-        zodi,
+        local_zodi,
         *sky_position,
         scene.epoch,
     )
@@ -439,11 +443,13 @@ def aperture_rates(
     )
     if roll_deg is not None:
         exozodi = _bilinear(record.background[2], *lattice_index(record.roll_deg))
-    if record.zodi is not None:
-        latitude_deg, longitude_deg = ecliptic_pointing(
-            record.ra_deg, record.dec_deg, record.epoch, time_d
-        )
-        local_zodi = local_zodi * record.zodi.photon_radiance(
+    if record.local_zodi is not None:
+        latitude_deg, longitude_deg = (None, None)
+        if record.ra_deg is not None:
+            latitude_deg, longitude_deg = ecliptic_pointing(
+                record.ra_deg, record.dec_deg, record.epoch, time_d
+            )
+        local_zodi = local_zodi * record.local_zodi.photon_radiance(
             record.quadrature.nodes_nm,
             ecliptic_latitude_deg=latitude_deg,
             solar_longitude_deg=longitude_deg,

@@ -38,11 +38,51 @@ def _detector_grid(instrument, orientation):
 
 
 def _star_sky_position(scene):
-    """Right ascension and declination of the scene's star, in degrees (J2000).
+    """Right ascension and declination of the scene, in degrees (ICRS), or None.
 
-    The one place this package reads where the target is on the sky.
+    The one place this package reads where the target is on the sky. Both are
+    None for an unplaced scene.
     """
-    return scene.star.ra_deg, scene.star.dec_deg
+    return scene.ra_deg, scene.dec_deg
+
+
+def _uses_pointing(local_zodi):
+    """Whether a local-zodi model reads its sightline, probed by omitting it."""
+    try:
+        jax.eval_shape(
+            lambda w: local_zodi.photon_radiance(
+                w, ecliptic_latitude_deg=None, solar_longitude_deg=None
+            ),
+            jnp.zeros(1),
+        )
+    except (TypeError, ValueError):
+        return True
+    return False
+
+
+def _require_position(scene):
+    """Raise when a pointing-dependent local zodi sits on an unplaced scene."""
+    local_zodi = scene.local_zodi
+    if (
+        local_zodi is not None
+        and _star_sky_position(scene)[0] is None
+        and _uses_pointing(local_zodi)
+    ):
+        raise ValueError(
+            f"scene.local_zodi is a {type(local_zodi).__name__}, which depends on the "
+            "sightline, but the scene has no sky position; build it with "
+            "Scene.from_classical(..., ra_deg=, dec_deg=) or use a pointing-"
+            "independent model such as AYOZodi"
+        )
+
+
+def _sightline(scene, time_d):
+    """Ecliptic latitude and solar longitude of the target, or (None, None)."""
+    _require_position(scene)
+    sightline = (None, None)
+    if scene.local_zodi is not None and scene.ra_deg is not None:
+        sightline = ecliptic_pointing(*_star_sky_position(scene), scene.epoch, time_d)
+    return sightline
 
 
 def _node_rates(
@@ -188,14 +228,10 @@ def _node_function(models, scene, instrument, exposure, grid, planets):
     With ``planets`` False no planet is propagated or rendered and the planet
     term is zero.
     """
-    system, zodi = scene, scene.zodi
+    system, zodi = scene, scene.local_zodi
     time_d = jnp.asarray(exposure.time_d)
     # The local-zodi sightline is the target's, at the observation time.
-    sightline = (
-        ecliptic_pointing(*_star_sky_position(system), system.epoch, time_d)
-        if zodi is not None
-        else (None, None)
-    )
+    sightline = _sightline(system, time_d)
     ephemeris, positions = None, None
     if planets and system.planets:
         times = jnp.atleast_1d(time_d)
@@ -305,15 +341,15 @@ def build_exposure(
 ) -> Exposure:
     """Build the host-side Exposure for one observation of a scene.
 
-    Each band is split at the breaks the instrument and the scene's zodi
+    Each band is split at the breaks the instrument and the scene's local zodi
     declare, and an ``order``-point rule is applied to every piece (four nodes
     per band when no break falls inside it). The star is left out of the
     breaks. ``roll_deg`` is the position angle of detector +y, north through
     east. ``plan`` is only needed by
     :func:`observe`. The local-zodi line of sight is derived at render time
-    from the star's RA and Dec, the scene epoch and ``time_d``.
+    from the scene's RA and Dec, the scene epoch and ``time_d``.
     """
-    models = [m for m in (instrument, scene.zodi) if m is not None]
+    models = [m for m in (instrument, scene.local_zodi) if m is not None]
     return Exposure(
         time_d=time_d,
         roll_deg=roll_deg,
@@ -327,7 +363,7 @@ def photon_rates(scene: Scene, instrument: Instrument, exposure: Exposure) -> Ra
 
     One entry per source term and wavelength node of ``exposure.quadrature``.
     Call integrate() on the returned record to integrate its spectral nodes.
-    No QE or survival is applied. Local zodi comes from ``scene.zodi`` (None
+    No QE or survival is applied. Local zodi comes from ``scene.local_zodi`` (None
     disables it); the speckle field from ``instrument.speckle`` (None adds
     none). Thermal and companion terms are zero.
     """
