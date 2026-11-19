@@ -10,8 +10,8 @@ too slow, so the answer is read from tables that the image path fills once.
 | Step | Function | When | Cost here |
 |---|---|---|---|
 | Calibration | `aperture_calibration(instrument, quadrature, rule=...)` | once per instrument and band set | seconds to minutes |
-| Record | `aperture_record(scene, instrument, exposure, calibration)` | once per target and exposure | one background render |
-| Read | `aperture_rates(record, separation_arcsec, contrast, position_angle_deg=...)` | once per planet | a few gathers |
+| Record | `aperture_record(scene, instrument, exposure, calibration)` | once per target, instrument and band set | one background render |
+| Read | `aperture_rates(record, separation_arcsec, contrast, position_angle_deg=..., time_d=...)` | once per planet and observation time | a few gathers |
 
 **Calibration.** Point sources are placed on rings around the star, imaged on
 the detector pixels by the coronagraph, and summed in a circular aperture
@@ -19,17 +19,19 @@ centred on each source. The ring mean is the planet throughput at that
 separation. The calibration also holds the aperture's pixel weights for a
 centre at each half-pixel phase. Nothing in it depends on a target.
 
-**Record.** The star leakage (with the instrument's speckle field), the local
-zodi of `scene.zodi` and the scene's disk are rendered once, without planets,
+**Record.** The star leakage (with the instrument's speckle field), a uniform
+sky of unit radiance and the scene's disk are rendered once, without planets,
 by the same program as `photon_rates`. Each image is then summed in the
 aperture at every position of a half-pixel lattice, by one convolution. The
 planet table is the calibration throughput times the star's photon flux
 density, the collecting area and the optical throughput, per unit
 planet-to-star contrast.
 
-**Read.** A planet is a separation, a position angle and a contrast. The
-planet rate is read linearly between rings and scaled by the contrast. The
-backgrounds are read bilinearly at the detector position the planet falls on.
+**Read.** A planet is a separation, a position angle and a contrast, observed
+at a time. The planet rate is read linearly between rings and scaled by the
+contrast. The backgrounds are read bilinearly at the detector position the
+planet falls on, and the uniform-sky read is scaled by the local-zodi radiance
+of that time.
 The read is a pure function of arrays, so it runs under `jax.jit`, `jax.vmap`
 and `jax.grad`.
 
@@ -38,6 +40,40 @@ wavelength nodes, with the aperture's pixel count in `n_pix` and a second
 record in `variance` summed with squared weights. The detector's yield and
 noise enter afterwards, so one record serves any detector setting, frame time
 and post-processing assumption.
+
+## Local zodi and the observation time
+
+The local zodi on the detector is the instrument's response to a uniform sky
+times one number per wavelength: the sky's radiance along the line of sight.
+The response belongs to the instrument. The radiance depends on where the
+target sits relative to the Sun, which changes through the year: a target on
+the ecliptic is several times brighter in zodi 45 degrees from the Sun than
+opposite it.
+
+The record therefore holds the two parts separately. It tabulates the response
+per unit radiance (1 photon/s/m^2/nm/sr) and keeps what the radiance is
+computed from: `scene.zodi`, the star's right ascension and declination as the
+scene gave them at build time, and the scene epoch. Each read takes `time_d`,
+days from that epoch, and
+
+1. finds the star's ecliptic latitude and its longitude from the Sun at
+   `time_d` with `orbix.observatory.ecliptic_pointing`,
+2. evaluates the zodi model's photon radiance at the record's wavelength
+   nodes for that sightline,
+3. multiplies the uniform-sky read by it.
+
+So one record per target, instrument and band set serves every observation
+time; nothing is rebuilt as the year goes by. `time_d` is a required keyword
+with no default: the time a record was built at says nothing about when it is
+read, and a default would return the zodi of the wrong season without a sign.
+
+The radiance costs a table lookup per wavelength node. Under `jax.vmap` a
+`time_d` shared by a batch of planets (closed over, or `in_axes=None`) is
+evaluated once for the batch; a `time_d` batched alongside the planets is
+evaluated per read. Both stay inside the read budget below.
+
+Only the local zodi follows `time_d`. The star's flux, the disk and any
+speckle realization are those of the exposure the record was built from.
 
 ## Roll
 
@@ -77,14 +113,22 @@ calibration = cp.aperture_calibration(instrument, exposure.quadrature)
 record = cp.aperture_record(scene, instrument, exposure, calibration)
 
 
-def time_to_snr(separation_arcsec, position_angle_deg, contrast):
+def time_to_snr(separation_arcsec, position_angle_deg, contrast, time_d):
     rates = cp.aperture_rates(
-        record, separation_arcsec, contrast, position_angle_deg=position_angle_deg
+        record,
+        separation_arcsec,
+        contrast,
+        position_angle_deg=position_angle_deg,
+        time_d=time_d,
     )
     return cp.exposure_time(7.0, rates, instrument.detector, frame_time_s=100.0)
 
 
-times = jax.jit(jax.vmap(time_to_snr))(separations, angles, contrasts)
+# One observation time for the whole batch of planets, then a batch of times.
+per_planet = jax.vmap(time_to_snr, in_axes=(0, 0, 0, None))
+times = jax.jit(per_planet)(separations, angles, contrasts, 120.0)
+by_time = jax.jit(jax.vmap(per_planet, in_axes=(None, None, None, 0)))
+times = by_time(separations, angles, contrasts, observation_times_d)
 ```
 
 ## What the tables do not hold
@@ -98,8 +142,10 @@ times = jax.jit(jax.vmap(time_to_snr))(separations, angles, contrasts)
 - Rates are NaN where the aperture leaves the detector, where the separation
   leaves the planet table, and where the coronagraph has no response model.
   S/N is then NaN and `valid` is False.
-- A record holds one epoch: the star's flux, the disk and any speckle
-  realization are those of `exposure.time_d`.
+- Apart from the local zodi, a record holds one time: the star's flux, the
+  disk and any speckle realization are those of `exposure.time_d`.
+- The star's sky position is the one the scene held when the record was
+  built; a scene edited afterwards needs a new record.
 - Thermal and companion terms are zero, as in the image readers.
 
 ## Agreement with the images
@@ -109,5 +155,8 @@ coronagraph products and the same pixel weights. On the validation scene (a
 Gaussian YIP, a disk, a local zodi, two bands) the read reproduces the image
 sums to rounding for the uniform leakage and zodi, to about 1e-4 for the
 exozodi, and to 2e-3 for the planet on 0.2 lambda/D pixels, falling to 2e-4
-on 0.1 lambda/D pixels. A read with its S/N and exposure time costs about
-0.2 microseconds per planet when batched on one CPU core.
+on 0.1 lambda/D pixels. A read at a time other than the build time reproduces
+the aperture sum of local-zodi images rendered at that time to rounding
+(4e-15 relative). A read with its S/N and exposure time costs about 0.25
+microseconds per planet when batched on one CPU core, whether the time is
+shared by the batch or differs on every read.
