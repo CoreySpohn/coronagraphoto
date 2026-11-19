@@ -18,14 +18,14 @@ classifiers = [
 ]
 dependencies = [
   "equinox>=0.13.2",
-  "hwoutils>=1.15.0",
+  "hwoutils>=2.0.0",
   "jax>=0.8.1",
-  "optixstuff>=5.0.0",
-  "orbix>=4.1.0",
+  "optixstuff>=6.0.0",
+  "orbix>=5.0.0",
   "pooch>=1.8.2",
-  "yippy>=2.10.6",
-  "skyscapes>=4.0.0",
-  "zodi[jax]>=1.1.0",
+  "yippy>=3.0.0",
+  "skyscapes>=5.0.0",
+  "zodi[jax]>=2.0.0",
 ]
 [project.optional-dependencies]
 dev = ["pre-commit>=3.5.0"]
