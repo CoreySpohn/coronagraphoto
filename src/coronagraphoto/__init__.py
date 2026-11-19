@@ -1,5 +1,12 @@
 """Per-pixel photon budgets, detector observations and aperture exposure times."""
 
+from coronagraphoto.aperture import (
+    ApertureCalibration,
+    ApertureRecord,
+    aperture_calibration,
+    aperture_rates,
+    aperture_record,
+)
 from coronagraphoto.calculator import (
     ExposureTime,
     PostProcessing,
@@ -14,8 +21,13 @@ from coronagraphoto.simulation import (
 )
 
 __all__ = [
+    "ApertureCalibration",
+    "ApertureRecord",
     "ExposureTime",
     "PostProcessing",
+    "aperture_calibration",
+    "aperture_rates",
+    "aperture_record",
     "build_exposure",
     "expected",
     "exposure_time",

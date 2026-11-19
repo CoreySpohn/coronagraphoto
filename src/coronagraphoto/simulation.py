@@ -95,7 +95,7 @@ def _node_rates(
     leakage = gain * phi_star * jnp.maximum(leakage, 0.0)
 
     planet = jnp.zeros(grid.shape)
-    if system.planets:
+    if positions is not None:
         x, y = grid.orientation.sky_to_detector(positions[0], positions[1])
         phi = system.planet_flux_densities(
             wavelength_nm, jnp.atleast_1d(time_d), ephemeris=ephemeris
@@ -173,12 +173,16 @@ def _band_ids(instrument, scene, quadrature):
     return ids
 
 
-def _node_function(models, scene, instrument, exposure, grid):
-    """Return node(w): the rates at one traced wavelength, for any model count."""
+def _node_function(models, scene, instrument, exposure, grid, planets):
+    """Return node(w): the rates at one traced wavelength, for any model count.
+
+    With ``planets`` False no planet is propagated or rendered and the planet
+    term is zero.
+    """
     system, zodi = scene, scene.zodi
     time_d = jnp.asarray(exposure.time_d)
     ephemeris, positions = None, None
-    if system.planets:
+    if planets and system.planets:
         times = jnp.atleast_1d(time_d)
         ephemeris = system.ephemeris(times)
         positions = system.positions(times, ephemeris=ephemeris)[:, :, 0]
@@ -213,7 +217,7 @@ def _node_function(models, scene, instrument, exposure, grid):
 
 
 @eqx.filter_jit
-def _render(scene, instrument, exposure, *, kind, band_ids):
+def _render(scene, instrument, exposure, *, kind, band_ids, planets):
     """Render every node of one observation as a single traced program."""
     coro = instrument.coronagraph
     models = (
@@ -223,7 +227,7 @@ def _render(scene, instrument, exposure, *, kind, band_ids):
     )
     quadrature = exposure.quadrature
     grid = _detector_grid(instrument, SkyOrientation(exposure.roll_deg))
-    node = _node_function(models, scene, instrument, exposure, grid)
+    node = _node_function(models, scene, instrument, exposure, grid, planets)
     if kind == "photons":
         values = jax.lax.map(node, quadrature.nodes_nm.ravel())
         return jax.tree.map(
@@ -263,7 +267,7 @@ def _draw(detector, key, electrons, plan):
     return detector.draw(key, electrons, plan)
 
 
-def _run(scene, instrument, exposure, kind):
+def _run(scene, instrument, exposure, kind, *, planets=True):
     """Run the shared program for one scene, instrument and exposure."""
     return _render(
         scene,
@@ -271,6 +275,7 @@ def _run(scene, instrument, exposure, kind):
         exposure,
         kind=kind,
         band_ids=_band_ids(instrument, scene, exposure.quadrature),
+        planets=planets,
     )
 
 
