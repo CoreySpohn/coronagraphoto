@@ -18,9 +18,10 @@ The canary uses the same overrides as CI.
 | Runtime | equinox | 0.13.2 |
 | Runtime | hwoutils | 1.10.0 |
 | Runtime | jax | 0.8.1 |
+| Runtime | jaxtyping | 0.3.3 |
+| Runtime | numpy | 2.1.2 |
 | Runtime | optixstuff | 3.0.0 |
 | Runtime | orbix | 3.0.0 |
-| Runtime | pooch | 1.8.2 |
 | Runtime | yippy | 2.10.6 |
 | Runtime | skyscapes | 2.1.0 |
 | Dev | pre-commit | 3.5.0 |

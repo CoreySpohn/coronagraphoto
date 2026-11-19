@@ -20,9 +20,10 @@ dependencies = [
   "equinox>=0.13.2",
   "hwoutils[jax]>=1.15.0",
   "jax>=0.8.1",
+  "jaxtyping>=0.3.3",
+  "numpy>=2.1.2",
   "optixstuff>=5.0.0",
   "orbix>=4.1.0",
-  "pooch>=1.8.2",
   "yippy>=2.10.6",
   "skyscapes>=4.0.0",
   "zodi[jax]>=1.1.0",
@@ -105,6 +106,10 @@ slow_s = 300
 [tool.deptry]
 known_first_party = ["coronagraphoto"]
 optional_dependencies_dev_groups = ["dev", "docs", "test"]
+
+[tool.deptry.per_rule_ignores]
+# yippy is not imported by the library; it stays installed for the tutorial.
+DEP002 = ["yippy"]
 
 [tool.ty.environment]
 python-version = "3.11"
