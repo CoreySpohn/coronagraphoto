@@ -1,6 +1,8 @@
 # Local zodi from telescope geometry
 
-The observer supplies ecliptic latitude and heliocentric ecliptic longitude.
+The image path derives the ecliptic latitude and the Sun-relative longitude of
+the star from its RA and Dec, the scene epoch and the exposure's `time_d`
+(`orbix.observatory.ecliptic_pointing`).
 `LeinertZodi.photon_radiance` returns photons/s/m2/nm/sr; the image reader
 multiplies by collecting area, optical throughput, detector pixel solid angle
 and the coronagraph's background transmission. QE belongs to the detector.
@@ -8,29 +10,23 @@ and the coronagraph's background transmission. QE belongs to the detector.
 For an existing scene and instrument:
 
 ```python notest
-from dataclasses import replace
-
 import equinox as eqx
 from optixstuff.spectral import Band
-from orbix.observatory import ObservatoryL2Halo
 from zodi.jax import LeinertZodi
 from coronagraphoto import build_exposure, expected
 
-observer = ObservatoryL2Halo.from_default(equinox_mjd=60575.25)
-lat = observer.ecliptic_latitude_deg(mjd, ra_rad, dec_rad)
-lon = observer.helio_ecliptic_longitude_deg(mjd, ra_rad, dec_rad)
 zodi = LeinertZodi()
 # scene is a skyscapes.Scene, for example from from_exovista
 scene = eqx.tree_at(lambda s: s.zodi, scene, zodi, is_leaf=lambda x: x is None)
 exposure = build_exposure(scene, instrument, (Band(500.0, 600.0),), time_d=time_d)
-exposure = replace(exposure, ecliptic_latitude_deg=lat, solar_longitude_deg=lon)
 rates = expected(scene, instrument, exposure)
 local_zodi_e_per_s = rates.local_zodi
 ```
 
-The observatory's MJD is an absolute date. `time_d` is days from the system's
-scene epoch; convert explicitly on the host. AYO and precomputed backgrounds
-accept the same geometry fields but do not depend on them. For a noisy
+`time_d` is days from the system's scene epoch; convert absolute dates
+explicitly on the host with `scene.epoch.days(...)`. The sightline follows the
+Sun through the year, so the local zodi changes with `time_d`. AYO and precomputed backgrounds
+accept the same geometry arguments but do not depend on them. For a noisy
 whole-system image, build the exposure with a `FramePlan` and pass it to
 `observe` with a PRNG key. Sun keepout is an observing constraint, independent of the
 background radiance calculation.

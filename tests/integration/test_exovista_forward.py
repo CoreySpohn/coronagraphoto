@@ -1,7 +1,7 @@
 """Synthetic FITS scene loading through photon imaging."""
 
 import numpy as np
-from conftest import make_path, write_scene
+from conftest import make_path, sightline, write_scene
 from hwoutils.constants import arcsec2rad
 from optixstuff import Exposure
 from optixstuff.grids import SkyOrientation
@@ -12,7 +12,7 @@ from coronagraphoto import photon_rates
 
 
 def test_exovista_native_disk_and_position_angle(tmp_path):
-    """Fails on old zodi keywords or rotating a stored cube twice.
+    """Fails on a zodi sightline not derived from the star, or a cube turned twice.
 
     Stored contrast rounds to float32 upstream; its radiance identity has
     a 32 float64 epsilon arithmetic bound after that documented rounding.
@@ -33,8 +33,9 @@ def test_exovista_native_disk_and_position_angle(tmp_path):
         scene, path, Exposure(time_d=0.0, roll_deg=30, quadrature=quadrature)
     )
     # Absolute incoming local-zodi normalization, on an interior pixel.
+    lat, lon = sightline(scene, 0.0)
     lz = scene.zodi.photon_radiance(
-        550.0, ecliptic_latitude_deg=0.0, solar_longitude_deg=135.0
+        550.0, ecliptic_latitude_deg=lat, solar_longitude_deg=lon
     )
     expected_z = (
         40

@@ -1,10 +1,10 @@
 # Photon rates, electron rates and observations
 
 `build_exposure(scene, instrument, bands, *, time_d, roll_deg=0.0, plan=None,
-order=4)` builds the `Exposure` record: epoch, roll, wavelength quadrature,
-optional frame plan, and the ecliptic latitude and solar longitude of the
-local-zodi line of sight (defaults 0 and 135 deg; a known limitation, not
-derived from the target or the epoch).
+order=4)` builds the `Exposure` record: observation time, roll, wavelength
+quadrature and optional frame plan. The local-zodi line of sight is not stored:
+the image path derives the ecliptic latitude and solar longitude from the star's
+RA and Dec, the scene epoch and `time_d` with `orbix.observatory.ecliptic_pointing`.
 
 `photon_rates(scene, instrument, exposure)` returns photon `Rates`. Each source field holds photons/s/nm/pixel with shape
 `(W,Q,ny,nx)`. Call `rates.integrate()` for band-integrated photons/s/pixel

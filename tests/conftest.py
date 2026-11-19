@@ -88,10 +88,30 @@ from optixstuff.coronagraph import (
 from optixstuff.grids import Frame, Image, Measure, PixelGrid, resample
 from optixstuff.performance import PerformanceCurves, SampledProfile
 from optixstuff.spectral import Band
+from orbix.observatory import ecliptic_pointing
 from skyscapes.physical_model import GridPhysicalModel
-from skyscapes.scene import FlatStar, Planet, Scene, Star
+from skyscapes.scene import BlackbodyStar, FlatStar, Planet, Scene, Star
 
 _RULE = Circular(0.7)
+
+
+class PointedFlatStar(FlatStar):
+    """FlatStar with the sky position the local-zodi sightline is derived from."""
+
+    ra_deg: float = 100.0
+    dec_deg: float = -20.0
+
+
+class PointedBlackbodyStar(BlackbodyStar):
+    """BlackbodyStar with the sky position the local-zodi sightline needs."""
+
+    ra_deg: float = 100.0
+    dec_deg: float = -20.0
+
+
+def sightline(scene, time_d):
+    """Ecliptic latitude and solar longitude of the scene's star at ``time_d``."""
+    return ecliptic_pointing(scene.star.ra_deg, scene.star.dec_deg, scene.epoch, time_d)
 
 
 def with_zodi(scene, zodi):
@@ -233,7 +253,7 @@ def make_system(
     planet_groups=None,
 ):
     """Real static-spectrum photometry with a circular orbit at its node."""
-    star = FlatStar(flux_phot_per_nm_m2=1e6) if star is None else star
+    star = PointedFlatStar(flux_phot_per_nm_m2=1e6) if star is None else star
     wavelengths = jnp.array([400.0, 500.0, 600.0, 700.0])
     contrast = jnp.asarray(contrast)
     values = jnp.broadcast_to(contrast, (4,))

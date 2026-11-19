@@ -26,6 +26,7 @@ from optixstuff.coronagraph import (
 )
 from optixstuff.grids import Image, Measure, SkyOrientation, resample
 from optixstuff.spectral import Band, Quadrature
+from orbix.observatory import ecliptic_pointing
 from skyscapes import Scene
 
 
@@ -181,6 +182,12 @@ def _node_function(models, scene, instrument, exposure, grid, planets):
     """
     system, zodi = scene, scene.zodi
     time_d = jnp.asarray(exposure.time_d)
+    # The local-zodi sightline is the target's, at the observation time.
+    sightline = (
+        ecliptic_pointing(system.star.ra_deg, system.star.dec_deg, system.epoch, time_d)
+        if zodi is not None
+        else (None, None)
+    )
     ephemeris, positions = None, None
     if planets and system.planets:
         times = jnp.atleast_1d(time_d)
@@ -198,8 +205,7 @@ def _node_function(models, scene, instrument, exposure, grid, planets):
             ephemeris,
             positions,
             zodi,
-            jnp.asarray(exposure.ecliptic_latitude_deg),
-            jnp.asarray(exposure.solar_longitude_deg),
+            *sightline,
         )
 
     if len(models) == 1:
@@ -296,8 +302,8 @@ def build_exposure(
     per band when no break falls inside it). The star is left out of the
     breaks. ``roll_deg`` is the position angle of detector +y, north through
     east. ``plan`` is only needed by
-    :func:`observe`. The local-zodi line of sight keeps the Exposure defaults
-    (ecliptic latitude 0 deg, solar longitude 135 deg).
+    :func:`observe`. The local-zodi line of sight is derived at render time
+    from the star's RA and Dec, the scene epoch and ``time_d``.
     """
     models = [m for m in (instrument, scene.zodi) if m is not None]
     return Exposure(
