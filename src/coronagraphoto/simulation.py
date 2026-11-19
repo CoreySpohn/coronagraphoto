@@ -243,7 +243,7 @@ def _node_function(models, scene, instrument, exposure, grid, planets):
 
     def node(w):
         covered = jnp.stack(
-            [(m.bandpass.lo_nm <= w) & (w <= m.bandpass.hi_nm) for m in models]
+            [(m.bandpass.low_nm <= w) & (w <= m.bandpass.high_nm) for m in models]
         )
         rates = jax.lax.switch(jnp.argmax(covered), [with_model(m) for m in models], w)
         # A node outside every declared band has no performance model.
