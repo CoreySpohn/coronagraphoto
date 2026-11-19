@@ -441,8 +441,8 @@ def write_yip(path, *, distinct_products=False):
     metadata = dict(
         inscribed_diameter_m=4.7,
         obscured=0.2,
-        min_wavelength_nm=500.0,
-        max_wavelength_nm=600.0,
+        low_nm=500.0,
+        high_nm=600.0,
         n_wavelengths=1,
         n_pointings=3,
     )
