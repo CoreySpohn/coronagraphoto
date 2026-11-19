@@ -1,68 +1,56 @@
-"""Integral count-rate and fixed-time S/N closure of two photon-budget readers."""
-
-from dataclasses import replace
+"""Closure of the aperture record, S/N and exposure time against image sums."""
 
 import equinox as eqx
 import ineedvalidation as vv
-import jax
 import jax.numpy as jnp
-import jaxedith as je
 import numpy as np
 import pytest
 from conftest import make_path, make_system, with_zodi, write_yip
-from hwoutils.constants import arcsec2rad
-from optixstuff import (
-    Detector,
-    Exposure,
-    FramePlan,
-    Rates,
-    prepare_aperture,
-)
+from optixstuff import Detector, FramePlan
 from optixstuff.apertures import Circular
-from optixstuff.grids import Image, Measure, PixelGrid, SkyOrientation
-from optixstuff.performance import _performance_curves
-from optixstuff.spectral import Band, Quadrature
+from optixstuff.grids import Image, Measure, SkyOrientation
+from optixstuff.spectral import Band
 from skyscapes.disk import GraterDisk
 from yippy import open_yip
 from zodi import SurfaceBrightnessDust
 from zodi.jax import PrecomputedZodi
 
-from coronagraphoto import expected as expected_images
+import coronagraphoto as cp
 
 TERMS = ("planet", "star_leakage", "local_zodi", "exozodi")
+pytestmark = pytest.mark.medium(
+    reason="YIP load, scene operator and four renders at two detector pitches"
+)
 
 
-def _richardson(values):
-    """Three halving levels: signed extrapolation and GCI with F_s=1.25.
+def _bilinear_bound(table, row, column):
+    """Bound the bilinear read of the last two axes at a fractional index.
 
-    Non-monotone or non-shrinking ladders have no defensible GCI band;
-    return NaN so callers must reject them before claiming closure.
+    For a smooth function on a unit lattice the bilinear error is at most one
+    eighth of the sum of the second derivatives along the two axes. Both are
+    measured as the largest second differences over the four-by-four
+    neighbourhood of the cell.
     """
-    first, second = np.diff(values, axis=0)
-    order = np.log2(abs(first / second))
-    valid = (first * second > 0) & (order > 0)
-    correction = second / (2**order - 1)
-    limit = np.where(valid, values[2] + correction, np.nan)
-    uncertainty = np.where(valid, 1.25 * abs(correction), np.nan)
-    return limit, order, uncertainty
+    i, j = int(np.floor(row)), int(np.floor(column))
+    patch = np.asarray(table[..., i - 1 : i + 3, j - 1 : j + 3])
+    along_rows = abs(np.diff(patch, n=2, axis=-2)).max(axis=(-2, -1))
+    along_columns = abs(np.diff(patch, n=2, axis=-1)).max(axis=(-2, -1))
+    return (along_rows + along_columns) / 8
 
 
 @pytest.fixture(scope="module")
 def closure(tmp_path_factory):
-    """Render one physical scene at three pitches; cache every measured SRQ.
+    """Read one planet from the record and sum the same aperture on images.
 
-    Four image structures are necessary: three closure pitches and p/8
-    to measure the next-finer gap for p/4 and the four-level disk spread.
-    Detector shape is static.
-    The native YIP is a Gaussian, sigma=0.7 lod, integral=0.3, pitch=0.5
-    lod, with nonzero curved wings. No response is mocked or renormalized.
+    The scene is a Gaussian YIP (sigma 0.7 lambda/D, integral 0.3, pitch 0.5
+    lambda/D) with a parametric disk, a local zodi and one planet, observed
+    in two bands at a 15 degree roll on 0.2 and 0.1 lambda/D pixels. No
+    response is mocked or renormalized.
     """
     rule = Circular(0.7)
     coro = (
         open_yip(write_yip(tmp_path_factory.mktemp("calculator-closure") / "yip"))
-        .prepare(
-            rules=(rule,),
-        )
+        .prepare(rules=(rule,))
         .with_scene_operator()
     )
     base = eqx.tree_at(lambda p: p.coronagraph, make_path(), coro)
@@ -82,83 +70,24 @@ def closure(tmp_path_factory):
         amplitude=SurfaceBrightnessDust(level=3.0),
         n_slices_los=24,
     )
-    system = make_system(separation_arcsec=2.3 * scale, sky_pa_deg=270.0, disk=disk)
-    bands = (Band(500.0, 550.0), Band(550.0, 600.0))
     zodi = PrecomputedZodi(jnp.array([500.0, 600.0]), jnp.full(2, 1e12))
-    pointing, time_d = SkyOrientation(0.0), 0.0
-    q = Quadrature.build(bands, system, base, zodi)
-    exposure = Exposure(time_d=time_d, roll_deg=0.0, quadrature=q)
-    prepared = prepare_aperture(base, q, rule=rule)
-    rates = je.aperture_rates(
-        system,
-        base,
-        prepared,
-        time_d=time_d,
-        planet_index=0,
-        zodi=zodi,
+    system = with_zodi(
+        make_system(
+            contrast=1e-9, separation_arcsec=2.3 * scale, sky_pa_deg=250.0, disk=disk
+        ),
+        zodi,
     )
-    calculator = base.detector.electrons(rates)
-    expected = np.stack([np.asarray(getattr(calculator, name)) for name in TERMS])
-    east, north = system.positions(jnp.array([time_d]))[:2, 0, 0]
-    x, y = pointing.sky_to_detector(east, north)
-    # Reevaluate the record's subpixel quadrature at the actual node positions.
-    # This isolates its resolution error from interpolation of tabulated curves.
-    calc_ladder, analytic_nodes = [], []
-    for oversample in (10, 20, 40):
-        node_rates = []
-        for reference in prepared.references:
-            row, analytic_row = [], []
-            for node in reference.nodes:
-                wave, node_rule = node.wavelength_nm, node.record.rule
-                separation = float(jnp.hypot(x, y) / node.arcsec_per_lod)
-
-                def offaxis(s):
-                    # The record integrates native point-density samples.
-                    image = coro.source_psfs(
-                        550.0, jnp.array([s]), jnp.zeros(1), grid=None
-                    ).image
-                    return replace(image, data=image.data[0], leading_axes=())
-
-                refined = _performance_curves(
-                    offaxis,
-                    coro.stellar_map(550.0, 0.0, grid=None),
-                    node_rule,
-                    separations_lod=[separation],
-                    oversample=oversample,
-                )
-                phi = system.planet_flux_densities(wave, jnp.array([time_d]))[0, 0]
-                gain = base.primary.collecting_area_m2 * base.system_throughput(wave)
-                row.append(gain * phi * refined.throughput[0])
-                analytic_row.append(
-                    gain
-                    * phi
-                    * 0.3
-                    * (1 - np.exp(-(node_rule.radius_lod**2) / (2 * 0.7**2)))
-                )
-            node_rates.append(jnp.stack(row))
-            if oversample == 10:
-                analytic_nodes.append(jnp.stack(analytic_row))
-        calc_ladder.append(
-            np.asarray(
-                base.detector.electrons(
-                    eqx.tree_at(lambda r: r.planet, rates, jnp.stack(node_rates))
-                ).planet
-            )
-        )
-    calc_ladder = np.asarray(calc_ladder)
-    analytic = np.asarray(
-        base.detector.electrons(
-            eqx.tree_at(lambda r: r.planet, rates, jnp.stack(analytic_nodes))
-        ).planet
-    )
-    calc_limit, calc_order, calc_uncertainty = _richardson(calc_ladder)
-    calc_discretization = expected[0] - calc_limit
-    centre = np.asarray(system.photon_radiance_at(q.nodes_nm, time_d, east, north))
-    measured, bounds, redistribution, snrs, snr_bounds = [], [], [], [], []
-    dust_ratios = []
-    plan = FramePlan(100.0, 36.0)
-    pp = je.PostProcessing(0.01, 0.03)
-    for n, pitch in ((48, 0.2), (96, 0.1), (192, 0.05), (384, 0.025)):
+    bands = (Band(500.0, 550.0), Band(550.0, 600.0))
+    roll, contrast = 15.0, 1e-9
+    east, north = system.positions(jnp.array([0.0]))[:2, 0, 0]
+    separation = jnp.hypot(east, north)
+    angle = jnp.rad2deg(jnp.arctan2(east, north))
+    x, y = SkyOrientation(roll).sky_to_detector(east, north)
+    pp = cp.PostProcessing(1e-4, 0.01)
+    frame_time, n_frames = 100.0, 360.0
+    plan = FramePlan(frame_time, n_frames)
+    levels = []
+    for n, pitch in ((48, 0.2), (96, 0.1)):
         detector = Detector(
             shape=(n, n),
             pixel_scale_arcsec=pitch * scale,
@@ -169,187 +98,116 @@ def closure(tmp_path_factory):
             read_noise_e_rms=0.2,
         )
         path = eqx.tree_at(lambda p: p.detector, base, detector)
-        images = expected_images(with_zodi(system, zodi), path, exposure)
-        sky = PixelGrid.regular((n, n), pitch * scale, "arcsec", orientation=pointing)
+        exposure = cp.build_exposure(system, path, bands, time_d=0.0, roll_deg=roll)
+        calibration = cp.aperture_calibration(
+            path, exposure.quadrature, rule=rule, n_separations=33, n_angles=16
+        )
+        record = cp.aperture_record(system, path, exposure, calibration)
+        rates = cp.aperture_rates(
+            record, separation, contrast, position_angle_deg=angle
+        )
+        electrons = detector.electrons(rates)
+
+        # The independent reader: the rule's own weights on the expected images.
+        images = cp.expected(system, path, exposure)
         weights = []
-        for band_index, reference in enumerate(prepared.references):
-            angular_scale, record = reference.arcsec_per_lod, reference.record
-            frame = path.primary.frame(
-                reference.wavelength_nm, record.frame.diameter_convention
-            )
-            grid = PixelGrid.regular(
-                (n, n), pitch * scale / float(angular_scale), "lod", frame=frame
-            )
-            psf = Image(
-                images.planet[band_index],
-                grid,
+        for band in bands:
+            frame = coro.at_wavelength(band.center_nm).source_grid.frame
+            lod = float(frame.lod_to_arcsec(band.center_nm))
+            ones = Image(
+                jnp.ones((n, n)),
+                detector.grid.to_lod(band.center_nm, frame),
                 (),
                 Measure.integral(),
                 "stellar_flux_fraction",
             )
-            weights.append(
-                record.rule.weights(psf, (x / angular_scale, y / angular_scale))
-            )
+            weights.append(rule.weights(ones, (float(x) / lod, float(y) / lod)))
         weights = jnp.stack(weights)
-        sums = jax.tree.map(lambda a, w=weights: jnp.sum(a * w, axis=(-2, -1)), images)
-        measured.append(np.stack([np.asarray(getattr(sums, name)) for name in TERMS]))
-        # Model-form difference a: aperture-average raw radiance versus centre.
-        radiance = np.asarray(system.photon_radiance(q.nodes_nm, time_d, grid=sky).data)
-        average = np.sum(radiance * np.asarray(weights)[:, None], axis=(-2, -1))
-        average /= np.asarray(weights.sum(axis=(-2, -1)))[:, None]
-        disk_difference = eqx.tree_at(
-            lambda r: r.exozodi,
-            rates,
-            rates.exozodi * jnp.asarray(average / centre - 1),
-        )
-        bounds.append(np.asarray(detector.electrons(disk_difference).exozodi))
-        # Model-form difference b includes native deposition and PSF redistribution.
-        # Compute the unconvolved aperture flux independently from sky radiance.
-        raw_nodes = []
-        for row, waves in enumerate(np.asarray(q.nodes_nm)):
-            raw_row = []
-            for node, wave in enumerate(waves):
-                transmission = coro.uniform_sky_map(
-                    wave, grid=coro.at_wavelength(wave).sky_grid
-                ).data
-                # This fixture has spatially constant background transmission.
-                np.testing.assert_allclose(transmission, 0.3, rtol=1e-14)
-                raw_row.append(
-                    base.primary.collecting_area_m2
-                    * base.system_throughput(wave)
-                    * np.sum(radiance[row, node] * np.asarray(weights[row]))
-                    * sky.pixel_area
-                    * arcsec2rad**2
-                    * transmission[0, 0]
-                )
-            raw_nodes.append(jnp.stack(raw_row))
-        raw = detector.electrons(
-            eqx.tree_at(lambda r: r.exozodi, rates, jnp.stack(raw_nodes))
-        ).exozodi
-        redistribution.append(np.asarray(sums.exozodi - raw))
-        if n == 48:
-            doubled = eqx.tree_at(lambda s: s.disk.amplitude.level, system, 6.0)
-            doubled_rates = je.aperture_rates(
-                doubled,
-                path,
-                prepared,
-                time_d=time_d,
-                planet_index=0,
-                zodi=zodi,
+
+        def moments(source, weights=weights):
+            return np.stack(
+                [
+                    [jnp.sum(getattr(source, t) * weights**m, (-2, -1)) for t in TERMS]
+                    for m in (1, 2)
+                ]
             )
-            doubled_images = expected_images(with_zodi(doubled, zodi), path, exposure)
-            dust_ratios = np.stack(
-                (
-                    detector.electrons(doubled_rates).exozodi / calculator.exozodi,
-                    jnp.sum(doubled_images.exozodi * weights, axis=(-2, -1))
-                    / sums.exozodi,
-                )
-            )
-        n_pix = weights.sum(axis=(-2, -1))
-        _, variance = detector.mean_and_variance(
-            eqx.tree_at(lambda r: r.n_pix, sums, n_pix, is_leaf=lambda x: x is None),
-            plan,
+
+        image = moments(images)
+        calculated = np.stack(
+            [[getattr(r, t) for t in TERMS] for r in (electrons, electrons.variance)]
         )
-        variance += (
-            pp.speckle_residual_fraction * sums.star_leakage * plan.live_time_s
-        ) ** 2
-        variance += (
-            pp.exozodi_residual_fraction * sums.exozodi * plan.live_time_s
-        ) ** 2
-        image_snr = sums.planet * plan.live_time_s / jnp.sqrt(variance)
-        detector_rates = eqx.tree_at(
-            lambda r: (r.n_pix, r.variance.n_pix), rates, (n_pix, n_pix)
+        pixels = np.stack([(weights**m).sum((-2, -1)) for m in (1, 2)])
+
+        # Interpolation bands of the read, from the tables themselves.
+        position = float(separation / calibration.separation_step_arcsec)
+        knot = int(position)
+        table = np.asarray(calibration.throughput[0])
+        scatter = np.asarray(calibration.throughput_ring_std)[..., knot : knot + 2]
+        curvature = abs(np.diff(table[..., knot - 1 : knot + 3], n=2, axis=-1)) / 8
+        planet_band = (5 * scatter.max(-1) + curvature.max(-1)) / table[
+            ..., knot : knot + 2
+        ].min(-1)
+        row = (n - 1) + 2 * float(y) / (pitch * scale)
+        column = (n - 1) + 2 * float(x) / (pitch * scale)
+        value = np.asarray(
+            [[getattr(r, t) for t in TERMS[1:]] for r in (rates, rates.variance)]
         )
-        calc_snr = je.snr(detector_rates, detector, plan, post_processing=pp)
-        snrs.append(np.stack((calc_snr, image_snr)))
-        snr_bounds.append((detector, n_pix))
-    measured, bounds, snrs = np.asarray(measured), np.asarray(bounds), np.asarray(snrs)
-    redistribution = np.asarray(redistribution)
-    gaps = abs(np.diff(measured, axis=0))
-    disk_ladder = measured[:, 3].copy()
-    disk_spread = np.max(disk_ladder, axis=0) - np.min(disk_ladder, axis=0)
-    measured, bounds, redistribution, snrs = (
-        a[:3] for a in (measured, bounds, redistribution, snrs)
-    )
-    image_limit, image_order, image_uncertainty = _richardson(measured[:, 0])
-    planet_tolerance = image_uncertainty + calc_uncertainty + 1e-9 * abs(expected[0])
-    tolerance = gaps / 2 + 1e-9 * abs(expected)
-    all_tolerances = tolerance.copy()
-    # Transport the planet limit bands to each production resolution by the
-    # measured distance to its limit. Add intervals, never root-sum-square them.
-    all_tolerances[:, 0] = (
-        abs(measured[:, 0] - image_limit) + planet_tolerance + abs(calc_discretization)
-    )
-    all_tolerances[:, 3] = (
-        disk_spread + 1e-9 * abs(expected[3]) + abs(bounds) + abs(redistribution)
-    )
-    snr_tolerance, snr_intervals = [], []
-    for index, (detector, n_pix) in enumerate(snr_bounds[:3]):
-        # Interval propagation, without cancellation or quadrature of errors.
-        low, high = [], []
-        for sign, output in ((-1, low), (1, high)):
-            values = {}
-            for term_index, name in enumerate(TERMS):
-                values[name] = jnp.maximum(
-                    getattr(calculator, name)
-                    + sign * all_tolerances[index, term_index],
-                    0,
-                )
-            interval = Rates(
-                bands,
-                "electron",
-                **values,
-                thermal=jnp.zeros(2),
-                stellar_companions=jnp.zeros(2),
-                n_pix=n_pix,
-            )
-            _, variance = detector.mean_and_variance(interval, plan)
-            variance += (
-                pp.speckle_residual_fraction * interval.star_leakage * plan.live_time_s
+        lattice_band = (
+            _bilinear_bound(record.background, row, column).swapaxes(0, 1) / value
+        ).max(-1)
+
+        def residual_sq(e, time):
+            return (pp.speckle_residual_fraction * e[1] * time) ** 2 + (
+                pp.exozodi_residual_fraction * e[3] * time
             ) ** 2
-            variance += (
-                pp.exozodi_residual_fraction * interval.exozodi * plan.live_time_s
-            ) ** 2
-            output.extend(
-                (np.asarray(interval.planet * plan.live_time_s), np.asarray(variance))
+
+        live = float(plan.live_time_s)
+        image_rates = eqx.tree_at(
+            lambda r: (
+                r.planet,
+                r.star_leakage,
+                r.local_zodi,
+                r.exozodi,
+                r.n_pix,
+                r.variance.planet,
+                r.variance.star_leakage,
+                r.variance.local_zodi,
+                r.variance.exozodi,
+                r.variance.n_pix,
+            ),
+            electrons,
+            (*image[0], pixels[0], *image[1], pixels[1]),
+        )
+        _, variance = detector.mean_and_variance(image_rates, plan)
+        image_snr = image[0, 0] * live / np.sqrt(variance + residual_sq(image[0], live))
+        kwargs = dict(frame_time_s=frame_time, post_processing=pp)
+        solved = cp.exposure_time(image_snr, rates, detector, **kwargs)
+
+        doubled = eqx.tree_at(lambda s: s.disk.amplitude.level, system, 6.0)
+        doubled_record = cp.aperture_record(doubled, path, exposure, calibration)
+        doubled_rates = cp.aperture_rates(
+            doubled_record, separation, contrast, position_angle_deg=angle
+        )
+        levels.append(
+            dict(
+                calculated=calculated,
+                image=image,
+                pixels=np.stack([electrons.n_pix, electrons.variance.n_pix]) / pixels,
+                planet_band=planet_band.max(-1),
+                lattice_band=lattice_band,
+                snr=np.stack([cp.snr(rates, detector, live, **kwargs), image_snr]),
+                time=np.asarray(solved.time_s),
+                valid=np.asarray(solved.valid),
+                live=live,
+                dust=np.asarray(doubled_rates.exozodi / rates.exozodi),
+                dust_images=np.asarray(
+                    jnp.sum(cp.expected(doubled, path, exposure).exozodi * weights)
+                    / jnp.sum(images.exozodi * weights)
+                ),
             )
-        lower, upper = low[0] / np.sqrt(high[1]), high[0] / np.sqrt(low[1])
-        snr_intervals.append(np.stack((lower, upper)))
-        snr_tolerance.append(np.maximum(snrs[index, 0] - lower, upper - snrs[index, 0]))
-    print("\ncalculator e/s", expected.tolist())
-    print("image e/s [sampling,term,band]", measured.tolist())
-    print("gaps", gaps.tolist(), "tolerance", tolerance.tolist())
-    print("disk a", bounds.tolist(), "disk b", redistribution.tolist())
-    print("dust ratios", dust_ratios.tolist())
-    print("planet orders", np.log2(gaps[0, 0] / gaps[1, 0]).tolist())
-    print("S/N [sampling,reader,band]", snrs.tolist())
-    print("S/N tolerances", np.asarray(snr_tolerance).tolist())
-    evidence = dict(
-        calculator=expected,
-        images=measured,
-        gaps=gaps,
-        tolerance=all_tolerances,
-        disk_a=bounds,
-        disk_b=redistribution,
-        snr=snrs,
-        snr_tolerance=np.asarray(snr_tolerance),
-        snr_intervals=np.asarray(snr_intervals),
-        dust_ratios=dust_ratios,
-        planet_image_limit=image_limit,
-        planet_image_order=image_order,
-        planet_image_uncertainty=image_uncertainty,
-        planet_calc_ladder=calc_ladder,
-        planet_calc_limit=calc_limit,
-        planet_calc_order=calc_order,
-        planet_calc_uncertainty=calc_uncertainty,
-        planet_tolerance=planet_tolerance,
-        planet_calc_discretization=calc_discretization,
-        planet_analytic=analytic,
-        planet_image_analytic_distance=abs(image_limit - analytic),
-        planet_calc_analytic_distance=abs(calc_limit - analytic),
-        disk_ladder=disk_ladder,
-        disk_spread=disk_spread,
-    )
+        )
+    evidence = {key: np.stack([level[key] for level in levels]) for key in levels[0]}
+    evidence["error"] = evidence["calculated"] / evidence["image"] - 1
     print("closure evidence", {key: value.tolist() for key, value in evidence.items()})
     return evidence
 
@@ -359,89 +217,109 @@ def closure(tmp_path_factory):
     "code-verification",
     srq="planet count rate Cp; stellar leakage CRbs",
 )
-@vv.seam("jaxedith", "coronagraphoto")
 def test_planet_and_leakage_closure(closure):
-    """Fails if the planet limits or reflected stellar aperture disagree.
+    """Fails if the planet table or the leakage lattice disagrees with the images.
 
-    Smooth pixel-coverage quadrature is second order: measured orders in
-    1.7--2.3 include the sub-asymptotic blue image and calculator ladders.
-    Both limits use signed Richardson extrapolation and GCI F_s=1.25;
-    their absolute uncertainties plus 1e-9*abs(C) form the closure band.
-    D_calc is the measured signed default-record discretization error.
-    Leakage retains half the next-pitch gap plus the 1e-9 relative floor.
+    Both readers use the same coronagraph products and the same exact pixel
+    weights, so the planet differs only by pixel phase, which the ring mean
+    averages, and by linear interpolation between rings. Basis: five ring
+    standard deviations plus one eighth of the largest neighbouring second
+    difference of the table; measured relative errors are 1.9e-3 on 0.2
+    lambda/D pixels and 2.3e-4 on 0.1, and the band must stay below 5e-3.
+    The leakage of this YIP is uniform, so every aperture sum is the same
+    number and only float64 rounding of the convolution remains: 1e-9.
     """
     c = closure
-    for order in (c["planet_image_order"], c["planet_calc_order"]):
-        assert np.all((order > 1.7) & (order < 2.3))
-    assert np.all(
-        abs(c["planet_image_limit"] - c["planet_calc_limit"]) <= c["planet_tolerance"]
-    )
-    assert np.all(
-        abs(c["calculator"][0] - c["planet_calc_limit"])
-        <= abs(c["planet_calc_discretization"]) + c["planet_calc_uncertainty"]
-    )
-    assert np.all(abs(c["images"][:, 1] - c["calculator"][1]) <= c["tolerance"][:, 1])
+    planet = abs(c["error"][:, 0, 0])
+    assert np.all(c["planet_band"] < 5e-3)
+    assert np.all(planet <= c["planet_band"])
+    # Finer pixels leave less pixel phase for the ring mean to hide.
+    assert np.all(planet[1] < planet[0])
+    assert np.all(abs(c["error"][:, 0, 1]) <= 1e-9)
+    assert np.all(c["calculated"][:, 0, :2] > 0)
 
 
 @vv.case("etc-count-rates", "code-verification", srq="planet count rate Cp")
-@vv.seam("jaxedith", "coronagraphoto")
 def test_survival_applied_once(closure):
     """Fails on duplicate survival: the mutant is 0.9*C, 10% low.
 
-    Compare extrapolated planet rates with the same GCI closure band;
-    both chromatic QE and survival=0.9 remain on the real detector paths.
-    The production-default mutant must also lie outside that band.
+    Chromatic QE and survival=0.9 stay on the real detector path of both
+    readers. Basis: the planet band of the closure test; the mutant must lie
+    outside it.
     """
     c = closure
-    image, calc, tolerance = (
-        c["planet_image_limit"],
-        c["planet_calc_limit"],
-        c["planet_tolerance"],
-    )
-    assert np.all(abs(image / calc - 1) <= tolerance / abs(calc))
-    assert np.all(abs(image - 0.9 * calc) > tolerance)
-    assert np.all(abs(image - 0.9 * c["calculator"][0]) > tolerance)
+    image, calculated = c["image"][:, 0, 0], c["calculated"][:, 0, 0]
+    assert np.all(abs(calculated / image - 1) <= c["planet_band"])
+    assert np.all(abs(0.9 * calculated / image - 1) > c["planet_band"])
 
 
 @vv.case("etc-count-rates", "code-verification", srq="zodi and exozodi rates")
-@vv.seam("jaxedith", "coronagraphoto")
 def test_background_closure(closure):
-    """Fails on omitted disk, wrong solid angle or unconverged disk sums.
+    """Fails on an omitted disk, wrong solid angle or a misplaced lattice read.
 
-    Local zodi retains the gap/2 plus 1e-9 relative floor. Exozodi has no
-    claimed convergence order: sky deposition onto the fixed native PSF
-    grid reverses sign along the pitch ladder. S_disk is the empirical
-    spread (max minus min) over p, p/2, p/4, p/8. Measured sums in e/s:
-    blue=(0.0241267824200, 0.0241288511279, 0.0241230525276,
-          0.0241225491126),
-    red=(0.0257179187191, 0.0257180986553, 0.0257129038615,
-         0.0257130461716).
-    The convergence-only check S_disk < 1e-3*abs(C) catches a divergent
-    ladder; its residual is an epistemic band, not a Richardson estimate.
-    At every closure pitch use S_disk + abs(a) + abs(b) + 1e-9*abs(C).
-    Measured model-form differences a (raw aperture-average versus center)
-    and b (convolved versus raw sum times transmission) compare different
-    disk models, not numerical errors. Dust doubling is linear to a 1e-12
-    arithmetic allowance; both readers must give nonzero exozodi.
+    The local zodi is uniform, so its aperture sum closes to float64 rounding
+    of the convolution, 1e-9. The exozodi varies across the aperture
+    positions: the bilinear read between half-pixel positions is bounded by
+    one eighth of the summed second differences of the lattice around the
+    planet. The bound is doubled because it is estimated from differences,
+    not derived: 4.2e-4 on 0.2 lambda/D pixels and 1.1e-4 on 0.1, against
+    measured errors of 1.3e-4 and 4.9e-5.
+    Doubling the dust doubles both readers to a 1e-12 arithmetic allowance,
+    and both must give a nonzero exozodi.
     """
     c = closure
-    np.testing.assert_allclose(c["dust_ratios"], 2.0, rtol=1e-12)
-    assert np.all(c["calculator"][3] > 0) and np.all(c["images"][:, 3] > 0)
-    assert np.all(abs(c["images"][:, 2] - c["calculator"][2]) <= c["tolerance"][:, 2])
-    assert np.all(c["disk_spread"] < 1e-3 * abs(c["calculator"][3]))
-    assert np.all(abs(c["images"][:, 3] - c["calculator"][3]) <= c["tolerance"][:, 3])
+    np.testing.assert_allclose(c["dust"], 2.0, rtol=1e-12)
+    np.testing.assert_allclose(c["dust_images"], 2.0, rtol=1e-12)
+    assert np.all(c["calculated"][:, 0, 2:] > 0) and np.all(c["image"][:, 0, 2:] > 0)
+    assert np.all(abs(c["error"][:, 0, 2]) <= 1e-9)
+    exozodi_band = 2 * c["lattice_band"][:, 0, 2] + 1e-9
+    assert np.all(exozodi_band < 1e-3)
+    assert np.all(abs(c["error"][:, 0, 3]) <= exozodi_band)
 
 
-@vv.case("etc-inversion", "code-verification", srq="S/N at fixed time")
-@vv.seam("jaxedith", "coronagraphoto")
-def test_snr_closure(closure):
-    """Fails if the image budget and calculator give inconsistent S/N.
+@vv.case("etc-count-rates", "code-verification", srq="aperture variance rates")
+def test_squared_weight_closure(closure):
+    """Fails if the w**2 tables or pixel counts misstate the variance rates.
 
-    Basis: interval propagation of all four term bounds through detector
-    mean_and_variance and residual count squares at each closure pitch.
-    Exozodi contributes its empirical spread and measured model-form
-    differences, with no order claim. Effective pixel count is sum of
-    fractional aperture areas, shared by both aperture budgets.
+    The summed weights are exact at every position (the circle's area), so
+    the mean pixel count closes to 1e-9. The squared weights depend on pixel
+    phase, and their half-pixel lattice is read bilinearly. Basis: measured;
+    the errors are 3.8e-3 on 0.2 lambda/D pixels and 1.9e-3 on 0.1 for the
+    backgrounds and pixel count, and 1.6e-2 and 3.4e-3 for the planet, whose
+    ring mean also averages pixel phase. Held to 1e-2 and 3e-2, and each must
+    shrink with the pixels.
     """
-    snrs = closure["snr"]
-    assert np.all(abs(snrs[:, 0] - snrs[:, 1]) <= closure["snr_tolerance"])
+    c = closure
+    np.testing.assert_allclose(c["pixels"][:, 0], 1.0, rtol=1e-9)
+    backgrounds = abs(c["error"][:, 1, 1:]).max(axis=(-2, -1))
+    pixels = abs(c["pixels"][:, 1] - 1).max(axis=-1)
+    planet = abs(c["error"][:, 1, 0]).max(axis=-1)
+    assert np.all(backgrounds < 1e-2) and np.all(pixels < 1e-2)
+    assert np.all(planet < 3e-2)
+    assert backgrounds[1] < backgrounds[0] and planet[1] < planet[0]
+
+
+@vv.case("etc-inversion", "code-verification", srq="S/N at fixed time; time to S/N")
+def test_snr_and_exposure_time_closure(closure):
+    """Fails if the analytic S/N or time disagrees with the image budget.
+
+    The image S/N sums planet, source, dark, clock-induced and read-noise
+    variance over the same aperture through ``detector.mean_and_variance``
+    and adds the residual squares, for 360 frames of 100 s. The analytic
+    time is solved for that image S/N and must return the simulated live
+    time. Basis: first-order propagation of the measured rate differences,
+    S/N as p / sqrt(b) and time as b / p**2, with the planet error dp and
+    the largest squared-weight error db: dp + db / 2 for S/N and 2 dp + db
+    for the time, doubled for the terms the first order drops.
+    """
+    c = closure
+    dp = abs(c["error"][:, 0, 0])
+    db = np.maximum(
+        abs(c["error"][:, 1]).max(axis=-2), abs(c["pixels"][:, 1] - 1)
+    ) + abs(c["error"][:, 0, 3])
+    snr_band, time_band = 2 * (dp + db / 2), 2 * (2 * dp + db)
+    assert np.all(snr_band < 3e-2) and np.all(time_band < 6e-2)
+    assert np.all(c["snr"] > 1.0)
+    assert np.all(abs(c["snr"][:, 0] / c["snr"][:, 1] - 1) <= snr_band)
+    assert np.all(c["valid"])
+    assert np.all(abs(c["time"] / c["live"][:, None] - 1) <= time_band)
