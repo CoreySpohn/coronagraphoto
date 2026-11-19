@@ -27,7 +27,7 @@ planet table is the response throughput times the star's photon flux
 density, the collecting area and the optical throughput, per unit
 planet-to-star contrast.
 
-**Read.** A planet is a separation, a position angle and a contrast, observed
+**Read.** A planet is an east and a north offset from the star and a contrast, observed
 at a time. The planet rate is read linearly between rings and scaled by the
 contrast. The backgrounds are read bilinearly at the detector position the
 planet falls on, and the uniform-sky read is scaled by the local-zodi radiance
@@ -83,8 +83,7 @@ speckle realization are those of the exposure the record was built from.
 Star leakage, local zodi and the pixel counts are fixed on the detector. The
 exozodi is fixed on the sky. `aperture_rates(..., roll_deg=...)` reads the
 first group where the planet falls at the requested roll and the exozodi where
-it fell at the roll the record was rendered at. Position angle is measured
-north through east, and `roll_deg` is the position angle of detector +y, as in
+it fell at the roll the record was rendered at. `roll_deg` is the position angle of detector +y, as in
 `build_exposure`.
 
 ## S/N and exposure time

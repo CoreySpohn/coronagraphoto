@@ -302,8 +302,8 @@ def aperture_record(
     radiance at the time of each read; nothing of the local zodi is fixed at
     ``exposure.time_d``. The planet table is the response's throughput
     times the star's photon flux density and the collecting area and optical
-    throughput, so a planet enters the read only as a separation, a position
-    angle and a contrast.
+    throughput, so a planet enters the read only as an east offset, a north
+    offset and a contrast.
 
     ``response`` must have been built for this instrument and for
     ``exposure.quadrature``.
