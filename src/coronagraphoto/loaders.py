@@ -26,20 +26,18 @@ def load_scene_from_exovista(
     scenes retain time-dependent planet contrasts and spot metadata; the
     latter does not yet add resolved stellar-surface propagation.
 
-    The earlier ``required_planets`` parameter was removed: variadic
-    planet tuples make the "pad to fixed shape" semantics unnecessary,
-    and the underlying ``skyscapes.from_exovista`` no longer accepts it.
-
     Args:
         fits_file: Path to the ExoVista FITS file.
         planet_indices: Planet indices to load (0-based). ``None`` = all.
         only_earths: If True and ``planet_indices`` is None, auto-filter
             Earths.
-        zodi_surface_brightness_mag: V-band surface brightness for the
-            default zodi background. Default 22.0 (AYO standard).
+        zodi_surface_brightness_mag: AB surface brightness of the default
+            zodi background [mag/arcsec^2] at its 550 nm reference
+            wavelength. Default 22.0 (AYO standard).
         load_disk: If False, skip the disk extension and set
             ``System.disk`` to ``None``. Use this when the coronagraph
-            has no PSF datacube (the disk pipeline requires one).
+            has no scene renderer: a disk needs one, from
+            ``coronagraph.with_scene_operator()``.
 
     Returns:
         ``skyscapes.Scene`` with the loaded system and a default zodi
