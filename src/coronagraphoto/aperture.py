@@ -2,7 +2,7 @@
 
 Three steps, each paid at its own cadence:
 
-- :func:`aperture_calibration`, once per instrument and band set, tabulates
+- :func:`aperture_response`, once per instrument and band set, tabulates
   the planet's aperture fraction against separation and the aperture's pixel
   weights. It holds nothing about a target.
 - :func:`aperture_record`, once per target and exposure, renders the
@@ -49,7 +49,7 @@ _BACKGROUNDS = ("star_leakage", "local_zodi", "exozodi")
 _GOLDEN = (np.sqrt(5.0) - 1.0) / 2.0
 
 
-class ApertureCalibration(eqx.Module):
+class ApertureResponse(eqx.Module):
     """Target-independent aperture tables of one instrument and band set.
 
     Attributes:
@@ -176,7 +176,7 @@ def _ring_moments(model, detector, wavelengths_nm, x_arcsec, y_arcsec, weights):
     return jax.lax.map(node, wavelengths_nm)
 
 
-def aperture_calibration(
+def aperture_response(
     instrument: Instrument,
     quadrature: Quadrature,
     *,
@@ -184,7 +184,7 @@ def aperture_calibration(
     n_separations: int = 64,
     n_angles: int = 16,
     max_separation_arcsec: float | None = None,
-) -> ApertureCalibration:
+) -> ApertureResponse:
     """Tabulate an instrument's aperture throughput and pixel weights.
 
     A host-side build, run once per instrument and band set and reused for
@@ -252,7 +252,7 @@ def aperture_calibration(
             )
             throughput[:, w, :, k] = moments.mean(axis=-1).T
             ring_std[w, :, k] = moments[:, 0].std(axis=-1)
-    return ApertureCalibration(
+    return ApertureResponse(
         rule,
         quadrature,
         jnp.asarray(radii),
@@ -292,33 +292,33 @@ def aperture_record(
     scene: Scene,
     instrument: Instrument,
     exposure: Exposure,
-    calibration: ApertureCalibration,
+    response: ApertureResponse,
 ) -> ApertureRecord:
     """Tabulate one target's aperture rates for one exposure.
 
     The star leakage (with the instrument's speckle field, if any), a uniform
     sky of unit radiance and the scene's disk are rendered once by the image
     path at ``exposure.time_d`` and ``exposure.roll_deg``, without planets,
-    then summed in the calibration's aperture at every half-pixel position.
+    then summed in the response's aperture at every half-pixel position.
     The record keeps ``scene.local_zodi``, the scene's sky position and the scene
     epoch, from which :func:`aperture_rates` computes the local-zodi radiance
     at the time of each read; nothing of the local zodi is fixed at
-    ``exposure.time_d``. The planet table is the calibration's throughput
+    ``exposure.time_d``. The planet table is the response's throughput
     times the star's photon flux density and the collecting area and optical
     throughput, so a planet enters the read only as a separation, a position
     angle and a contrast.
 
-    ``calibration`` must have been built for this instrument and for
+    ``response`` must have been built for this instrument and for
     ``exposure.quadrature``.
     """
     quadrature = exposure.quadrature
-    nodes, built = quadrature.nodes_nm, calibration.quadrature.nodes_nm
+    nodes, built = quadrature.nodes_nm, response.quadrature.nodes_nm
     if nodes.shape != built.shape or (
         not isinstance(nodes, jax.core.Tracer)
         and not isinstance(built, jax.core.Tracer)
         and not np.array_equal(np.asarray(nodes), np.asarray(built))
     ):
-        raise ValueError("the calibration was built for other wavelength nodes")
+        raise ValueError("the response was built for other wavelength nodes")
     _require_position(scene)
     local_zodi, sky_position = scene.local_zodi, (None, None)
     if local_zodi is not None:
@@ -333,11 +333,11 @@ def aperture_record(
     shape = maps.shape[-2:]
     background = _lattice(
         maps.reshape(n_bands, 3 * n_nodes, *shape),
-        calibration.kernels,
-        calibration.radius_pix,
+        response.kernels,
+        response.radius_pix,
     ).reshape(2, n_bands, 3, n_nodes, 2 * shape[0], 2 * shape[1])
     n_pix = _lattice(
-        jnp.ones((n_bands, 1, *shape)), calibration.kernels, calibration.radius_pix
+        jnp.ones((n_bands, 1, *shape)), response.kernels, response.radius_pix
     )[:, :, 0]
 
     def per_contrast(wavelength_nm):
@@ -353,8 +353,8 @@ def aperture_record(
         quadrature,
         exposure.roll_deg,
         jnp.asarray(instrument.detector.pixel_scale_arcsec),
-        calibration.separation_step_arcsec,
-        star[None, :, :, None] * calibration.throughput,
+        response.separation_step_arcsec,
+        star[None, :, :, None] * response.throughput,
         jnp.moveaxis(background, 2, 0),
         n_pix,
         local_zodi,
@@ -420,7 +420,7 @@ def aperture_rates(
     and squared-weight ``variance`` rates. Pass it to
     :func:`coronagraphoto.snr` or :func:`coronagraphoto.exposure_time`, or to
     ``detector.electrons``. Planet rates are linear in separation between the
-    calibration's rings; backgrounds are bilinear between half-pixel
+    response's rings; backgrounds are bilinear between half-pixel
     positions. Everything is NaN where the aperture leaves the detector or the
     separation leaves the planet table. Thermal and companion terms are zero.
 

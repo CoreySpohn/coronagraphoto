@@ -17,7 +17,7 @@ import coronagraphoto as cp
 
 
 @pytest.mark.medium(
-    reason="YIP load, one calibration and 180 timed batches of 40000 reads"
+    reason="YIP load, one response and 180 timed batches of 40000 reads"
 )
 def test_record_meets_the_planner_budget(tmp_path):
     """Fails if a read, a per-target build or one exposure outgrows its budget.
@@ -43,7 +43,7 @@ def test_record_meets_the_planner_budget(tmp_path):
       compilation). Fails above 10 s.
     - One exposure of a known planet, a single compiled read with its S/N:
       budget 0.1 s, measured 2e-5 s. Fails above 0.1 s.
-    - The instrument calibration is outside the per-target budget: measured
+    - The instrument response is outside the per-target budget: measured
       3.0 s here for 33 rings of 16 sources.
 
     Thresholds are wall-clock on a shared machine, hence loose; the medians
@@ -67,14 +67,14 @@ def test_record_meets_the_planner_budget(tmp_path):
     exposure = cp.build_exposure(scene, instrument, bands, time_d=0.0)
 
     start = time.perf_counter()
-    calibration = cp.aperture_calibration(
+    response = cp.aperture_response(
         instrument, exposure.quadrature, n_separations=33, n_angles=16
     )
-    calibration_s = time.perf_counter() - start
+    response_s = time.perf_counter() - start
 
     def build():
         start = time.perf_counter()
-        record = cp.aperture_record(scene, instrument, exposure, calibration)
+        record = cp.aperture_record(scene, instrument, exposure, response)
         jax.block_until_ready(record)
         return record, time.perf_counter() - start
 
@@ -104,7 +104,7 @@ def test_record_meets_the_planner_budget(tmp_path):
 
     rng = np.random.default_rng(0)
     shape = (4000, 10)
-    last = float(calibration.separation_step_arcsec) * 32
+    last = float(response.separation_step_arcsec) * 32
     separations = jnp.asarray(rng.uniform(0.05 * last, 0.95 * last, shape))
     angles = jnp.asarray(rng.uniform(0.0, 360.0, shape))
     contrasts = jnp.asarray(10 ** rng.uniform(-10.5, -9.0, shape))
@@ -126,7 +126,7 @@ def test_record_meets_the_planner_budget(tmp_path):
         f"aperture budget: read {read_us:.3f} us per draw-planet at one time, "
         f"{times_us:.3f} us with 16 times batched, {each_us:.3f} us with a time "
         f"per read, build {build_s:.3f} s (first {first_build_s:.2f} s), "
-        f"one exposure {exposure_s:.2e} s, calibration {calibration_s:.1f} s"
+        f"one exposure {exposure_s:.2e} s, response {response_s:.1f} s"
     )
     # The timed reads are real: every draw lies inside the tables, and the
     # local zodi they scale is neither absent nor the same at every time.

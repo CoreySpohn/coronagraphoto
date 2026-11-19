@@ -9,21 +9,21 @@ too slow, so the answer is read from tables that the image path fills once.
 
 | Step | Function | When | Cost here |
 |---|---|---|---|
-| Calibration | `aperture_calibration(instrument, quadrature, rule=...)` | once per instrument and band set | seconds to minutes |
-| Record | `aperture_record(scene, instrument, exposure, calibration)` | once per target, instrument and band set | one background render |
+| Response | `aperture_response(instrument, quadrature, rule=...)` | once per instrument and band set | seconds to minutes |
+| Record | `aperture_record(scene, instrument, exposure, response)` | once per target, instrument and band set | one background render |
 | Read | `aperture_rates(record, separation_arcsec, contrast, position_angle_deg=..., time_d=...)` | once per planet and observation time | a few gathers |
 
-**Calibration.** Point sources are placed on rings around the star, imaged on
+**Response.** Point sources are placed on rings around the star, imaged on
 the detector pixels by the coronagraph, and summed in a circular aperture
 centred on each source. The ring mean is the planet throughput at that
-separation. The calibration also holds the aperture's pixel weights for a
+separation. The response also holds the aperture's pixel weights for a
 centre at each half-pixel phase. Nothing in it depends on a target.
 
 **Record.** The star leakage (with the instrument's speckle field), a uniform
 sky of unit radiance and the scene's disk are rendered once, without planets,
 by the same program as `photon_rates`. Each image is then summed in the
 aperture at every position of a half-pixel lattice, by one convolution. The
-planet table is the calibration throughput times the star's photon flux
+planet table is the response throughput times the star's photon flux
 density, the collecting area and the optical throughput, per unit
 planet-to-star contrast.
 
@@ -112,8 +112,8 @@ import jax
 import coronagraphoto as cp
 
 exposure = cp.build_exposure(scene, instrument, bands, time_d=0.0)
-calibration = cp.aperture_calibration(instrument, exposure.quadrature)
-record = cp.aperture_record(scene, instrument, exposure, calibration)
+response = cp.aperture_response(instrument, exposure.quadrature)
+record = cp.aperture_record(scene, instrument, exposure, response)
 
 
 def time_to_snr(separation_arcsec, position_angle_deg, contrast, time_d):
@@ -141,7 +141,7 @@ times = by_time(separations, angles, contrasts, observation_times_d)
   rules are not tabulated.
 - The planet throughput is a ring mean. It hides the dependence on azimuth
   and on where the planet falls within a pixel;
-  `ApertureCalibration.throughput_ring_std` reports how much.
+  `ApertureResponse.throughput_ring_std` reports how much.
 - Rates are NaN where the aperture leaves the detector, where the separation
   leaves the planet table, and where the coronagraph has no response model.
   S/N is then NaN and `valid` is False.

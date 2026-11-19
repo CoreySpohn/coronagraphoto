@@ -71,8 +71,8 @@ path fills tables once and the answer is read from them:
 
 | Function | When | Output |
 |---|---|---|
-| `aperture_calibration(instrument, quadrature)` | once per instrument and band set | planet throughput against separation, aperture pixel weights |
-| `aperture_record(scene, instrument, exposure, calibration)` | once per target and exposure | aperture-summed backgrounds on a half-pixel lattice, planet rate per unit contrast |
+| `aperture_response(instrument, quadrature)` | once per instrument and band set | planet throughput against separation, aperture pixel weights |
+| `aperture_record(scene, instrument, exposure, response)` | once per target and exposure | aperture-summed backgrounds on a half-pixel lattice, planet rate per unit contrast |
 | `aperture_rates(record, separation_arcsec, contrast, position_angle_deg=..., time_d=...)` | once per planet and time | aperture `Rates`, photons/s/nm, with `n_pix` and squared-weight `variance` |
 | `snr(rates, detector, time_s, frame_time_s=...)` | once per planet | S/N per band |
 | `exposure_time(rates, detector, target_snr, frame_time_s=...)` | once per planet | `ExposureTime(time_s, valid)` per band |

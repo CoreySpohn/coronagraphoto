@@ -99,10 +99,10 @@ def closure(tmp_path_factory):
         )
         path = eqx.tree_at(lambda p: p.detector, base, detector)
         exposure = cp.build_exposure(system, path, bands, time_d=0.0, roll_deg=roll)
-        calibration = cp.aperture_calibration(
+        response = cp.aperture_response(
             path, exposure.quadrature, rule=rule, n_separations=33, n_angles=16
         )
-        record = cp.aperture_record(system, path, exposure, calibration)
+        record = cp.aperture_record(system, path, exposure, response)
         rates = cp.aperture_rates(
             record, separation, contrast, position_angle_deg=angle, time_d=0.0
         )
@@ -139,10 +139,10 @@ def closure(tmp_path_factory):
         pixels = np.stack([(weights**m).sum((-2, -1)) for m in (1, 2)])
 
         # Interpolation bands of the read, from the tables themselves.
-        position = float(separation / calibration.separation_step_arcsec)
+        position = float(separation / response.separation_step_arcsec)
         knot = int(position)
-        table = np.asarray(calibration.throughput[0])
-        scatter = np.asarray(calibration.throughput_ring_std)[..., knot : knot + 2]
+        table = np.asarray(response.throughput[0])
+        scatter = np.asarray(response.throughput_ring_std)[..., knot : knot + 2]
         curvature = abs(np.diff(table[..., knot - 1 : knot + 3], n=2, axis=-1)) / 8
         planet_band = (5 * scatter.max(-1) + curvature.max(-1)) / table[
             ..., knot : knot + 2
@@ -184,7 +184,7 @@ def closure(tmp_path_factory):
         solved = cp.exposure_time(rates, detector, image_snr, **kwargs)
 
         doubled = eqx.tree_at(lambda s: s.disk.amplitude.level, system, 6.0)
-        doubled_record = cp.aperture_record(doubled, path, exposure, calibration)
+        doubled_record = cp.aperture_record(doubled, path, exposure, response)
         doubled_rates = cp.aperture_rates(
             doubled_record, separation, contrast, position_angle_deg=angle, time_d=0.0
         )

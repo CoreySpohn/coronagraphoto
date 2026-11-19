@@ -1,4 +1,4 @@
-"""Aperture calibration, record and read against closed forms and image sums."""
+"""Aperture response, record and read against closed forms and image sums."""
 
 import equinox as eqx
 import ineedvalidation as vv
@@ -61,19 +61,19 @@ def _image_weights(instrument, x_arcsec, y_arcsec):
 
 @pytest.fixture(scope="module")
 def plateau():
-    """Flat-PSF instrument, its calibration and one target's record."""
+    """Flat-PSF instrument, its response and one target's record."""
     instrument = _instrument(PlateauCoronagraph(40, 0.25))
     scene = make_system(separation_arcsec=0.03)
     exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0)
-    calibration = cp.aperture_calibration(
+    response = cp.aperture_response(
         instrument,
         exposure.quadrature,
         n_separations=5,
         n_angles=4,
         max_separation_arcsec=0.04,
     )
-    record = cp.aperture_record(scene, instrument, exposure, calibration)
-    return scene, instrument, exposure, calibration, record
+    record = cp.aperture_record(scene, instrument, exposure, response)
+    return scene, instrument, exposure, response, record
 
 
 @pytest.fixture(scope="module")
@@ -82,11 +82,11 @@ def sloped():
     instrument = _instrument(SlopedLeakage(40, 0.25))
     scene = make_system(separation_arcsec=0.05)
     exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0)
-    calibration = cp.aperture_calibration(
+    response = cp.aperture_response(
         instrument, exposure.quadrature, n_separations=9, n_angles=8
     )
-    record = cp.aperture_record(scene, instrument, exposure, calibration)
-    return scene, instrument, exposure, calibration, record
+    record = cp.aperture_record(scene, instrument, exposure, response)
+    return scene, instrument, exposure, response, record
 
 
 @vv.case("aperture-photon-budget", "code-verification")
@@ -101,12 +101,12 @@ def test_worked_example_closed_form(plateau):
     the manufactured fields ring under band-limited resampling onto 0.3
     lambda/D pixels, measured at up to 2.1e-2. The pixel count is exact.
     """
-    _, _, exposure, calibration, record = plateau
+    _, _, exposure, response, record = plateau
     nodes = np.asarray(exposure.quadrature.nodes_nm)
     area = np.pi * (0.7 * 550.0 / nodes) ** 2
     rates = cp.aperture_rates(record, 0.03, 1e-10, position_angle_deg=40.0, time_d=0.0)
     incident = 1e6 * 40 * 0.4
-    np.testing.assert_allclose(calibration.radius_pix, [0.7 / 0.3], rtol=1e-12)
+    np.testing.assert_allclose(response.radius_pix, [0.7 / 0.3], rtol=1e-12)
     np.testing.assert_allclose(
         rates.planet, 1e-10 * incident * 0.3 / 16 * area, rtol=3e-2
     )
@@ -178,11 +178,11 @@ def test_planet_table_matches_image_sums(sloped):
 
     The Gaussian PSF does not depend on position, so the ring mean differs
     from one planet only by pixel phase. Basis: the measured ring scatter of
-    the calibration, three standard deviations, plus the linear-interpolation
+    the response, three standard deviations, plus the linear-interpolation
     error bounded by one eighth of the largest second difference of the
     neighbouring knots.
     """
-    scene, instrument, exposure, calibration, record = sloped
+    scene, instrument, exposure, response, record = sloped
     photons = cp.photon_rates(scene, instrument, exposure)
     east, north = scene.positions(jnp.array([0.0]))[:2, 0, 0]
     separation = float(jnp.hypot(east, north))
@@ -195,9 +195,9 @@ def test_planet_table_matches_image_sums(sloped):
         position_angle_deg=jnp.rad2deg(jnp.arctan2(east, north)),
         time_d=0.0,
     )
-    knot = int(separation / float(calibration.separation_step_arcsec))
-    table = np.asarray(calibration.throughput[0, 0])
-    scatter = np.asarray(calibration.throughput_ring_std[0])[:, knot : knot + 2].max(-1)
+    knot = int(separation / float(response.separation_step_arcsec))
+    table = np.asarray(response.throughput[0, 0])
+    scatter = np.asarray(response.throughput_ring_std[0])[:, knot : knot + 2].max(-1)
     curvature = abs(np.diff(table[:, knot - 1 : knot + 3], n=2, axis=-1)).max(-1) / 8
     tolerance = (3 * scatter + curvature) / table[:, knot : knot + 2].min(-1)
     truth = jnp.einsum("wqyx,yx->wq", photons.planet, weights)
@@ -283,14 +283,14 @@ def test_local_zodi_follows_the_read_time(sloped):
     The rebuilt record holds the same uniform-sky table, so its read must be
     bit-identical in every term.
     """
-    scene, instrument, _, calibration, _ = sloped
+    scene, instrument, _, response, _ = sloped
     scene = with_zodi(scene, LeinertZodi())
     scene = eqx.tree_at(lambda s: s.dynamics.frame.dec_deg, scene, jnp.asarray(23.0))
     exposures = [
         cp.build_exposure(scene, instrument, _BANDS, time_d=t) for t in (0.0, 137.0)
     ]
     built, rebuilt = (
-        cp.aperture_record(scene, instrument, exposure, calibration)
+        cp.aperture_record(scene, instrument, exposure, response)
         for exposure in exposures
     )
     pitch = float(instrument.detector.pixel_scale_arcsec)
@@ -398,9 +398,9 @@ def test_reads_outside_the_tables_and_unsupported_builds(sloped):
     Basis: exact. NaN marks every field, clears ``valid`` downstream, and a
     rule or quadrature the tables cannot represent raises at build time.
     """
-    scene, instrument, exposure, calibration, record = sloped
+    scene, instrument, exposure, response, record = sloped
     detector = instrument.detector
-    last = float(calibration.separation_step_arcsec) * 8
+    last = float(response.separation_step_arcsec) * 8
     inside = cp.aperture_rates(
         record, 0.5 * last, 1e-10, position_angle_deg=0.0, time_d=0.0
     )
@@ -422,10 +422,10 @@ def test_reads_outside_the_tables_and_unsupported_builds(sloped):
 
     for rule in (HalfMaximum(), Circular(0.7, centre="peak")):
         with pytest.raises(NotImplementedError, match="Circular"):
-            cp.aperture_calibration(instrument, exposure.quadrature, rule=rule)
+            cp.aperture_response(instrument, exposure.quadrature, rule=rule)
     other = cp.build_exposure(scene, instrument, (Band(510.0, 590.0),), time_d=0.0)
     with pytest.raises(ValueError, match="other wavelength nodes"):
-        cp.aperture_record(scene, instrument, other, calibration)
+        cp.aperture_record(scene, instrument, other, response)
 
 
 @pytest.mark.medium(reason="4096 detector frames of 48 by 48 pixels drawn on the host")
@@ -443,7 +443,7 @@ def test_variance_matches_weighted_pixel_draws(sloped):
     planet rate: measured 3.5e-3 on the mean and 9.5e-3 on the variance,
     held to 1e-2 and 2e-2.
     """
-    scene, instrument, exposure, calibration, _ = sloped
+    scene, instrument, exposure, response, _ = sloped
     detector = Detector(
         shape=instrument.detector.shape,
         pixel_scale_arcsec=instrument.detector.pixel_scale_arcsec,
@@ -455,8 +455,8 @@ def test_variance_matches_weighted_pixel_draws(sloped):
     )
     instrument = eqx.tree_at(lambda p: p.detector, instrument, detector)
     bright = eqx.tree_at(lambda s: s.star.flux_phot_per_nm_m2, scene, jnp.asarray(1e9))
-    # The calibration holds no detector noise, so the fixture's one serves.
-    record = cp.aperture_record(bright, instrument, exposure, calibration)
+    # The response holds no detector noise, so the fixture's one serves.
+    record = cp.aperture_record(bright, instrument, exposure, response)
     east, north = bright.positions(jnp.array([0.0]))[:2, 0, 0]
     x, y = SkyOrientation(0.0).sky_to_detector(east, north)
     weights = np.asarray(_image_weights(instrument, x, y))
@@ -494,7 +494,7 @@ def test_aperture_record_needs_a_position_only_for_a_pointing_dependent_zodi(pla
     """An unplaced scene records with AYOZodi and refuses LeinertZodi by name."""
     from zodi.jax import AYOZodi
 
-    _, instrument, _, calibration, _ = plateau
+    _, instrument, _, response, _ = plateau
     scene = make_system(separation_arcsec=0.03)
     scene = eqx.tree_at(
         lambda s: (s.dynamics.frame.ra_deg, s.dynamics.frame.dec_deg),
@@ -504,12 +504,12 @@ def test_aperture_record_needs_a_position_only_for_a_pointing_dependent_zodi(pla
     )
     exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0)
     record = cp.aperture_record(
-        with_zodi(scene, AYOZodi()), instrument, exposure, calibration
+        with_zodi(scene, AYOZodi()), instrument, exposure, response
     )
     assert record.ra_deg is None
     rates = cp.aperture_rates(record, 0.02, 1e-10, position_angle_deg=0.0, time_d=5.0)
     assert float(jnp.sum(rates.local_zodi)) > 0
     with pytest.raises(ValueError, match="no sky position"):
         cp.aperture_record(
-            with_zodi(scene, LeinertZodi()), instrument, exposure, calibration
+            with_zodi(scene, LeinertZodi()), instrument, exposure, response
         )
