@@ -1,23 +1,5 @@
 # Changelog
 
-## Unreleased
-
-### Changed
-
-- Detector frames follow the FITS display convention: at
-  `telescope_pa_deg = 0`, rows increase north and columns increase west.
-  Display with `imshow(origin="lower")` for north up and east left.
-- `telescope_pa_deg` is the sky position angle of detector +y, measured
-  north through east. A source at sky offset (E, N) lands at detector
-  x = -E cos(theta) + N sin(theta), y = N cos(theta) + E sin(theta);
-  planets and disks share this mapping. With the earlier orbix and
-  skyscapes releases, planets built from orbital elements arrived as
-  (north, east) and were placed a quarter-turn away from this;
-  ExoVista planets and cubes already arrived as (west, north) and keep
-  their zero-roll placement.
-- Require `orbix>=3.0.0` and `skyscapes>=2.1.0` for consistent sky coordinates
-  and FITS-oriented disk images.
-
 ## [5.0.0](https://github.com/CoreySpohn/coronagraphoto/compare/v4.2.0...v5.0.0) (2026-11-16)
 
 
@@ -40,6 +22,22 @@
 ### Documentation
 
 * **simulation:** state the skyscapes disk pa_deg convention and the per-source placement change ([252fdcb](https://github.com/CoreySpohn/coronagraphoto/commit/252fdcb4a92901eb3ede49cf5306bcfcc08c9370))
+
+### Migration notes
+
+- Detector frames follow the FITS display convention: at
+  `telescope_pa_deg = 0`, rows increase north and columns increase west.
+  Display with `imshow(origin="lower")` for north up and east left.
+- `telescope_pa_deg` is the sky position angle of detector +y, measured
+  north through east. A source at sky offset (E, N) lands at detector
+  x = -E cos(theta) + N sin(theta), y = N cos(theta) + E sin(theta);
+  planets and disks share this mapping. With the earlier orbix and
+  skyscapes releases, planets built from orbital elements arrived as
+  (north, east) and were placed a quarter-turn away from this;
+  ExoVista planets and cubes already arrived as (west, north) and keep
+  their zero-roll placement.
+- Require `orbix>=3.0.0` and `skyscapes>=2.1.0` for consistent sky coordinates
+  and FITS-oriented disk images.
 
 ## [4.1.0](https://github.com/CoreySpohn/coronagraphoto/compare/v4.0.0...v4.1.0) (2026-10-13)
 
