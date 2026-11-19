@@ -20,9 +20,9 @@ dependencies = [
   "equinox>=0.13.2",
   "hwoutils>=2.0.0",
   "jax>=0.8.1",
+  "numpy>=2.1.2",
   "optixstuff>=6.0.0",
   "orbix>=5.0.0",
-  "pooch>=1.8.2",
   "yippy>=3.0.0",
   "skyscapes>=5.0.0",
   "zodi[jax]>=2.0.0",
@@ -49,7 +49,6 @@ test = [
   "pytest-timeout>=1.3.1",
   "pytest-fail-slow>=0.1.0",
   "lod_unit>=1.8.0",
-  "numpy>=2.1.2",
   "packaging>=23.1",
 ]
 
@@ -111,7 +110,9 @@ optional_dependencies_dev_groups = ["dev", "docs", "test"]
 [tool.deptry.per_rule_ignores]
 # optixstuff supplies the duck-typed OpticalPath consumed by the simulation API.
 # orbix's floor preserves the sky-coordinate convention of loaded skyscapes scenes.
-DEP002 = ["optixstuff", "orbix"]
+# yippy supplies the coronagraph models (open_yip, fetch_yip) that users build the
+# optical path from; the package itself consumes them through optixstuff.
+DEP002 = ["optixstuff", "orbix", "yippy"]
 
 [tool.ty.environment]
 python-version = "3.11"
