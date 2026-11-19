@@ -126,7 +126,7 @@ class ApertureRecord(eqx.Module):
     n_pix: Array
     local_zodi: AbstractLocalZodi | None
     sky_frame: SkyFrame
-    reads: tuple[str, ...] = eqx.field(static=True, default=())
+    reads: tuple[str, ...] = eqx.field(static=True)
 
 
 class _UnitSky(AbstractLocalZodi):

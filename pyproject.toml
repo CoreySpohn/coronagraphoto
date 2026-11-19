@@ -39,7 +39,7 @@ docs = [
 ]
 test = [
   "astropy>=6.0.0",
-  "hwoutils[jax]>=1.15.0",
+  "hwoutils[jax]>=1.16.0",
   "ineedvalidation>=1.1.0",
   "pytest>=7.3.2",
   "hypothesis>=6.79.1",

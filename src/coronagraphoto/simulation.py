@@ -302,19 +302,6 @@ def _run(scene, instrument, exposure, kind, *, planets=True):
     )
 
 
-class BuiltExposure(Exposure):
-    """An ``Exposure`` that declares the scene paths its build read.
-
-    Attributes:
-        reads: Paths, relative to the scene, of every scene value the build used. A
-            path names a whole leaf or node, and a node covers the paths under it.
-            Changing one of these values leaves the exposure stale, so a host that
-            varies scene values rebuilds the exposure or holds them.
-    """
-
-    reads: tuple[str, ...] = eqx.field(static=True, default=())
-
-
 def build_exposure(
     scene: Scene,
     instrument: Instrument,
@@ -324,7 +311,7 @@ def build_exposure(
     roll_deg=0.0,
     plan: FramePlan | None = None,
     order: int = 4,
-) -> BuiltExposure:
+) -> Exposure:
     """Build the host-side Exposure for one observation of a scene.
 
     Each band is split at the breaks the instrument and the scene's local zodi
@@ -335,16 +322,16 @@ def build_exposure(
     :func:`observe`. The local-zodi line of sight is derived at render time
     from the scene's RA and Dec, the scene epoch and ``time_d``.
 
-    The result's ``reads`` lists the scene paths the build used: ``"local_zodi"``
-    (whose spectral breaks split the bands) when the scene has one, otherwise none.
+    The build uses the scene only for the spectral breaks of its local zodi, a
+    constant of the zodi model, so no scene value is cached in the result and it
+    declares no read.
     """
     models = [m for m in (instrument, scene.local_zodi) if m is not None]
-    return BuiltExposure(
+    return Exposure(
         time_d=time_d,
         roll_deg=roll_deg,
         quadrature=Quadrature.build(bands, *models, order=order),
         plan=plan,
-        reads=() if scene.local_zodi is None else ("local_zodi",),
     )
 
 
