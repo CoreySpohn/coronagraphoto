@@ -104,7 +104,7 @@ def closure(tmp_path_factory):
         )
         record = cp.aperture_record(system, path, exposure, calibration)
         rates = cp.aperture_rates(
-            record, separation, contrast, position_angle_deg=angle
+            record, separation, contrast, position_angle_deg=angle, time_d=0.0
         )
         electrons = detector.electrons(rates)
 
@@ -186,7 +186,7 @@ def closure(tmp_path_factory):
         doubled = eqx.tree_at(lambda s: s.disk.amplitude.level, system, 6.0)
         doubled_record = cp.aperture_record(doubled, path, exposure, calibration)
         doubled_rates = cp.aperture_rates(
-            doubled_record, separation, contrast, position_angle_deg=angle
+            doubled_record, separation, contrast, position_angle_deg=angle, time_d=0.0
         )
         levels.append(
             dict(

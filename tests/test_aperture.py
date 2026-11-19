@@ -6,11 +6,19 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import GaussianCoronagraph, PlateauCoronagraph, make_path, make_system
+from conftest import (
+    GaussianCoronagraph,
+    PlateauCoronagraph,
+    make_path,
+    make_system,
+    sightline,
+    with_zodi,
+)
 from optixstuff import Detector, FramePlan
 from optixstuff.apertures import Circular, HalfMaximum
 from optixstuff.grids import Image, Measure, SkyOrientation
 from optixstuff.spectral import Band
+from zodi.jax import LeinertZodi
 
 import coronagraphoto as cp
 
@@ -96,7 +104,7 @@ def test_worked_example_closed_form(plateau):
     _, _, exposure, calibration, record = plateau
     nodes = np.asarray(exposure.quadrature.nodes_nm)
     area = np.pi * (0.7 * 550.0 / nodes) ** 2
-    rates = cp.aperture_rates(record, 0.03, 1e-10, position_angle_deg=40.0)
+    rates = cp.aperture_rates(record, 0.03, 1e-10, position_angle_deg=40.0, time_d=0.0)
     incident = 1e6 * 40 * 0.4
     np.testing.assert_allclose(calibration.radius_pix, [0.7 / 0.3], rtol=1e-12)
     np.testing.assert_allclose(
@@ -141,6 +149,7 @@ def test_background_lattice_matches_image_sums(sloped):
             jnp.hypot(east, north),
             1e-10,
             position_angle_deg=jnp.rad2deg(jnp.arctan2(east, north)),
+            time_d=0.0,
             roll_deg=roll,
         )
         weights = _image_weights(instrument, x, y)
@@ -155,7 +164,9 @@ def test_background_lattice_matches_image_sums(sloped):
             )
     # The slope is seen: two positions differ by far more than the tolerance.
     first, second = (
-        cp.aperture_rates(record, 0.05, 1e-10, position_angle_deg=pa).star_leakage
+        cp.aperture_rates(
+            record, 0.05, 1e-10, position_angle_deg=pa, time_d=0.0
+        ).star_leakage
         for pa in (90.0, 270.0)
     )
     assert np.all(abs(first / second - 1) > 0.05)
@@ -182,6 +193,7 @@ def test_planet_table_matches_image_sums(sloped):
         separation,
         1e-10,
         position_angle_deg=jnp.rad2deg(jnp.arctan2(east, north)),
+        time_d=0.0,
     )
     knot = int(separation / float(calibration.separation_step_arcsec))
     table = np.asarray(calibration.throughput[0, 0])
@@ -192,12 +204,16 @@ def test_planet_table_matches_image_sums(sloped):
     assert np.all(tolerance < 0.05)
     assert np.all(abs(np.asarray(rates.planet / truth)[0] - 1) <= tolerance)
     # Contrast factors out of the planet and touches nothing else.
-    doubled = cp.aperture_rates(record, separation, 2e-10, position_angle_deg=90.0)
-    single = cp.aperture_rates(record, separation, 1e-10, position_angle_deg=90.0)
+    doubled = cp.aperture_rates(
+        record, separation, 2e-10, position_angle_deg=90.0, time_d=0.0
+    )
+    single = cp.aperture_rates(
+        record, separation, 1e-10, position_angle_deg=90.0, time_d=0.0
+    )
     np.testing.assert_allclose(doubled.planet, 2 * single.planet, rtol=1e-14)
     np.testing.assert_array_equal(doubled.star_leakage, single.star_leakage)
     per_node = cp.aperture_rates(
-        record, separation, jnp.full((1, 4), 1e-10), position_angle_deg=90.0
+        record, separation, jnp.full((1, 4), 1e-10), position_angle_deg=90.0, time_d=0.0
     )
     np.testing.assert_allclose(per_node.planet, single.planet, rtol=1e-14)
 
@@ -230,7 +246,9 @@ def test_read_geometry_on_a_hand_made_record(plateau):
 
     separation, angle = 0.031, 70.0
     built = float(record.roll_deg)
-    rates = cp.aperture_rates(record, separation, 1e-10, position_angle_deg=angle)
+    rates = cp.aperture_rates(
+        record, separation, 1e-10, position_angle_deg=angle, time_d=0.0
+    )
     column, row = expected(separation, angle, built)
     np.testing.assert_allclose(rates.star_leakage, column, rtol=1e-12)
     np.testing.assert_allclose(rates.local_zodi, row, rtol=1e-12)
@@ -238,7 +256,7 @@ def test_read_geometry_on_a_hand_made_record(plateau):
     # East is to the left and north is up at zero roll.
     assert built == 0.0 and column < centre < row
     rolled = cp.aperture_rates(
-        record, separation, 1e-10, position_angle_deg=angle, roll_deg=115.0
+        record, separation, 1e-10, position_angle_deg=angle, time_d=0.0, roll_deg=115.0
     )
     new_column, new_row = expected(separation, angle, 115.0)
     assert abs(new_column - column) > 1 and abs(new_row - row) > 1
@@ -247,6 +265,91 @@ def test_read_geometry_on_a_hand_made_record(plateau):
     # The exozodi stays with the sky position it was rendered at.
     np.testing.assert_allclose(rolled.exozodi, column, rtol=1e-12)
     np.testing.assert_allclose(rolled.planet, rates.planet, rtol=1e-14)
+
+
+@vv.case("aperture-photon-budget", "code-verification")
+def test_local_zodi_follows_the_read_time(sloped):
+    """Fails if a read keeps the build-time sightline or rescales another term.
+
+    A target on the ecliptic is opposite the Sun at day 0, when the record is
+    built, and 46 degrees from it at day 137, when the record is read and the
+    Leinert radiance is several times higher. The independent reference is
+    the image path: the aperture sum of the local-zodi images rendered at day
+    137, which multiplies each pixel by the radiance before the sum where the
+    read multiplies after it. A record rebuilt at day 137 and the radiance
+    ratio of the two sightlines pin the contract: one record serves any time.
+    Basis: floating-point. Against the image sum the difference is the
+    rounding of the aperture sum, measured 4e-15 relative and held to 1e-12.
+    The rebuilt record holds the same uniform-sky table, so its read must be
+    bit-identical in every term.
+    """
+    scene, instrument, _, calibration, _ = sloped
+    scene = with_zodi(scene, LeinertZodi())
+    scene = eqx.tree_at(lambda s: s.star.dec_deg, scene, 23.0)
+    exposures = [
+        cp.build_exposure(scene, instrument, _BANDS, time_d=t) for t in (0.0, 137.0)
+    ]
+    built, rebuilt = (
+        cp.aperture_record(scene, instrument, exposure, calibration)
+        for exposure in exposures
+    )
+    pitch = float(instrument.detector.pixel_scale_arcsec)
+    x, y = 3.0 * pitch, -2.5 * pitch
+    east, north = SkyOrientation(0.0).detector_to_sky(x, y)
+
+    def read(record, time_d):
+        return cp.aperture_rates(
+            record,
+            jnp.hypot(east, north),
+            1e-10,
+            position_angle_deg=jnp.rad2deg(jnp.arctan2(east, north)),
+            time_d=time_d,
+        )
+
+    late, reference = read(built, 137.0), read(rebuilt, 137.0)
+    photons = cp.photon_rates(scene, instrument, exposures[1])
+    weights = _image_weights(instrument, x, y)
+    for moment, expected, power in (
+        (late, reference, 1),
+        (late.variance, reference.variance, 2),
+    ):
+        assert np.all(moment.local_zodi > 0)
+        np.testing.assert_allclose(
+            moment.local_zodi,
+            jnp.einsum("wqyx,yx->wq", photons.local_zodi, weights**power),
+            rtol=1e-12,
+        )
+        for name in ("planet", "star_leakage", "local_zodi", "exozodi", "n_pix"):
+            np.testing.assert_array_equal(
+                getattr(moment, name), getattr(expected, name)
+            )
+    # The time is seen, and by exactly the radiance ratio of the sightlines.
+    nodes = exposures[0].quadrature.nodes_nm
+    radiance = [
+        scene.zodi.photon_radiance(
+            nodes,
+            **dict(
+                zip(
+                    ("ecliptic_latitude_deg", "solar_longitude_deg"),
+                    sightline(scene, t),
+                    strict=True,
+                )
+            ),
+        )
+        for t in (0.0, 137.0)
+    ]
+    early = read(built, 0.0)
+    assert np.all(abs(radiance[1] / radiance[0] - 1) > 0.5)
+    np.testing.assert_allclose(
+        late.local_zodi / early.local_zodi, radiance[1] / radiance[0], rtol=1e-13
+    )
+    # One record serves a batch of times under one compiled program.
+    batched = jax.jit(jax.vmap(lambda t: read(built, t).local_zodi))(
+        jnp.array([0.0, 137.0])
+    )
+    np.testing.assert_allclose(
+        batched, jnp.stack([early.local_zodi, late.local_zodi]), rtol=1e-13
+    )
 
 
 @vv.case("aperture-photon-budget", "code-verification")
@@ -262,7 +365,7 @@ def test_read_under_jax_transformations(sloped):
 
     def read(separation, angle, contrast):
         rates = cp.aperture_rates(
-            record, separation, contrast, position_angle_deg=angle
+            record, separation, contrast, position_angle_deg=angle, time_d=0.0
         )
         return cp.snr(rates, detector, 3600.0, frame_time_s=100.0)[0]
 
@@ -298,17 +401,23 @@ def test_reads_outside_the_tables_and_unsupported_builds(sloped):
     scene, instrument, exposure, calibration, record = sloped
     detector = instrument.detector
     last = float(calibration.separation_step_arcsec) * 8
-    inside = cp.aperture_rates(record, 0.5 * last, 1e-10, position_angle_deg=0.0)
+    inside = cp.aperture_rates(
+        record, 0.5 * last, 1e-10, position_angle_deg=0.0, time_d=0.0
+    )
     assert np.all(np.isfinite(inside.planet)) and np.all(np.isfinite(inside.n_pix))
     for separation in (1.01 * last, -0.001, np.nan):
-        outside = cp.aperture_rates(record, separation, 1e-10, position_angle_deg=0.0)
+        outside = cp.aperture_rates(
+            record, separation, 1e-10, position_angle_deg=0.0, time_d=0.0
+        )
         assert np.all(np.isnan(outside.planet))
         assert np.isnan(cp.snr(outside, detector, 3600.0, frame_time_s=100.0)).all()
         solved = cp.exposure_time(5.0, outside, detector, frame_time_s=100.0)
         assert not solved.valid.any() and float(solved.time_s[0]) == 0.0
     # The aperture leaves the detector before the pixel centre does.
     half = 24 * float(detector.pixel_scale_arcsec)
-    edge = cp.aperture_rates(record, half * 0.99, 1e-10, position_angle_deg=90.0)
+    edge = cp.aperture_rates(
+        record, half * 0.99, 1e-10, position_angle_deg=90.0, time_d=0.0
+    )
     assert np.all(np.isnan(edge.star_leakage)) and np.all(np.isnan(edge.n_pix))
 
     for rule in (HalfMaximum(), Circular(0.7, centre="peak")):
@@ -356,6 +465,7 @@ def test_variance_matches_weighted_pixel_draws(sloped):
         jnp.hypot(east, north),
         1e-7,
         position_angle_deg=jnp.rad2deg(jnp.arctan2(east, north)),
+        time_d=0.0,
     )
     plan = FramePlan(50.0, 4)
     mean, variance = detector.mean_and_variance(detector.electrons(rates), plan)

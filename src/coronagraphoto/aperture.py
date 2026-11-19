@@ -8,8 +8,9 @@ Three steps, each paid at its own cadence:
 - :func:`aperture_record`, once per target and exposure, renders the
   background images of :func:`coronagraphoto.photon_rates` and sums them in
   the aperture at every position of a half-pixel lattice.
-- :func:`aperture_rates`, once per planet, interpolates both tables. It is a
-  few gathers, so it can sit under ``jax.vmap`` over millions of planets.
+- :func:`aperture_rates`, once per planet and observation time, interpolates
+  both tables and scales the local zodi to the sightline of that time. It is
+  a few gathers, so it can sit under ``jax.vmap`` over millions of planets.
 
 Every number comes from the same coronagraph products as the images, so an
 aperture sum of :func:`coronagraphoto.expected` images and a read of the
@@ -27,6 +28,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.epoch import Epoch
 from jax.typing import ArrayLike
 from jaxtyping import Array
 from optixstuff import Exposure, Instrument, Rates
@@ -34,9 +36,11 @@ from optixstuff.apertures import DEFAULT_APERTURE_RULE, Circular
 from optixstuff.coronagraph import AbstractImagingCoronagraph, MultiBandCoronagraph
 from optixstuff.grids import Image, Measure, PixelGrid, SkyOrientation
 from optixstuff.spectral import Quadrature
+from orbix.observatory import ecliptic_pointing
 from skyscapes import Scene
+from zodi.jax import AbstractLocalZodi
 
-from coronagraphoto.simulation import _run
+from coronagraphoto.simulation import _run, _star_sky_position
 
 _BACKGROUNDS = ("star_leakage", "local_zodi", "exozodi")
 # Successive rings start a golden-ratio fraction of the angular step apart, so
@@ -81,6 +85,11 @@ class ApertureRecord(eqx.Module):
     yield is applied by the consumer, so one record serves any detector noise
     setting. Read it with :func:`aperture_rates`.
 
+    The local zodi is the instrument's response to a uniform sky times a
+    radiance that depends on the sightline, which moves with the Sun. The
+    record holds the response and what the radiance is computed from, so one
+    record serves any observation time.
+
     Attributes:
         quadrature: The exposure's wavelength nodes and weights.
         roll_deg: Roll the backgrounds were rendered at.
@@ -90,12 +99,18 @@ class ApertureRecord(eqx.Module):
             (2, W, Q, K).
         background: Star leakage, local zodi and exozodi summed in an aperture
             centred on each lattice position, shape (3, 2, W, Q, 2 ny, 2 nx):
-            source, then moment.
+            source, then moment. The local zodi is per unit sky radiance:
+            the rate for a uniform sky of 1 photon/s/m^2/nm/sr.
             Lattice index (2 i + a, 2 j + b) is detector pixel position
             (i + a / 2, j + b / 2). NaN where the aperture leaves the
             detector.
         n_pix: Sum of the aperture weights at each lattice position, shape
             (2, W, 2 ny, 2 nx).
+        zodi: The scene's local-zodi model, or None for no local zodi.
+        ra_deg: Right ascension of the star when the record was built, or
+            None without a local zodi.
+        dec_deg: Declination of the star, likewise.
+        epoch: Day zero of the read's ``time_d``: the scene epoch.
     """
 
     quadrature: Quadrature
@@ -105,6 +120,24 @@ class ApertureRecord(eqx.Module):
     planet: Array
     background: Array
     n_pix: Array
+    zodi: AbstractLocalZodi | None
+    ra_deg: Array | None
+    dec_deg: Array | None
+    epoch: Epoch = eqx.field(static=True)
+
+
+class _UnitSky(AbstractLocalZodi):
+    """A sky of 1 photon/s/m^2/nm/sr at every wavelength and sightline."""
+
+    def spectral_breaks_nm(self):
+        """No breaks: the radiance is constant."""
+        return np.empty(0)
+
+    def photon_radiance(
+        self, wavelength_nm, *, ecliptic_latitude_deg, solar_longitude_deg
+    ):
+        """One, in the shape of the wavelengths."""
+        return jnp.ones_like(wavelength_nm)
 
 
 def _weights(rule, frame, shape, radius_pix, dx_pix, dy_pix):
@@ -260,13 +293,17 @@ def aperture_record(
 ) -> ApertureRecord:
     """Tabulate one target's aperture rates for one exposure.
 
-    The star leakage (with the instrument's speckle field, if any), the local
-    zodi of ``scene.zodi`` and the scene's disk are rendered once by the image
+    The star leakage (with the instrument's speckle field, if any), a uniform
+    sky of unit radiance and the scene's disk are rendered once by the image
     path at ``exposure.time_d`` and ``exposure.roll_deg``, without planets,
     then summed in the calibration's aperture at every half-pixel position.
-    The planet table is the calibration's throughput times the star's photon
-    flux density and the collecting area and optical throughput, so a planet
-    enters the read only as a separation, a position angle and a contrast.
+    The record keeps ``scene.zodi``, the star's sky position and the scene
+    epoch, from which :func:`aperture_rates` computes the local-zodi radiance
+    at the time of each read; nothing of the local zodi is fixed at
+    ``exposure.time_d``. The planet table is the calibration's throughput
+    times the star's photon flux density and the collecting area and optical
+    throughput, so a planet enters the read only as a separation, a position
+    angle and a contrast.
 
     ``calibration`` must have been built for this instrument and for
     ``exposure.quadrature``.
@@ -279,6 +316,10 @@ def aperture_record(
         and not np.array_equal(np.asarray(nodes), np.asarray(built))
     ):
         raise ValueError("the calibration was built for other wavelength nodes")
+    zodi, sky_position = scene.zodi, (None, None)
+    if zodi is not None:
+        sky_position = tuple(jnp.asarray(angle) for angle in _star_sky_position(scene))
+        scene = eqx.tree_at(lambda s: s.zodi, scene, _UnitSky())
     components = _run(scene, instrument, exposure, "photons", planets=False)
     maps = jnp.stack([components[name] for name in _BACKGROUNDS], axis=1)
     n_bands, n_nodes = nodes.shape
@@ -309,6 +350,9 @@ def aperture_record(
         star[None, :, :, None] * calibration.throughput,
         jnp.moveaxis(background, 2, 0),
         n_pix,
+        zodi,
+        *sky_position,
+        scene.epoch,
     )
 
 
@@ -340,6 +384,7 @@ def aperture_rates(
     contrast: ArrayLike,
     *,
     position_angle_deg: ArrayLike,
+    time_d: ArrayLike,
     roll_deg: ArrayLike | None = None,
 ) -> Rates:
     """Read one planet's aperture rates, in photons/s/nm, from a record.
@@ -348,6 +393,15 @@ def aperture_rates(
     ``position_angle_deg``, north through east, with planet-to-star
     ``contrast``: a scalar, or shape (W, Q) for one value per wavelength node.
     The aperture is centred on the planet.
+
+    ``time_d`` is the observation time in days from the record's epoch. It
+    sets the local zodi: the star's ecliptic latitude and longitude from the
+    Sun at that time give the record's zodi model its sightline, and the
+    radiance at each wavelength node scales the record's uniform-sky table.
+    It has no default, because the time a record was built at is not the time
+    of a later read and the zodi would silently be that of the wrong season.
+    The star's flux, the disk and any speckle realization stay those of the
+    exposure the record was built from.
 
     ``roll_deg`` is the position angle of detector +y for this read and
     defaults to the record's roll. Star leakage, local zodi and the pixel
@@ -363,7 +417,9 @@ def aperture_rates(
     positions. Everything is NaN where the aperture leaves the detector or the
     separation leaves the planet table. Thermal and companion terms are zero.
 
-    All arguments are scalars apart from ``contrast``. Batch with ``jax.vmap``.
+    All arguments are scalars apart from ``contrast``. Batch with
+    ``jax.vmap``; a ``time_d`` shared by a batch of planets (``in_axes`` None,
+    or closed over) costs one radiance evaluation for the whole batch.
     """
     separation = jnp.asarray(separation_arcsec)
     angle = jnp.deg2rad(position_angle_deg)
@@ -383,6 +439,15 @@ def aperture_rates(
     )
     if roll_deg is not None:
         exozodi = _bilinear(record.background[2], *lattice_index(record.roll_deg))
+    if record.zodi is not None:
+        latitude_deg, longitude_deg = ecliptic_pointing(
+            record.ra_deg, record.dec_deg, record.epoch, time_d
+        )
+        local_zodi = local_zodi * record.zodi.photon_radiance(
+            record.quadrature.nodes_nm,
+            ecliptic_latitude_deg=latitude_deg,
+            solar_longitude_deg=longitude_deg,
+        )
     planet = contrast * _linear(
         record.planet, separation / record.separation_step_arcsec
     )

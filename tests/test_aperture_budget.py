@@ -11,24 +11,33 @@ from conftest import make_path, make_system, with_zodi, write_yip
 from optixstuff import Detector
 from optixstuff.spectral import Band
 from yippy import open_yip
-from zodi.jax import PrecomputedZodi
+from zodi.jax import LeinertZodi
 
 import coronagraphoto as cp
 
 
 @pytest.mark.medium(
-    reason="YIP load, one calibration and 60 timed batches of 40000 reads"
+    reason="YIP load, one calibration and 180 timed batches of 40000 reads"
 )
 def test_record_meets_the_planner_budget(tmp_path):
     """Fails if a read, a per-target build or one exposure outgrows its budget.
 
-    A yield planner reads the record once per drawn planet per decision, so
-    the read sets its speed. Budget and measured cost on a 96 by 96 pixel
-    detector, two bands of four nodes, one Apple M-series core:
+    A yield planner builds the record once per target and reads it once per
+    drawn planet per decision, each decision at its own time, so the read
+    with its time sets the speed. The local zodi is the pointing-dependent
+    Leinert model, whose radiance the read evaluates at the eight nodes.
+    Budget and measured cost on a 96 by 96 pixel detector, two bands of four
+    nodes, one Apple M-series core:
 
-    - Read under ``jit(vmap(vmap(...)))`` over 4000 draws of 10 planets, each
-      returning S/N at 10 h and the time to S/N 7 in both bands: budget about
-      1 microsecond per draw-planet, measured 0.22. Fails above 5.
+    - Read under ``jit(vmap(vmap(...)))`` over 4000 draws of 10 planets at
+      one shared time, each returning S/N at 10 h and the time to S/N 7 in
+      both bands: budget about 1 microsecond per draw-planet, measured
+      0.26. Fails above 5.
+    - The same 40000 reads as 16 times of 250 draws of 10 planets, the time
+      batched on the outer axis: measured 0.25 per draw-planet. Fails
+      above 5.
+    - The same 40000 reads with a different time on every read, so every
+      read pays its own radiance: measured 0.24. Fails above 5.
     - Per-target build, ``aperture_record`` after compilation: budget 10 s,
       measured 0.08 to 0.10 s (0.3 to 1.3 s on the first call, with
       compilation). Fails above 10 s.
@@ -53,8 +62,7 @@ def test_record_meets_the_planner_budget(tmp_path):
         read_noise_e_rms=0.2,
     )
     instrument = eqx.tree_at(lambda p: p.detector, base, detector)
-    zodi = PrecomputedZodi(jnp.array([500.0, 600.0]), jnp.full(2, 1e12))
-    scene = with_zodi(make_system(separation_arcsec=2.3 * scale), zodi)
+    scene = with_zodi(make_system(separation_arcsec=2.3 * scale), LeinertZodi())
     bands = (Band(500.0, 550.0), Band(550.0, 600.0))
     exposure = cp.build_exposure(scene, instrument, bands, time_d=0.0)
 
@@ -75,9 +83,9 @@ def test_record_meets_the_planner_budget(tmp_path):
 
     pp = cp.PostProcessing(1e-4, 0.01)
 
-    def read(separation, angle, contrast):
+    def read(separation, angle, contrast, time_d):
         rates = cp.aperture_rates(
-            record, separation, contrast, position_angle_deg=angle
+            record, separation, contrast, position_angle_deg=angle, time_d=time_d
         )
         kwargs = dict(frame_time_s=100.0, post_processing=pp)
         return (
@@ -100,17 +108,40 @@ def test_record_meets_the_planner_budget(tmp_path):
     separations = jnp.asarray(rng.uniform(0.05 * last, 0.95 * last, shape))
     angles = jnp.asarray(rng.uniform(0.0, 360.0, shape))
     contrasts = jnp.asarray(10 ** rng.uniform(-10.5, -9.0, shape))
-    batched = jax.jit(jax.vmap(jax.vmap(read)))
-    batch_s = timed(batched, separations, angles, contrasts, repeats=60)
-    read_us = 1e6 * batch_s / separations.size
-    exposure_s = timed(jax.jit(read), 0.05, 30.0, 1e-10, repeats=20)
+    planets = (separations, angles, contrasts)
+    shared = (0, 0, 0, None)
+    batched = jax.jit(jax.vmap(jax.vmap(read, shared), shared))
+    read_us = 1e6 * timed(batched, *planets, 200.0, repeats=60) / separations.size
+    # A decision per time: 16 times of 250 draws of 10 planets.
+    by_time = jax.jit(jax.vmap(jax.vmap(jax.vmap(read, shared), shared)))
+    decisions = tuple(x.reshape(16, 250, 10) for x in planets)
+    times = jnp.asarray(rng.uniform(0.0, 3650.0, 16))
+    times_us = 1e6 * timed(by_time, *decisions, times, repeats=60) / separations.size
+    # The worst case: no two reads share a time.
+    each = jax.jit(jax.vmap(jax.vmap(read)))
+    every = jnp.asarray(rng.uniform(0.0, 3650.0, shape))
+    each_us = 1e6 * timed(each, *planets, every, repeats=60) / separations.size
+    exposure_s = timed(jax.jit(read), 0.05, 30.0, 1e-10, 200.0, repeats=20)
     print(
-        f"aperture budget: read {read_us:.3f} us per draw-planet, "
-        f"build {build_s:.3f} s (first {first_build_s:.2f} s), "
+        f"aperture budget: read {read_us:.3f} us per draw-planet at one time, "
+        f"{times_us:.3f} us with 16 times batched, {each_us:.3f} us with a time "
+        f"per read, build {build_s:.3f} s (first {first_build_s:.2f} s), "
         f"one exposure {exposure_s:.2e} s, calibration {calibration_s:.1f} s"
     )
-    # The timed reads are real: every draw lies inside the tables.
-    assert np.all(np.isfinite(batched(separations, angles, contrasts)[0]))
+    # The timed reads are real: every draw lies inside the tables, and the
+    # local zodi they scale is neither absent nor the same at every time.
+    assert np.all(np.isfinite(batched(*planets, 200.0)[0]))
+    assert np.all(np.isfinite(each(*planets, every)[0]))
+    zodi = jax.vmap(
+        lambda t: (
+            cp.aperture_rates(
+                record, 0.05, 1e-10, position_angle_deg=30.0, time_d=t
+            ).local_zodi
+        )
+    )(times)
+    assert np.all(zodi > 0) and float(zodi.max() / zodi.min()) > 1.5
     assert read_us < 5.0
+    assert times_us < 5.0
+    assert each_us < 5.0
     assert build_s < 10.0
     assert exposure_s < 0.1

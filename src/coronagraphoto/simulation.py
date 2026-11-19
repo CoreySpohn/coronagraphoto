@@ -37,6 +37,14 @@ def _detector_grid(instrument, orientation):
     return replace(instrument.detector.grid, orientation=orientation)
 
 
+def _star_sky_position(scene):
+    """Right ascension and declination of the scene's star, in degrees (J2000).
+
+    The one place this package reads where the target is on the sky.
+    """
+    return scene.star.ra_deg, scene.star.dec_deg
+
+
 def _node_rates(
     wavelength_nm,
     coro,
@@ -184,7 +192,7 @@ def _node_function(models, scene, instrument, exposure, grid, planets):
     time_d = jnp.asarray(exposure.time_d)
     # The local-zodi sightline is the target's, at the observation time.
     sightline = (
-        ecliptic_pointing(system.star.ra_deg, system.star.dec_deg, system.epoch, time_d)
+        ecliptic_pointing(*_star_sky_position(system), system.epoch, time_d)
         if zodi is not None
         else (None, None)
     )
