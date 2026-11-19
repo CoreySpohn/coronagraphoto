@@ -46,8 +46,8 @@ the epoch, roll, wavelength quadrature and frame plan. The image reader takes
 
 | Function | Output | Units |
 |---|---|---|
-| `photon_rates` | `PhotonRates`, each field `(W, Q, ny, nx)` | photons/s/nm/pixel |
-| `expected` | `ElectronRates`, each field `(W, ny, nx)` | electrons/s/pixel |
+| `photon_rates` | photon `Rates`, each field `(W, Q, ny, nx)` | photons/s/nm/pixel |
+| `expected` | electron `Rates`, each field `(W, ny, nx)` | electrons/s/pixel |
 | `observe` | `Image`, data `(W, ny, nx)` | electrons/pixel |
 
 The fields are `planet`, `star_leakage`, `local_zodi`, `exozodi`, `thermal`

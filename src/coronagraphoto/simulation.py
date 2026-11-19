@@ -18,13 +18,13 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from optixstuff import ElectronRates, Exposure, FramePlan, Instrument, PhotonRates
+from optixstuff import Exposure, FramePlan, Instrument, Rates
 from optixstuff.coronagraph import (
     AbstractImagingCoronagraph,
     AbstractSceneCoronagraph,
     MultiBandCoronagraph,
 )
-from optixstuff.grids import Image, Measure, PixelGrid, SkyOrientation, resample
+from optixstuff.grids import Image, Measure, SkyOrientation, resample
 from optixstuff.spectral import Band, Quadrature
 from skyscapes import Scene
 
@@ -33,12 +33,7 @@ def _detector_grid(instrument, orientation):
     """Construct the one sky grid shared by planets, disks and observations."""
     if orientation is not None and orientation.parity != -1:
         raise ValueError("detector pointing must have parity=-1")
-    return PixelGrid.regular(
-        instrument.detector.shape,
-        instrument.detector.pixel_scale_arcsec,
-        "arcsec",
-        orientation=orientation,
-    )
+    return replace(instrument.detector.grid, orientation=orientation)
 
 
 def _node_rates(
@@ -239,16 +234,14 @@ def _render(scene, instrument, exposure, *, kind, band_ids):
     # image are live.
     def render_band(i):
         row = quadrature.band(i)
-        initial = {
-            name: jnp.zeros(grid.shape) for name in ElectronRates.component_names()
-        }
+        initial = {name: jnp.zeros(grid.shape) for name in Rates.component_names()}
 
         def step(total, node_and_weight):
             w, weight = node_and_weight
             components = node(w)
             single = Quadrature(row.bands, w[None, None], weight[None, None])
-            photons = PhotonRates(
-                single, **jax.tree.map(lambda x: x[None, None], components)
+            photons = Rates(
+                single, "photon", **jax.tree.map(lambda x: x[None, None], components)
             )
             electrons = instrument.detector.electrons(photons)
             return {
@@ -259,8 +252,8 @@ def _render(scene, instrument, exposure, *, kind, band_ids):
         return jax.lax.scan(step, initial, xs)[0]
 
     rows = [render_band(i) for i in range(len(quadrature.bands))]
-    return ElectronRates(
-        quadrature.bands, **jax.tree.map(lambda *x: jnp.stack(x), *rows)
+    return Rates(
+        quadrature.bands, "electron", **jax.tree.map(lambda *x: jnp.stack(x), *rows)
     )
 
 
@@ -310,7 +303,7 @@ def build_exposure(
     )
 
 
-def photon_rates(scene: Scene, instrument: Instrument, exposure: Exposure):
+def photon_rates(scene: Scene, instrument: Instrument, exposure: Exposure) -> Rates:
     """Return full (W,Q,ny,nx) photon integrands, in photons/s/nm/pixel.
 
     One entry per source term and wavelength node of ``exposure.quadrature``.
@@ -320,10 +313,10 @@ def photon_rates(scene: Scene, instrument: Instrument, exposure: Exposure):
     none). Thermal and companion terms are zero.
     """
     components = _run(scene, instrument, exposure, "photons")
-    return PhotonRates(exposure.quadrature, **components)
+    return Rates(exposure.quadrature, "photon", **components)
 
 
-def expected(scene: Scene, instrument: Instrument, exposure: Exposure) -> ElectronRates:
+def expected(scene: Scene, instrument: Instrument, exposure: Exposure) -> Rates:
     """Stream nodes into (W,ny,nx) electrons/s with detector-owned yield.
 
     These are the expected rates for the instantaneous scene at

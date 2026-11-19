@@ -26,7 +26,7 @@ prepared YIP with `with_scene_operator()`. An unsupported illuminated position
 produces NaN in the corresponding planet or disk rate image. Zero-flux planets
 and dark scene pixels require no response.
 
-Photon quantities come directly from the scene. `PhotonRates` retains those
+Photon quantities come directly from the scene. Photon `Rates` retains those
 four terms and zero thermal/companion fields. `expected` sends each
 photon record carrying that node's wavelength and integration weight to `detector.electrons`.
 `observe` calls `detector.draw` after all electron terms have been accumulated.

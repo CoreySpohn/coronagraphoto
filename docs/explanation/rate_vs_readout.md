@@ -6,11 +6,11 @@ optional frame plan, and the ecliptic latitude and solar longitude of the
 local-zodi line of sight (defaults 0 and 135 deg; a known limitation, not
 derived from the target or the epoch).
 
-`photon_rates(scene, instrument, exposure)` returns `PhotonRates`. Each source field holds photons/s/nm/pixel with shape
+`photon_rates(scene, instrument, exposure)` returns photon `Rates`. Each source field holds photons/s/nm/pixel with shape
 `(W,Q,ny,nx)`. Call `rates.integrate()` for band-integrated photons/s/pixel
 on the bands carried by the rule.
 
-`expected(scene, instrument, exposure)` returns `ElectronRates`
+`expected(scene, instrument, exposure)` returns electron `Rates`
 in electrons/s/pixel, shape `(W,ny,nx)`. It applies the detector's yield at
 each wavelength node before accumulation. For small images its result equals
 `instrument.detector.electrons(photon_rates(...))`; the streaming

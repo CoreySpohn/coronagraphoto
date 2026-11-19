@@ -13,9 +13,9 @@ from conftest import make_path, make_system, with_zodi, write_yip
 from hwoutils.constants import arcsec2rad
 from optixstuff import (
     Detector,
-    ElectronRates,
     Exposure,
     FramePlan,
+    Rates,
     prepare_aperture,
 )
 from optixstuff.apertures import Circular
@@ -97,7 +97,7 @@ def closure(tmp_path_factory):
         planet_index=0,
         zodi=zodi,
     )
-    calculator = base.detector.electrons(rates.mean)
+    calculator = base.detector.electrons(rates)
     expected = np.stack([np.asarray(getattr(calculator, name)) for name in TERMS])
     east, north = system.positions(jnp.array([time_d]))[:2, 0, 0]
     x, y = pointing.sky_to_detector(east, north)
@@ -141,14 +141,14 @@ def closure(tmp_path_factory):
         calc_ladder.append(
             np.asarray(
                 base.detector.electrons(
-                    replace(rates.mean, planet=jnp.stack(node_rates))
+                    eqx.tree_at(lambda r: r.planet, rates, jnp.stack(node_rates))
                 ).planet
             )
         )
     calc_ladder = np.asarray(calc_ladder)
     analytic = np.asarray(
         base.detector.electrons(
-            replace(rates.mean, planet=jnp.stack(analytic_nodes))
+            eqx.tree_at(lambda r: r.planet, rates, jnp.stack(analytic_nodes))
         ).planet
     )
     calc_limit, calc_order, calc_uncertainty = _richardson(calc_ladder)
@@ -197,8 +197,10 @@ def closure(tmp_path_factory):
         radiance = np.asarray(system.photon_radiance(q.nodes_nm, time_d, grid=sky).data)
         average = np.sum(radiance * np.asarray(weights)[:, None], axis=(-2, -1))
         average /= np.asarray(weights.sum(axis=(-2, -1)))[:, None]
-        disk_difference = replace(
-            rates.mean, exozodi=rates.mean.exozodi * jnp.asarray(average / centre - 1)
+        disk_difference = eqx.tree_at(
+            lambda r: r.exozodi,
+            rates,
+            rates.exozodi * jnp.asarray(average / centre - 1),
         )
         bounds.append(np.asarray(detector.electrons(disk_difference).exozodi))
         # Model-form difference b includes native deposition and PSF redistribution.
@@ -222,7 +224,7 @@ def closure(tmp_path_factory):
                 )
             raw_nodes.append(jnp.stack(raw_row))
         raw = detector.electrons(
-            replace(rates.mean, exozodi=jnp.stack(raw_nodes))
+            eqx.tree_at(lambda r: r.exozodi, rates, jnp.stack(raw_nodes))
         ).exozodi
         redistribution.append(np.asarray(sums.exozodi - raw))
         if n == 48:
@@ -238,13 +240,16 @@ def closure(tmp_path_factory):
             doubled_images = expected_images(with_zodi(doubled, zodi), path, exposure)
             dust_ratios = np.stack(
                 (
-                    detector.electrons(doubled_rates.mean).exozodi / calculator.exozodi,
+                    detector.electrons(doubled_rates).exozodi / calculator.exozodi,
                     jnp.sum(doubled_images.exozodi * weights, axis=(-2, -1))
                     / sums.exozodi,
                 )
             )
         n_pix = weights.sum(axis=(-2, -1))
-        _, variance = detector.mean_and_variance(sums, plan, n_pix=n_pix)
+        _, variance = detector.mean_and_variance(
+            eqx.tree_at(lambda r: r.n_pix, sums, n_pix, is_leaf=lambda x: x is None),
+            plan,
+        )
         variance += (
             pp.speckle_residual_fraction * sums.star_leakage * plan.live_time_s
         ) ** 2
@@ -252,7 +257,9 @@ def closure(tmp_path_factory):
             pp.exozodi_residual_fraction * sums.exozodi * plan.live_time_s
         ) ** 2
         image_snr = sums.planet * plan.live_time_s / jnp.sqrt(variance)
-        detector_rates = replace(rates, n_pix=n_pix, n_pix_variance=n_pix)
+        detector_rates = eqx.tree_at(
+            lambda r: (r.n_pix, r.variance.n_pix), rates, (n_pix, n_pix)
+        )
         calc_snr = je.snr(detector_rates, detector, plan, post_processing=pp)
         snrs.append(np.stack((calc_snr, image_snr)))
         snr_bounds.append((detector, n_pix))
@@ -288,10 +295,15 @@ def closure(tmp_path_factory):
                     + sign * all_tolerances[index, term_index],
                     0,
                 )
-            interval = ElectronRates(
-                bands, **values, thermal=jnp.zeros(2), stellar_companions=jnp.zeros(2)
+            interval = Rates(
+                bands,
+                "electron",
+                **values,
+                thermal=jnp.zeros(2),
+                stellar_companions=jnp.zeros(2),
+                n_pix=n_pix,
             )
-            _, variance = detector.mean_and_variance(interval, plan, n_pix=n_pix)
+            _, variance = detector.mean_and_variance(interval, plan)
             variance += (
                 pp.speckle_residual_fraction * interval.star_leakage * plan.live_time_s
             ) ** 2
