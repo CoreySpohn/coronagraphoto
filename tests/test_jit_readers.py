@@ -52,9 +52,14 @@ def test_exposure_argument_matches_closure():
     closure = eqx.filter_jit(lambda s, k, t: read(s, path, k, t))(system, key, time_d)
     exposure = Exposure(time_d=time_d, roll_deg=17, quadrature=quadrature, plan=plan)
     whole = eqx.filter_jit(lambda e: observe(key, system, path, e))(exposure)
+    # XLA may fuse the closed-over constants differently; agree to a few ULP.
     for other in (closure, whole):
         for a, b in zip(jax.tree.leaves(argument), jax.tree.leaves(other), strict=True):
-            assert np.asarray(a).tobytes() == np.asarray(b).tobytes()
+            a, b = np.asarray(a), np.asarray(b)
+            if np.issubdtype(a.dtype, np.inexact):
+                np.testing.assert_array_max_ulp(a, b, maxulp=4)
+            else:
+                np.testing.assert_array_equal(a, b)
     eager = observe(key, system, path, exposure)
     assert eager.grid.orientation.pa_y_deg == 17.0
     assert whole.grid.orientation is None
