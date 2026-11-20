@@ -25,7 +25,6 @@ dependencies = [
   "orbix>=5.0.0",
   "yippy>=3.0.0",
   "skyscapes>=5.1.0",
-  "zodi[jax]>=2.0.0",
 ]
 [project.optional-dependencies]
 dev = ["pre-commit>=3.5.0"]
@@ -36,6 +35,7 @@ docs = [
   "sphinx-autoapi>=3.0.0",
   "sphinxcontrib-mermaid>=0.9.2",
   "ipython>=8.18.1",
+  "zodi[jax]>=2.0.0",
 ]
 test = [
   "ineedvalidation>=1.1.0",
@@ -50,6 +50,7 @@ test = [
   "pytest-fail-slow>=0.1.0",
   "lod_unit>=1.8.0",
   "packaging>=23.1",
+  "zodi[jax]>=2.0.0",
 ]
 
 [project.urls]

@@ -22,7 +22,6 @@ the canary uses the same overrides as CI.
 | Runtime | orbix | 5.0.0 |
 | Runtime | yippy | 3.0.0 |
 | Runtime | skyscapes | 5.1.0 |
-| Runtime | zodi[jax] | 2.0.0 |
 | Dev | pre-commit | 3.5.0 |
 | Docs | sphinx | 7.2.6 |
 | Docs | myst-nb | 1.0.0 |
@@ -30,6 +29,7 @@ the canary uses the same overrides as CI.
 | Docs | sphinx-autoapi | 3.0.0 |
 | Docs | sphinxcontrib-mermaid | 0.9.2 |
 | Docs | ipython | 8.18.1 |
+| Docs | zodi[jax] | 2.0.0 |
 | Test | pytest | 7.3.2 |
 | Test | hypothesis | 6.79.1 |
 | Test | pytest-xdist | 2.5 |
@@ -39,6 +39,7 @@ the canary uses the same overrides as CI.
 | Test | pytest-fail-slow | 0.1.0 |
 | Test | lod_unit | 1.8.0 |
 | Test | packaging | 23.1 |
+| Test | zodi[jax] | 2.0.0 |
 
 The NumPy and pytest-markdown-docs bounds match the lowest versions selected
 by the all-extras resolution (2.1.2 and 0.5.0). The other non-sibling direct
