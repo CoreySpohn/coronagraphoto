@@ -10,10 +10,10 @@ from optixstuff import Detector, FramePlan
 from optixstuff.apertures import Circular
 from optixstuff.grids import Image, Measure, SkyOrientation
 from optixstuff.spectral import Band
+from skyscapes import PrecomputedZodi
 from skyscapes.disk import GraterDisk
 from yippy import open_yip
 from zodi import SurfaceBrightnessDust
-from zodi.jax import PrecomputedZodi
 
 import coronagraphoto as cp
 
@@ -150,7 +150,12 @@ def closure(tmp_path_factory):
             [[getattr(r, t) for t in TERMS[1:]] for r in (rates, rates.variance)]
         )
         lattice_band = (
-            _bilinear_bound(record.background, row, column).swapaxes(0, 1) / value
+            _bilinear_bound(
+                jnp.stack([record.star_leakage, record.uniform_sky, record.exozodi]),
+                row,
+                column,
+            ).swapaxes(0, 1)
+            / value
         ).max(-1)
 
         def residual_sq(e, time):

@@ -16,9 +16,9 @@ from hwoutils.constants import arcsec2rad
 from optixstuff import Exposure
 from optixstuff.grids import PixelGrid, SkyOrientation, resample
 from optixstuff.spectral import Band, Quadrature
+from skyscapes import PrecomputedZodi
 from skyscapes.scene import BlackbodyStar, FlatStar
 from yippy import open_yip
-from zodi.jax import PrecomputedZodi
 
 from coronagraphoto import photon_rates
 

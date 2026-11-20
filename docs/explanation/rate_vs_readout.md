@@ -2,9 +2,9 @@
 
 `build_exposure(scene, instrument, bands, *, time_d, roll_deg=0.0, plan=None,
 order=4)` builds the `Exposure` record: observation time, roll, wavelength
-quadrature and optional frame plan. The local-zodi line of sight is not stored:
-the image path derives the ecliptic latitude and solar longitude from the star's
-RA and Dec, the scene epoch and `time_d` with `orbix.observatory.ecliptic_pointing`.
+quadrature and optional frame plan. The local-zodi radiance is not stored:
+the image path asks `scene.local_zodi` for its radiance at each node, given the
+scene's sky frame and `time_d`.
 
 `photon_rates(scene, instrument, exposure)` returns photon `Rates`. Each source field holds photons/s/nm/pixel with shape
 `(W,Q,ny,nx)`. Call `rates.integrate()` for band-integrated photons/s/pixel

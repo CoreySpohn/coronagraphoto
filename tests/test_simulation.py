@@ -192,7 +192,7 @@ def test_expected_integrates_declared_response_kink():
     from hwoutils.constants import arcsec2rad
     from optixstuff import Exposure, TransmissiveElement
     from optixstuff.spectral import Band, Quadrature, Transmission
-    from zodi.jax import PrecomputedZodi
+    from skyscapes import PrecomputedZodi
 
     import coronagraphoto as cp
 

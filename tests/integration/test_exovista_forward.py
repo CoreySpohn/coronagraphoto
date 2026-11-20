@@ -1,7 +1,7 @@
 """Synthetic FITS scene loading through photon imaging."""
 
 import numpy as np
-from conftest import make_path, sightline, write_scene
+from conftest import make_path, write_scene
 from hwoutils.constants import arcsec2rad
 from optixstuff import Exposure
 from optixstuff.grids import SkyOrientation
@@ -33,10 +33,7 @@ def test_exovista_native_disk_and_position_angle(tmp_path):
         scene, path, Exposure(time_d=0.0, roll_deg=30, quadrature=quadrature)
     )
     # Absolute incoming local-zodi normalization, on an interior pixel.
-    lat, lon = sightline(scene, 0.0)
-    lz = scene.local_zodi.photon_radiance(
-        550.0, ecliptic_latitude_deg=lat, helioecliptic_longitude_deg=lon
-    )
+    lz = scene.local_zodi.photon_radiance(550.0, scene.sky_frame, 0.0)
     expected_z = (
         40
         * 0.4

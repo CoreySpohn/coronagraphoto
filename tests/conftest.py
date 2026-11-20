@@ -75,6 +75,7 @@ def pixel_scale_arcsec():
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
+import zodi
 from hwoutils.constants import Mearth2kg, Msun2kg
 from hwoutils.epoch import Epoch
 from optixstuff import ConstantThroughput, Detector, Instrument, SimplePrimary
@@ -98,6 +99,25 @@ _RULE = Circular(0.7)
 def sightline(scene, time_d):
     """Ecliptic latitude and solar longitude of the scene at ``time_d``."""
     return ecliptic_pointing(scene.ra_deg, scene.dec_deg, scene.epoch, time_d)
+
+
+def leinert_radiance(scene, wavelength_nm, time_d):
+    """Leinert photon radiance of the scene's sightline, from zodi directly.
+
+    An oracle independent of ``LeinertZodi``: the sightline angles come from
+    ``ecliptic_pointing`` and the radiance from ``zodi.specific_intensity``.
+    """
+    latitude_deg, longitude_deg = sightline(scene, time_d)
+    return (
+        zodi.specific_intensity(
+            longitude_deg,
+            latitude_deg,
+            jnp.asarray(wavelength_nm),
+            photon_units=True,
+            anchor="table19",
+        )
+        / 1000.0
+    )
 
 
 def with_zodi(scene, zodi):

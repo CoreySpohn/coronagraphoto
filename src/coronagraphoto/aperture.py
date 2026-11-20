@@ -23,7 +23,6 @@ exact fractional pixel coverage ``w``; the second moment of each table uses
 """
 
 from dataclasses import replace
-from typing import ClassVar
 
 import equinox as eqx
 import jax
@@ -36,14 +35,11 @@ from optixstuff.apertures import DEFAULT_APERTURE_RULE, Circular
 from optixstuff.coronagraph import AbstractImagingCoronagraph, MultiBandCoronagraph
 from optixstuff.grids import Image, Measure, PixelGrid, SkyOrientation
 from optixstuff.spectral import Quadrature
-from orbix.observatory import ecliptic_pointing
 from orbix.system import SkyFrame
-from skyscapes import Scene
-from zodi.jax import AbstractLocalZodi
+from skyscapes import AbstractLocalZodi, Scene
 
-from coronagraphoto.simulation import _require_position, _run
+from coronagraphoto.simulation import _run
 
-_BACKGROUNDS = ("star_leakage", "local_zodi", "exozodi")
 # Successive rings start a golden-ratio fraction of the angular step apart, so
 # the rings together sample every pixel phase and no azimuth is favoured.
 _GOLDEN = (np.sqrt(5.0) - 1.0) / 2.0
@@ -96,15 +92,17 @@ class ApertureRecord(eqx.Module):
         roll_deg: Roll the backgrounds were rendered at.
         pixel_scale_arcsec: Detector pixel pitch; the lattice pitch is half.
         separation_step_arcsec: Spacing of the planet table's separation axis.
-        planet: Planet rate per unit planet-to-star contrast, shape
-            (2, W, Q, K).
-        background: Star leakage, local zodi and exozodi summed in an aperture
-            centred on each lattice position, shape (3, 2, W, Q, 2 ny, 2 nx):
-            source, then moment. The local zodi is per unit sky radiance:
-            the rate for a uniform sky of 1 photon/s/m^2/nm/sr.
-            Lattice index (2 i + a, 2 j + b) is detector pixel position
-            (i + a / 2, j + b / 2). NaN where the aperture leaves the
-            detector.
+        planet_per_contrast: Planet rate per unit planet-to-star contrast,
+            shape (2, W, Q, K).
+        star_leakage: Star leakage summed in an aperture centred on each
+            lattice position, shape (2, W, Q, 2 ny, 2 nx): moment, band,
+            node, then the lattice. Lattice index (2 i + a, 2 j + b) is
+            detector pixel position (i + a / 2, j + b / 2). NaN where the
+            aperture leaves the detector.
+        uniform_sky: The same sums for a uniform sky of 1 photon/s/m^2/nm/sr,
+            the local zodi per unit radiance; zero when the record has no
+            local zodi.
+        exozodi: The same sums for the scene's disk.
         n_pix: Sum of the aperture weights at each lattice position, shape
             (2, W, 2 ny, 2 nx).
         local_zodi: The scene's local-zodi model, or None for no local zodi.
@@ -121,28 +119,14 @@ class ApertureRecord(eqx.Module):
     roll_deg: Array
     pixel_scale_arcsec: Array
     separation_step_arcsec: Array
-    planet: Array
-    background: Array
+    planet_per_contrast: Array
+    star_leakage: Array
+    uniform_sky: Array
+    exozodi: Array
     n_pix: Array
     local_zodi: AbstractLocalZodi | None
     sky_frame: SkyFrame
     reads: tuple[str, ...] = eqx.field(static=True)
-
-
-class _UnitSky(AbstractLocalZodi):
-    """A sky of 1 photon/s/m^2/nm/sr at every wavelength and sightline."""
-
-    uses_pointing: ClassVar[bool] = False
-
-    def spectral_breaks_nm(self):
-        """No breaks: the radiance is constant."""
-        return np.empty(0)
-
-    def photon_radiance(
-        self, wavelength_nm, *, ecliptic_latitude_deg, helioecliptic_longitude_deg
-    ):
-        """One, in the shape of the wavelengths."""
-        return jnp.ones_like(wavelength_nm)
 
 
 def _weights(rule, frame, shape, radius_pix, dx_pix, dy_pix):
@@ -326,13 +310,13 @@ def aperture_record(
         and not np.array_equal(np.asarray(nodes), np.asarray(built))
     ):
         raise ValueError("the response was built for other wavelength nodes")
-    _require_position(scene)
-    local_zodi = scene.local_zodi
-    if local_zodi is not None:
-        scene = eqx.tree_at(lambda s: s.local_zodi, scene, _UnitSky())
-    sky_frame = scene.dynamics.frame
-    components = _run(scene, instrument, exposure, "photons", planets=False)
-    maps = jnp.stack([components[name] for name in _BACKGROUNDS], axis=1)
+    components = _run(
+        scene, instrument, exposure, "photons", planets=False, uniform_sky=True
+    )
+    maps = jnp.stack(
+        [components[name] for name in ("star_leakage", "local_zodi", "exozodi")],
+        axis=1,
+    )
     n_bands, n_nodes = nodes.shape
     shape = maps.shape[-2:]
     background = _lattice(
@@ -340,6 +324,7 @@ def aperture_record(
         response.kernels,
         response.radius_pix,
     ).reshape(2, n_bands, 3, n_nodes, 2 * shape[0], 2 * shape[1])
+    star_leakage, uniform_sky, exozodi = jnp.moveaxis(background, 2, 0)
     n_pix = _lattice(
         jnp.ones((n_bands, 1, *shape)), response.kernels, response.radius_pix
     )[:, :, 0]
@@ -359,14 +344,16 @@ def aperture_record(
         jnp.asarray(instrument.detector.pixel_scale_arcsec),
         response.separation_step_arcsec,
         star[None, :, :, None] * response.throughput,
-        jnp.moveaxis(background, 2, 0),
+        star_leakage,
+        uniform_sky,
+        exozodi,
         n_pix,
-        local_zodi,
-        sky_frame,
+        scene.local_zodi,
+        scene.sky_frame,
         reads=(
             "star",
             "dynamics.frame",
-            *(() if local_zodi is None else ("local_zodi",)),
+            *(() if scene.local_zodi is None else ("local_zodi",)),
             *(
                 ()
                 if scene.disk is None
@@ -415,9 +402,9 @@ def aperture_rates(
     The aperture is centred on the planet.
 
     ``time_d`` is the observation time in days from the record's epoch. It
-    sets the local zodi: the star's ecliptic latitude and longitude from the
-    Sun at that time give the record's zodi model its sightline, and the
-    radiance at each wavelength node scales the record's uniform-sky table.
+    sets the local zodi: the record's zodi model is evaluated for the record's
+    sky frame at that time, and its radiance at each wavelength node scales
+    the record's uniform-sky table.
     It has no default, because the time a record was built at is not the time
     of a later read and the zodi would silently be that of the wrong season.
     The star's flux, the disk and any speckle realization stay those of the
@@ -452,26 +439,17 @@ def aperture_rates(
             (nx - 1) + 2 * x / record.pixel_scale_arcsec,
         )
 
-    here = lattice_index(record.roll_deg if roll_deg is None else roll_deg)
-    star_leakage, local_zodi, exozodi = (
-        _bilinear(record.background[i], *here) for i in range(3)
-    )
-    if roll_deg is not None:
-        exozodi = _bilinear(record.background[2], *lattice_index(record.roll_deg))
+    fixed = lattice_index(record.roll_deg)
+    here = fixed if roll_deg is None else lattice_index(roll_deg)
+    star_leakage = _bilinear(record.star_leakage, *here)
+    local_zodi = _bilinear(record.uniform_sky, *here)
+    exozodi = _bilinear(record.exozodi, *fixed)
     if record.local_zodi is not None:
-        latitude_deg, longitude_deg = (None, None)
-        frame = record.sky_frame
-        if frame.ra_deg is not None:
-            latitude_deg, longitude_deg = ecliptic_pointing(
-                frame.ra_deg, frame.dec_deg, frame.epoch, time_d
-            )
         local_zodi = local_zodi * record.local_zodi.photon_radiance(
-            record.quadrature.nodes_nm,
-            ecliptic_latitude_deg=latitude_deg,
-            helioecliptic_longitude_deg=longitude_deg,
+            record.quadrature.nodes_nm, record.sky_frame, time_d
         )
     planet = contrast * _linear(
-        record.planet, separation / record.separation_step_arcsec
+        record.planet_per_contrast, separation / record.separation_step_arcsec
     )
     n_pix = _bilinear(record.n_pix, *here)
 

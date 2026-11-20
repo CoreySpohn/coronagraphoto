@@ -5,7 +5,7 @@ The reader composes shared contracts without owning the underlying physics.
 | Quantity or operation | Owner |
 |---|---|
 | Star and planet photon flux densities; disk photon radiance | skyscapes |
-| Local-zodi photon radiance | zodi.jax |
+| Local-zodi photon radiance, evaluated for the scene's sky frame and time | skyscapes |
 | Orbits and sky offsets | orbix, via skyscapes.Scene |
 | Bands, quadrature, frames, grids and resampling | optixstuff |
 | Aperture rules and YIP PSFs | yippy |

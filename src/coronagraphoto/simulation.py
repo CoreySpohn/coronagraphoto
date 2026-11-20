@@ -26,7 +26,6 @@ from optixstuff.coronagraph import (
 )
 from optixstuff.grids import Image, Measure, SkyOrientation, resample
 from optixstuff.spectral import Band, Quadrature
-from orbix.observatory import ecliptic_pointing
 from skyscapes import Scene
 
 
@@ -35,27 +34,6 @@ def _detector_grid(instrument, orientation):
     if orientation is not None and orientation.parity != -1:
         raise ValueError("detector pointing must have parity=-1")
     return replace(instrument.detector.grid, orientation=orientation)
-
-
-def _require_position(scene):
-    """Raise when a pointing-dependent local zodi sits on an unplaced scene."""
-    local_zodi = scene.local_zodi
-    if local_zodi is not None and scene.ra_deg is None and local_zodi.uses_pointing:
-        raise ValueError(
-            f"scene.local_zodi is a {type(local_zodi).__name__}, which depends on the "
-            "sightline, but the scene has no sky position; build it with "
-            "Scene.from_classical(..., ra_deg=, dec_deg=) or use a pointing-"
-            "independent model such as AYOZodi"
-        )
-
-
-def _sightline(scene, time_d):
-    """Ecliptic latitude and solar longitude of the target, or (None, None)."""
-    _require_position(scene)
-    sightline = (None, None)
-    if scene.local_zodi is not None and scene.ra_deg is not None:
-        sightline = ecliptic_pointing(scene.ra_deg, scene.dec_deg, scene.epoch, time_d)
-    return sightline
 
 
 def _node_rates(
@@ -67,11 +45,13 @@ def _node_rates(
     grid,
     ephemeris,
     positions,
-    zodi,
-    ecliptic_latitude_deg,
-    helioecliptic_longitude_deg,
+    sky_radiance,
 ):
-    """Render one node; detector yield never enters this photon calculation."""
+    """Render one node; detector yield never enters this photon calculation.
+
+    ``sky_radiance`` is the local-zodi radiance at this node in photons s^-1
+    m^-2 nm^-1 sr^-1, or None for no local zodi.
+    """
     speckle = instrument.speckle
     products = coro.at_wavelength(wavelength_nm)
     native = products.source_grid
@@ -131,17 +111,12 @@ def _node_rates(
         planet = jnp.where(jnp.all(psfs.valid | (phi == 0)), planet, jnp.nan)
 
     local = jnp.zeros(grid.shape)
-    if zodi is not None:
-        radiance = zodi.photon_radiance(
-            wavelength_nm,
-            ecliptic_latitude_deg=ecliptic_latitude_deg,
-            helioecliptic_longitude_deg=helioecliptic_longitude_deg,
-        )
+    if sky_radiance is not None:
         transmission = coro.uniform_sky_map(
             wavelength_nm, grid=detector_pixels(products.sky_grid)
         ).data
         sky = Image(
-            jnp.broadcast_to(gain * radiance, grid.shape),
+            jnp.broadcast_to(gain * sky_radiance, grid.shape),
             grid,
             (),
             Measure.density("sr"),
@@ -195,16 +170,25 @@ def _band_ids(instrument, scene, quadrature):
     return ids
 
 
-def _node_function(models, scene, instrument, exposure, grid, planets):
+def _node_function(models, scene, instrument, exposure, grid, planets, uniform_sky):
     """Return node(w): the rates at one traced wavelength, for any model count.
 
     With ``planets`` False no planet is propagated or rendered and the planet
-    term is zero.
+    term is zero. The local zodi is the scene model's radiance for the scene's
+    sky frame at the observation time; with ``uniform_sky`` it is one photon
+    s^-1 m^-2 nm^-1 sr^-1 at every wavelength (still absent when the scene has
+    no local zodi).
     """
     system, zodi = scene, scene.local_zodi
     time_d = jnp.asarray(exposure.time_d)
-    # The local-zodi sightline is the target's, at the observation time.
-    sightline = _sightline(system, time_d)
+
+    def sky_radiance(w):
+        if zodi is None:
+            return None
+        if uniform_sky:
+            return jnp.ones_like(w)
+        return zodi.photon_radiance(w, system.sky_frame, time_d)
+
     ephemeris, positions = None, None
     if planets and system.planets:
         times = jnp.atleast_1d(time_d)
@@ -221,8 +205,7 @@ def _node_function(models, scene, instrument, exposure, grid, planets):
             grid,
             ephemeris,
             positions,
-            zodi,
-            *sightline,
+            sky_radiance(w),
         )
 
     if len(models) == 1:
@@ -240,7 +223,7 @@ def _node_function(models, scene, instrument, exposure, grid, planets):
 
 
 @eqx.filter_jit
-def _render(scene, instrument, exposure, *, kind, band_ids, planets):
+def _render(scene, instrument, exposure, *, kind, band_ids, planets, uniform_sky):
     """Render every node of one observation as a single traced program."""
     coro = instrument.coronagraph
     models = (
@@ -250,7 +233,9 @@ def _render(scene, instrument, exposure, *, kind, band_ids, planets):
     )
     quadrature = exposure.quadrature
     grid = _detector_grid(instrument, SkyOrientation(exposure.roll_deg))
-    node = _node_function(models, scene, instrument, exposure, grid, planets)
+    node = _node_function(
+        models, scene, instrument, exposure, grid, planets, uniform_sky
+    )
     if kind == "photons":
         values = jax.lax.map(node, quadrature.nodes_nm.ravel())
         return jax.tree.map(
@@ -290,7 +275,7 @@ def _draw(detector, key, electrons, plan):
     return detector.draw(key, electrons, plan)
 
 
-def _run(scene, instrument, exposure, kind, *, planets=True):
+def _run(scene, instrument, exposure, kind, *, planets=True, uniform_sky=False):
     """Run the shared program for one scene, instrument and exposure."""
     return _render(
         scene,
@@ -299,6 +284,7 @@ def _run(scene, instrument, exposure, kind, *, planets=True):
         kind=kind,
         band_ids=_band_ids(instrument, scene, exposure.quadrature),
         planets=planets,
+        uniform_sky=uniform_sky,
     )
 
 
@@ -319,8 +305,8 @@ def build_exposure(
     per band when no break falls inside it). The star is left out of the
     breaks. ``roll_deg`` is the position angle of detector +y, north through
     east. ``plan`` is only needed by
-    :func:`observe`. The local-zodi line of sight is derived at render time
-    from the scene's RA and Dec, the scene epoch and ``time_d``.
+    :func:`observe`. The local zodi is evaluated at render time for the scene's
+    sky frame and ``time_d``.
 
     The build uses the scene only for the spectral breaks of its local zodi, a
     constant of the zodi model, so no scene value is cached in the result and it

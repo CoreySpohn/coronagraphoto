@@ -52,18 +52,18 @@ opposite it.
 
 The record therefore holds the two parts separately. It tabulates the response
 per unit radiance (1 photon/s/m^2/nm/sr) and keeps what the radiance is
-computed from: `scene.local_zodi`, the scene's right ascension and declination
-(`scene.ra_deg`, `scene.dec_deg`) and the epoch, held as the scene's sky frame
-(`record.sky_frame`) as it was at build time. A scene with no sky position is
+computed from: `scene.local_zodi` and the scene's sky frame (right ascension,
+declination and epoch, `scene.sky_frame`), held as `record.local_zodi` and
+`record.sky_frame` as they were at build time. A scene with no sky position is
 allowed only with a local zodi that ignores the sightline, such as `AYOZodi`; a
-pointing-dependent model raises a `ValueError`. Each read takes `time_d`, days
-from that epoch, and
+pointing-dependent model raises a `ValueError` when it is read. Each read takes
+`time_d`, days from that epoch, and
 
-1. finds the star's ecliptic latitude and its longitude from the Sun at
-   `time_d` with `orbix.observatory.ecliptic_pointing`,
-2. evaluates the zodi model's photon radiance at the record's wavelength
-   nodes for that sightline,
-3. multiplies the uniform-sky read by it.
+1. evaluates `record.local_zodi.photon_radiance(nodes_nm, sky_frame, time_d)` at
+   the record's wavelength nodes; the model derives whatever it needs from the
+   frame and the time (`LeinertZodi` finds the star's ecliptic latitude and its
+   longitude from the Sun with `orbix.observatory.ecliptic_pointing`),
+2. multiplies the uniform-sky read by it.
 
 So one record per target, instrument and band set serves every observation
 time; nothing is rebuilt as the year goes by. `time_d` is a required keyword

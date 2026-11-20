@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from conftest import make_path, make_system, with_zodi
 from optixstuff.spectral import Band
-from zodi.jax import AYOZodi, LeinertZodi
+from skyscapes import AYOZodi, LeinertZodi
 
 import coronagraphoto as cp
 

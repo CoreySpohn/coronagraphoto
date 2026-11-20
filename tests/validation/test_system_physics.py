@@ -18,8 +18,8 @@ from optixstuff import Exposure
 from optixstuff.apertures import Circular
 from optixstuff.grids import Image, Measure, PixelGrid, SkyOrientation
 from optixstuff.spectral import Band, Quadrature
+from skyscapes import PrecomputedZodi
 from skyscapes.disk import ExovistaDisk
-from zodi.jax import PrecomputedZodi
 
 from coronagraphoto import photon_rates
 
@@ -54,11 +54,7 @@ def test_aperture_closure_two_samplings():
     record = coro.curves(rule)
     phi_p = float(system.planet_flux_densities(550.0, jnp.array([0.0]))[0, 0])
     phi_s = float(system.star.photon_flux_density(550.0, 0.0, dist_pc=10.0))
-    lz = float(
-        zodi.photon_radiance(
-            550.0, ecliptic_latitude_deg=0.0, helioecliptic_longitude_deg=135.0
-        )
-    )
+    lz = float(zodi.photon_radiance(550.0, system.sky_frame, 0.0))
     ld = float(system.photon_radiance(550.0, 0.0, grid=native_sky).data[16, 16])
     omega = (
         float(record.evaluate("core_area_lod2", 0.5)) * lod_arcsec**2 * arcsec2rad**2

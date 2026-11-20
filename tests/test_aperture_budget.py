@@ -10,8 +10,8 @@ import pytest
 from conftest import make_path, make_system, with_zodi, write_yip
 from optixstuff import Detector
 from optixstuff.spectral import Band
+from skyscapes import LeinertZodi
 from yippy import open_yip
-from zodi.jax import LeinertZodi
 
 import coronagraphoto as cp
 

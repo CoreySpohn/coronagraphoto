@@ -13,7 +13,7 @@ import pytest
 from conftest import PlateauCoronagraph, make_path, make_system, with_zodi
 from hwoutils.model_paths import paths_overlap
 from optixstuff.spectral import Band
-from zodi.jax import LeinertZodi
+from skyscapes import LeinertZodi
 
 import coronagraphoto as cp
 

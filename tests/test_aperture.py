@@ -9,16 +9,16 @@ import pytest
 from conftest import (
     GaussianCoronagraph,
     PlateauCoronagraph,
+    leinert_radiance,
     make_path,
     make_system,
-    sightline,
     with_zodi,
 )
 from optixstuff import Detector, FramePlan
 from optixstuff.apertures import Circular, HalfMaximum
 from optixstuff.grids import Image, Measure, SkyOrientation
 from optixstuff.spectral import Band
-from zodi.jax import LeinertZodi
+from skyscapes import AYOZodi, LeinertZodi
 
 import coronagraphoto as cp
 
@@ -231,11 +231,15 @@ def test_read_geometry_on_a_hand_made_record(plateau):
     record = plateau[4]
     shape = record.n_pix.shape[-2:]
     rows, columns = jnp.indices(shape) / 2.0
-    background = jnp.broadcast_to(
-        jnp.stack([columns, rows, columns])[:, None, None, None],
-        record.background.shape,
+    tables = (
+        jnp.broadcast_to(columns, record.star_leakage.shape),
+        jnp.broadcast_to(rows, record.uniform_sky.shape),
     )
-    record = eqx.tree_at(lambda r: r.background, record, background)
+    record = eqx.tree_at(
+        lambda r: (r.star_leakage, r.uniform_sky, r.exozodi),
+        record,
+        (tables[0], tables[1], tables[0]),
+    )
     pitch, centre = float(record.pixel_scale_arcsec), (shape[0] / 2 - 1) / 2
 
     def expected(separation, angle, roll):
@@ -323,19 +327,7 @@ def test_local_zodi_follows_the_read_time(sloped):
             )
     # The time is seen, and by exactly the radiance ratio of the sightlines.
     nodes = exposures[0].quadrature.nodes_nm
-    radiance = [
-        scene.local_zodi.photon_radiance(
-            nodes,
-            **dict(
-                zip(
-                    ("ecliptic_latitude_deg", "helioecliptic_longitude_deg"),
-                    sightline(scene, t),
-                    strict=True,
-                )
-            ),
-        )
-        for t in (0.0, 137.0)
-    ]
+    radiance = [leinert_radiance(scene, nodes, t) for t in (0.0, 137.0)]
     early = read(built, 0.0)
     assert np.all(abs(radiance[1] / radiance[0] - 1) > 0.5)
     np.testing.assert_allclose(
@@ -484,10 +476,12 @@ def test_variance_matches_weighted_pixel_draws(sloped):
     assert np.sum(weights * (poisson + 0.3**2 * 4)) > 1.04 * expected
 
 
-def test_aperture_record_needs_a_position_only_for_a_pointing_dependent_zodi(plateau):
-    """An unplaced scene records with AYOZodi and refuses LeinertZodi by name."""
-    from zodi.jax import AYOZodi
+def test_aperture_read_needs_a_position_only_for_a_pointing_dependent_zodi(plateau):
+    """An unplaced scene records and reads with AYOZodi; LeinertZodi refuses by name.
 
+    The record holds the zodi model and the frame, and the model alone decides
+    whether it needs a position, so the refusal comes from the read.
+    """
     _, instrument, _, response, _ = plateau
     scene = make_system(separation_arcsec=0.03)
     scene = eqx.tree_at(
@@ -503,10 +497,11 @@ def test_aperture_record_needs_a_position_only_for_a_pointing_dependent_zodi(pla
     assert record.sky_frame.ra_deg is None
     rates = cp.aperture_rates(record, *_offsets(0.02, 0.0), 1e-10, time_d=5.0)
     assert float(jnp.sum(rates.local_zodi)) > 0
+    pointed = cp.aperture_record(
+        with_zodi(scene, LeinertZodi()), instrument, exposure, response
+    )
     with pytest.raises(ValueError, match="no sky position"):
-        cp.aperture_record(
-            with_zodi(scene, LeinertZodi()), instrument, exposure, response
-        )
+        cp.aperture_rates(pointed, *_offsets(0.02, 0.0), 1e-10, time_d=5.0)
 
 
 @vv.case("aperture-photon-budget", "code-verification")
