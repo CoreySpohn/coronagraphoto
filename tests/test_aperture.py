@@ -15,11 +15,18 @@ from conftest import (
     with_zodi,
     write_yip,
 )
-from optixstuff import Detector, FramePlan
+from optixstuff import (
+    ConstantThroughput,
+    Detector,
+    FramePlan,
+    Instrument,
+    SimplePrimary,
+)
 from optixstuff.apertures import Circular, HalfMaximum
 from optixstuff.grids import Image, Measure, SkyOrientation
 from optixstuff.spectral import Band
 from skyscapes import AYOZodi, LeinertZodi
+from yippy import open_yip
 
 import coronagraphoto as cp
 
@@ -30,9 +37,9 @@ _BANDS = (Band(500.0, 600.0),)
 class SlopedLeakage(GaussianCoronagraph):
     """Gaussian planet PSF over a stellar leakage that is linear in x and y."""
 
-    def _native_stellar_map(self, stellar_diam_lod):
+    def _native_stellar_map(self, stellar_diameter_lod):
         """Tilt the uniform leakage differently along the two detector axes."""
-        flat = super()._native_stellar_map(stellar_diam_lod)
+        flat = super()._native_stellar_map(stellar_diameter_lod)
         x, y = self.grid.coordinates()
         return eqx.tree_at(
             lambda image: image.data, flat, flat.data * (1 + 0.05 * x + 0.02 * y)
@@ -546,13 +553,12 @@ def test_response_throughput_matches_stored_curve(tmp_path):
     """The aperture response and the YIP throughput curve describe one coronagraph.
 
     The response integrates the off-axis PSF inside the rule's aperture on the
-    detector; the stored curve is the designer's tabulated throughput for the
-    same rule. Averaged over position angle they must agree to the response's
-    sampling error.
+    detector; the stored curve is the throughput yippy computes from the same
+    PSFs for the same rule. Averaged over position angle they agree to the
+    response's sampling error, set by the 6 rings of 8 angles and the detector
+    pixel grid. Measured here: 2.4e-3 relative and 2.8e-4 absolute at most; the
+    bound below leaves a factor of about eight of margin.
     """
-    from optixstuff import ConstantThroughput, Instrument, SimplePrimary
-    from yippy import open_yip
-
     rule = Circular(0.7)
     coro = open_yip(write_yip(tmp_path / "yip")).prepare(rules=(rule,))
     scale = float(coro.frame.lod_to_arcsec(550.0))

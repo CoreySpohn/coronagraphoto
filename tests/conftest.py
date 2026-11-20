@@ -174,11 +174,11 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
         )
         return SourcePSFs(image, jnp.ones(data.shape[0], dtype=bool))
 
-    def _native_stellar_map(self, stellar_diam_lod):
+    def _native_stellar_map(self, stellar_diameter_lod):
         """Uniform leakage density with a resolved-diameter response."""
         return Image(
             jnp.full(self.grid.shape, 1e-9 * self.grid.pixel_area)
-            * (1 + stellar_diam_lod**2),
+            * (1 + stellar_diameter_lod**2),
             self.grid,
             (),
             Measure.integral(),
