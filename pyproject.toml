@@ -108,7 +108,7 @@ known_first_party = ["coronagraphoto"]
 optional_dependencies_dev_groups = ["dev", "docs", "test"]
 
 [tool.deptry.per_rule_ignores]
-# optixstuff supplies the duck-typed OpticalPath consumed by the simulation API.
+# optixstuff supplies the duck-typed Instrument consumed by the simulation API.
 # orbix's floor preserves the sky-coordinate convention of loaded skyscapes scenes.
 # yippy supplies the coronagraph models (open_yip, fetch_yip) that users build the
 # optical path from; the package itself consumes them through optixstuff.

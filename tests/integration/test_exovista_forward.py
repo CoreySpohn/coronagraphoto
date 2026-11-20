@@ -5,8 +5,10 @@ from conftest import make_path, write_scene
 from hwoutils.constants import arcsec2rad
 from hwoutils.grids import SkyOrientation
 from hwoutils.spectral import Band, Quadrature
+from optixstuff import Exposure
+from skyscapes import from_exovista
 
-from coronagraphoto import image_rates, load_scene_from_exovista
+from coronagraphoto import photon_rates
 
 
 def test_exovista_native_disk_and_position_angle(tmp_path):
@@ -15,8 +17,8 @@ def test_exovista_native_disk_and_position_angle(tmp_path):
     Stored contrast rounds to float32 upstream; its radiance identity has
     a 32 float64 epsilon arithmetic bound after that documented rounding.
     """
-    scene = load_scene_from_exovista(write_scene(tmp_path / "scene.fits"))
-    system = scene.system
+    scene = from_exovista(write_scene(tmp_path / "scene.fits"))
+    system = scene
     assert system.midplane_position_angle_deg == 120.0
     grid = system.disk.native_grid
     assert grid.shape == (12, 12) and grid.step == 0.01
@@ -26,13 +28,9 @@ def test_exovista_native_disk_and_position_angle(tmp_path):
     expected = float(np.float32(1e-10)) * phi / (0.01**2 * arcsec2rad**2)
     np.testing.assert_allclose(radiance, expected, rtol=32 * np.finfo(float).eps)
     path = make_path(n=20, step=0.3, cube=True)
-    rates = image_rates(
-        system,
-        path,
-        Quadrature.build((Band(549.5, 550.5),), scene, path, order=1),
-        time_d=0.0,
-        pointing=SkyOrientation(30),
-        zodi=scene.zodi,
+    quadrature = Quadrature.build((Band(549.5, 550.5),), scene, path, order=1)
+    rates = photon_rates(
+        scene, path, Exposure(time_d=0.0, roll_deg=30, quadrature=quadrature)
     )
     # Absolute incoming local-zodi normalization, on an interior pixel.
     lz = scene.zodi.photon_radiance(

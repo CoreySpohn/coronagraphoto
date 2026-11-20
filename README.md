@@ -40,12 +40,14 @@ pip install coronagraphoto
 ## Photon budgets and detector images
 
 Scenes come from `skyscapes`; hardware and detector statistics come from
-`optixstuff`. The image reader provides three entry points:
+`optixstuff`. One `Exposure` record, built once with `build_exposure`, carries
+the epoch, roll, wavelength quadrature and frame plan. The image reader takes
+`(scene, instrument, exposure)`:
 
 | Function | Output | Units |
 |---|---|---|
-| `image_rates` | `PhotonRates`, each field `(W, Q, ny, nx)` | photons/s/nm/pixel |
-| `image_electrons` | `ElectronRates`, each field `(W, ny, nx)` | electrons/s/pixel |
+| `photon_rates` | `PhotonRates`, each field `(W, Q, ny, nx)` | photons/s/nm/pixel |
+| `expected` | `ElectronRates`, each field `(W, ny, nx)` | electrons/s/pixel |
 | `observe` | `Image`, data `(W, ny, nx)` | electrons/pixel |
 
 The fields are `planet`, `star_leakage`, `local_zodi`, `exozodi`, `thermal`
@@ -55,11 +57,12 @@ to combine terms. Optical throughput excludes detector yield. Only
 `detector.electrons` applies QE and survival, at the quadrature nodes.
 `observe` calls `detector.draw` once on the combined electron budget.
 
-`image_electrons` scans nodes and accumulates band images, holding one node's
-images at a time. `image_rates` retains all nodes for inspection and small
-problems. Build one quadrature on the host from the active scene and optical
-path. Its Gauss-Legendre rule splits at every declared break, including
-detector QE knots. Reuse that quadrature across readers.
+`expected` scans nodes and accumulates band images, holding one node's
+images at a time. `photon_rates` retains all nodes for inspection and small
+problems. `build_exposure` builds the quadrature on the host from the scene's
+zodi and the instrument. Its Gauss-Legendre rule splits at every declared
+break, including detector QE knots. Reuse one exposure across readers, and
+change fields with `dataclasses.replace`.
 
 ## Quick start
 
@@ -72,16 +75,16 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 
-from hwoutils.grids import SkyOrientation
-from hwoutils.spectral import Band, Quadrature
-from optixstuff import FramePlan, OpticalPath
+from hwoutils.spectral import Band
+from optixstuff import FramePlan, Instrument
+from skyscapes import from_exovista
 from skyscapes.datasets import fetch_scene
 from yippy import fetch_yip, open_yip
-from coronagraphoto import image_electrons, load_scene_from_exovista, observe
+from coronagraphoto import build_exposure, expected, observe
 
-scene = load_scene_from_exovista(fetch_scene(), load_disk=False)
+scene = from_exovista(fetch_scene(), load_disk=False)
 coronagraph = open_yip(fetch_yip("eac1_aavc_2d")).prepare()
-optical_path = OpticalPath.from_default_setup(
+instrument = Instrument.from_default_setup(
     coronagraph,
     attenuating_throughput=0.4,
     qe=0.8,
@@ -89,18 +92,16 @@ optical_path = OpticalPath.from_default_setup(
     pixel_scale_arcsec=0.01,
 )
 bands = (Band(500.0, 600.0),)
-quadrature = Quadrature.build(bands, scene, optical_path)
-pointing = SkyOrientation(pa_y_deg=30.0, parity=-1)
-options = dict(time_d=0.0, pointing=pointing, zodi=scene.zodi)
-rates = image_electrons(scene.system, optical_path, quadrature, **options)
-image = observe(
-    jax.random.PRNGKey(0),
-    scene.system,
-    optical_path,
-    quadrature,
-    FramePlan(frame_time_s=100.0, n_frames=36),
-    **options,
+exposure = build_exposure(
+    scene,
+    instrument,
+    bands,
+    time_d=0.0,
+    roll_deg=30.0,
+    plan=FramePlan(frame_time_s=100.0, n_frames=36),
 )
+rates = expected(scene, instrument, exposure)
+image = observe(jax.random.PRNGKey(0), scene, instrument, exposure)
 # imshow(image.data[0], origin="lower")
 ```
 
@@ -109,13 +110,12 @@ For disks, load the disk and give the coronagraph a scene renderer with
 its per-pixel flux through the coronagraph's field-dependent PSFs.
 
 Rows increase along detector +y and columns along detector +x. Pixel `(j,i)`
-is centred at `(x,y)=(i,j)`, including even grids. `pa_y_deg` is the position
+is centred at `(x,y)=(i,j)`, including even grids. `roll_deg` is the position
 angle of detector +y, north through east. At zero, east is left and north is
 up; at 90 degrees, north is right. A roll changes this orientation for both
 planets and disks.
 
-Speckle fields may be supplied through `OpticalPath.speckle` or the reader's
-`speckle` keyword. Their positive excess joins `star_leakage`; their existing
+Speckle fields are supplied through `Instrument.speckle`. Their positive excess joins `star_leakage`; their existing
 physics is retained. The reader calls `realize(wavelength_nm=..., time_d=...)`
 and leaves epoch conversion to the field. The speckle pattern remains fixed
 in detector coordinates as pointing rolls.

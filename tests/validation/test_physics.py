@@ -8,9 +8,9 @@ import pytest
 from conftest import make_path, make_system
 from hwoutils.grids import Measure, SkyOrientation
 from hwoutils.spectral import Band, Quadrature
-from optixstuff import FramePlan
+from optixstuff import Exposure, FramePlan
 
-from coronagraphoto import image_electrons, observe
+from coronagraphoto import expected, observe
 
 
 @pytest.mark.medium(reason="2000 draws plus detector sampler compilation")
@@ -35,14 +35,15 @@ def test_draw_mean_and_reproducibility():
     system = make_system()
     q = Quadrature.build((Band(549.5, 550.5),), system, path, order=1)
     plan = FramePlan(10.0, 6.0)
-    options = dict(time_d=0.0, pointing=SkyOrientation(0))
-    electrons = image_electrons(system, path, q, **options)
+    scene = system
+    exposure = Exposure(time_d=0.0, roll_deg=0, quadrature=q, plan=plan)
+    electrons = expected(scene, path, exposure)
     mean, var = detector.mean_and_variance(electrons, plan)
-    draw = eqx.filter_jit(lambda key: observe(key, system, path, q, plan, **options))
+    draw = eqx.filter_jit(lambda key: observe(key, scene, path, exposure))
     key = jax.random.PRNGKey(0)
     first, second = draw(key), draw(key)
     assert first.quantity == "electrons" and first.measure == Measure.integral()
-    assert first.grid.orientation == options["pointing"]
+    assert first.grid.orientation == SkyOrientation(0)
     np.testing.assert_array_equal(first.data, second.data)
     np.testing.assert_array_equal(first.data, detector.draw(key, electrons, plan))
     samples = jax.lax.map(lambda k: draw(k).data, jax.random.split(key, 2000))

@@ -72,7 +72,7 @@ forward model:
 | Package | Role |
 |---|---|
 | `skyscapes` | `Scene`, `Star`, `Planet`, `Disk`, physical models |
-| `optixstuff` | `OpticalPath`, detectors, throughput, filters |
+| `optixstuff` | `Instrument`, detectors, throughput, filters |
 | `yippy` | YIP-based PSF synthesis (the coronagraph backend) |
 | `hwoutils` | Shared unit conversions, transforms, JAX configuration |
 

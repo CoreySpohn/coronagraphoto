@@ -10,16 +10,17 @@ def test_worked_example():
     """Fails if the reader omits a spectral factor; 1e-9 quadrature bound."""
     import coronagraphoto as cp
 
-    assert hasattr(cp, "image_rates"), "the shared photon reader must be public"
+    assert hasattr(cp, "photon_rates"), "the shared photon reader must be public"
     from conftest import worked_setup
-    from hwoutils.grids import SkyOrientation
     from hwoutils.spectral import Band, Quadrature
     from numpy.polynomial.legendre import leggauss
+    from optixstuff import Exposure
 
     system, path = worked_setup()
     bands = (Band(500, 600),)
     q = Quadrature.build(bands, system, path)
-    rates = cp.image_rates(system, path, q, time_d=0.0, pointing=SkyOrientation(0))
+    scene, exposure = system, Exposure(time_d=0.0, roll_deg=0, quadrature=q)
+    rates = cp.photon_rates(scene, path, exposure)
     actual = float(rates.integrate().planet.sum())
     electrons = float(path.detector.electrons(rates).planet.sum())
     nodes, weights = leggauss(128)
@@ -46,16 +47,17 @@ def test_worked_example():
 def test_node_yield_once(chromatic):
     """Fails on double yield or band-mean QE; exact algebra at 32 float64 eps."""
     from conftest import worked_setup
-    from hwoutils.grids import SkyOrientation
     from hwoutils.spectral import Band, Quadrature
+    from optixstuff import Exposure
 
-    from coronagraphoto import image_electrons, image_rates
+    import coronagraphoto as cp
 
     # The yield identity needs a color slope and an interior break.
     system, path = worked_setup(n_wavelengths=7)
     bands = (Band(500, 600),)
     q = Quadrature.build(bands, system, path)
-    rates = image_rates(system, path, q, time_d=0.0, pointing=SkyOrientation(0))
+    scene, exposure = system, Exposure(time_d=0.0, roll_deg=0, quadrature=q)
+    rates = cp.photon_rates(scene, path, exposure)
     if not chromatic:
         import equinox as eqx
         import jax.numpy as jnp
@@ -65,9 +67,7 @@ def test_node_yield_once(chromatic):
             path,
             (jnp.array([500.0, 600.0]), jnp.array([0.8, 0.8])),
         )
-    actual = image_electrons(
-        system, path, q, time_d=0.0, pointing=SkyOrientation(0)
-    ).planet
+    actual = cp.expected(scene, path, exposure).planet
     expected = np.zeros_like(actual)
     doubled = np.zeros_like(actual)
     for k, (wave, weight) in enumerate(
@@ -102,23 +102,22 @@ def test_streaming_jit_and_gradient():
     import jax
     import jax.numpy as jnp
     from conftest import worked_setup
-    from hwoutils.grids import SkyOrientation
     from hwoutils.spectral import Band, Quadrature
+    from optixstuff import Exposure
 
-    from coronagraphoto import image_electrons, image_rates
+    import coronagraphoto as cp
 
     # Two bands with unequal node counts exercise zero-weight padding under JIT.
     system, path = worked_setup(n_wavelengths=16)
     bands = (Band(500, 540), Band(550, 600))
     q = Quadrature.build(bands, system, path)
-    pointing = SkyOrientation(17.0)
-    options = dict(time_d=jnp.asarray(0.0), pointing=pointing)
+    exposure = Exposure(time_d=jnp.asarray(0.0), roll_deg=17.0, quadrature=q)
 
     def render(s):
-        return image_electrons(s, path, q, **options)
+        return cp.expected(s, path, exposure)
 
     eager = render(system)
-    full = path.detector.electrons(image_rates(system, path, q, **options))
+    full = path.detector.electrons(cp.photon_rates(system, path, exposure))
     compiled = eqx.filter_jit(render)(system)
     for a, b, c in zip(
         jax.tree.leaves(eager),
@@ -150,11 +149,10 @@ def test_refused_planet_psf_only_invalidates_lit_source():
     import equinox as eqx
     import jax.numpy as jnp
     from conftest import GaussianCoronagraph, make_path, make_system
-    from hwoutils.grids import SkyOrientation
     from hwoutils.spectral import Quadrature
-    from optixstuff import SourcePSFs
+    from optixstuff import Exposure, SourcePSFs
 
-    from coronagraphoto import image_rates
+    import coronagraphoto as cp
 
     class RefusedSource(GaussianCoronagraph):
         def _native_source_psfs(self, x_lod, y_lod):
@@ -167,12 +165,12 @@ def test_refused_planet_psf_only_invalidates_lit_source():
     path = make_path(n=8)
     path = eqx.tree_at(lambda p: p.coronagraph, path, RefusedSource(n=8))
     for contrast in (0.0, 1e-10):
-        planet = image_rates(
+        planet = cp.photon_rates(
             make_system(contrast=contrast),
             path,
-            Quadrature.monochromatic(550.0),
-            time_d=0.0,
-            pointing=SkyOrientation(0),
+            Exposure(
+                time_d=0.0, roll_deg=0, quadrature=Quadrature.monochromatic(550.0)
+            ),
         ).planet
         if contrast == 0.0:
             np.testing.assert_array_equal(planet, 0.0)
@@ -180,7 +178,7 @@ def test_refused_planet_psf_only_invalidates_lit_source():
             assert np.isnan(planet).all()
 
 
-def test_image_electrons_integrates_declared_response_kink():
+def test_expected_integrates_declared_response_kink():
     """Fails if the image integrates across a declared triangular-filter kink.
 
     Flat local sky and constant yield isolate the spectral integral at the
@@ -188,14 +186,13 @@ def test_image_electrons_integrates_declared_response_kink():
     """
     import equinox as eqx
     import jax.numpy as jnp
-    from conftest import make_path, make_system
+    from conftest import make_path, make_system, with_zodi
     from hwoutils.constants import arcsec2rad
-    from hwoutils.grids import SkyOrientation
     from hwoutils.spectral import Band, Quadrature, Transmission
-    from optixstuff import TransmissiveElement
+    from optixstuff import Exposure, TransmissiveElement
     from zodi.jax import PrecomputedZodi
 
-    from coronagraphoto import image_electrons
+    import coronagraphoto as cp
 
     band = Band(510.0, 590.0)
     response = Transmission([510.0, 533.0, 590.0], [0.0, 1.0, 0.0])
@@ -210,8 +207,8 @@ def test_image_electrons_integrates_declared_response_kink():
     )
     sky = PrecomputedZodi(jnp.array([500.0, 600.0]), jnp.full(2, 1e12))
     q = Quadrature.build((band,), system, path, sky, order=1)
-    image = image_electrons(
-        system, path, q, time_d=0.0, pointing=SkyOrientation(0), zodi=sky
+    image = cp.expected(
+        with_zodi(system, sky), path, Exposure(time_d=0.0, roll_deg=0, quadrature=q)
     )
     omega = (path.detector.pixel_scale_arcsec * arcsec2rad) ** 2
     expected = 40 * 0.3 * 1e12 * omega * 0.8 * 0.9 * band.width_nm / 2

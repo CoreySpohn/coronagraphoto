@@ -79,7 +79,7 @@ from hwoutils.constants import Mearth2kg, Msun2kg
 from hwoutils.epoch import Epoch
 from hwoutils.grids import Frame, Image, Measure, PixelGrid, resample
 from hwoutils.spectral import Band
-from optixstuff import ConstantThroughput, Detector, OpticalPath, SimplePrimary
+from optixstuff import ConstantThroughput, Detector, Instrument, SimplePrimary
 from optixstuff.apertures import Circular
 from optixstuff.coronagraph import (
     AbstractSceneCoronagraph,
@@ -89,9 +89,14 @@ from optixstuff.coronagraph import (
 )
 from optixstuff.performance import PerformanceCurves, SampledProfile
 from skyscapes.physical_model import GridPhysicalModel
-from skyscapes.scene import FlatStar, Planet, Star, System
+from skyscapes.scene import FlatStar, Planet, Scene, Star
 
 _RULE = Circular(0.7)
+
+
+def with_zodi(scene, zodi):
+    """The scene with its local zodi replaced."""
+    return eqx.tree_at(lambda s: s.zodi, scene, zodi, is_leaf=lambda x: x is None)
 
 
 class GaussianCoronagraph(AbstractTableCoronagraph):
@@ -238,7 +243,7 @@ def make_system(
         jnp.broadcast_to(values[None, :, None], (1, 4, 3)),
     )
     planet = Planet(jnp.ones(1), model)
-    return System.from_classical(
+    return Scene.from_classical(
         star,
         (planet,) if planet_groups is None else planet_groups,
         star_mass_Msun=1.0,
@@ -275,7 +280,7 @@ def make_path(
         detector,
         (jnp.array([500.0, 600.0]), jnp.array([0.9, 0.7])),
     )
-    return OpticalPath(
+    return Instrument(
         SimplePrimary(circumscribed_diameter_m=6.0, collecting_area_m2=40.0),
         (ConstantThroughput(0.4),),
         coro,

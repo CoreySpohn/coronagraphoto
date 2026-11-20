@@ -6,15 +6,16 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import make_path, make_system, write_yip
+from conftest import make_path, make_system, with_zodi, write_yip
 from hwoutils.constants import arcsec2rad
 from hwoutils.grids import PixelGrid, SkyOrientation, resample
 from hwoutils.spectral import Band, Quadrature
+from optixstuff import Exposure
 from skyscapes.scene import BlackbodyStar, FlatStar
 from yippy import open_yip
 from zodi.jax import PrecomputedZodi
 
-from coronagraphoto import image_rates
+from coronagraphoto import photon_rates
 
 
 @pytest.mark.parametrize("distinct_products", [False, True])
@@ -63,13 +64,11 @@ def test_yip_image_absolute_photon_fraction(tmp_path, distinct_products):
         star=star, separation_arcsec=float(coro.grid.frame.lod_to_arcsec(550.0))
     )
     zodi = PrecomputedZodi(jnp.array([500.0, 600.0]), jnp.full(2, 1e12))
-    rates = image_rates(
-        system,
+    quadrature = Quadrature.build((Band(549.5, 550.5),), system, path, zodi, order=1)
+    rates = photon_rates(
+        with_zodi(system, zodi),
         path,
-        Quadrature.build((Band(549.5, 550.5),), system, path, zodi, order=1),
-        time_d=0.0,
-        pointing=SkyOrientation(90),
-        zodi=zodi,
+        Exposure(time_d=0.0, roll_deg=90, quadrature=quadrature),
     )
     np.testing.assert_allclose(
         rates.planet.sum(), 40 * 0.4 * phi_star * 1e-10 * 0.3, rtol=2e-6

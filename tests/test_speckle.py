@@ -6,12 +6,12 @@ import jax.numpy as jnp
 import numpy as np
 from conftest import centroid, make_path, make_system
 from hwoutils.epoch import Epoch
-from hwoutils.grids import Frame, Image, Measure, PixelGrid, SkyOrientation
+from hwoutils.grids import Frame, Image, Measure, PixelGrid
 from hwoutils.spectral import Band, Quadrature
-from optixstuff import AbstractSpeckleField
+from optixstuff import AbstractSpeckleField, Exposure
 from skyscapes.scene import Star
 
-from coronagraphoto import image_rates
+from coronagraphoto import photon_rates
 
 
 class Halo(AbstractSpeckleField):
@@ -60,21 +60,22 @@ def test_speckle_leakage_day_clock():
         star=Star(wavelengths_nm=wave, times_d=times, flux_density_jy=flux)
     )
     q = Quadrature.build((Band(549.5, 550.5),), system, path, Halo(), order=1)
+    scene = system
+
+    def rates(scene, path, time_d, roll_deg=0, speckle=None):
+        if speckle is not None:
+            path = eqx.tree_at(
+                lambda p: p.speckle, path, speckle, is_leaf=lambda v: v is None
+            )
+        return photon_rates(
+            scene, path, Exposure(time_d=time_d, roll_deg=roll_deg, quadrature=q)
+        )
+
     snapshots = []
     for time, factor in ((3.0, 2.5), (3.0 + np.pi, 0.5)):
-        base = image_rates(system, path, q, time_d=time, pointing=SkyOrientation(0))
-        timed = eqx.tree_at(
-            lambda p: p.speckle, path, Halo(), is_leaf=lambda v: v is None
-        )
-        first = image_rates(system, timed, q, time_d=time, pointing=SkyOrientation(0))
-        rolled = image_rates(
-            system,
-            path,
-            q,
-            time_d=time,
-            pointing=SkyOrientation(30),
-            speckle=Halo(),
-        )
+        base = rates(scene, path, time)
+        first = rates(scene, path, time, speckle=Halo())
+        rolled = rates(scene, path, time, roll_deg=30, speckle=Halo())
         snapshots.append(first)
         if factor > 0:
             grid = PixelGrid.regular(
@@ -102,13 +103,8 @@ def test_speckle_leakage_day_clock():
             epoch=Epoch(2451547.0, 0.25),
             epoch_d=-shift,
         )
-        same_date = image_rates(
-            shifted,
-            path,
-            q,
-            time_d=time - shift,
-            pointing=SkyOrientation(0),
-            speckle=Halo(epoch_d=3.0 - shift),
+        same_date = rates(
+            shifted, path, time - shift, speckle=Halo(epoch_d=3.0 - shift)
         )
         for a, b in zip(
             jax.tree.leaves(first), jax.tree.leaves(same_date), strict=True
@@ -120,15 +116,8 @@ def test_speckle_leakage_day_clock():
     # the halo spreads to at most ~2e-11 per detector pixel, under the 6.25e-11
     # fixture floor. Fails if the excess itself is clipped at zero. The sum
     # cancels against a floor ~250 times larger: 1e-10 relative.
-    base = image_rates(system, path, q, time_d=3.0, pointing=SkyOrientation(0))
-    dimmed = image_rates(
-        system,
-        path,
-        q,
-        time_d=3.0,
-        pointing=SkyOrientation(0),
-        speckle=Halo(level=-1.01),
-    )
+    base = rates(scene, path, 3.0)
+    dimmed = rates(scene, path, 3.0, speckle=Halo(level=-1.01))
     phi = system.star.photon_flux_density(550.0, 3.0, dist_pc=10.0)
     np.testing.assert_allclose(
         (dimmed.star_leakage - base.star_leakage).sum(),
@@ -136,16 +125,9 @@ def test_speckle_leakage_day_clock():
         rtol=1e-10,
     )
 
-    vectorized = jax.vmap(
-        lambda t: image_rates(
-            system,
-            path,
-            q,
-            time_d=t,
-            pointing=SkyOrientation(0),
-            speckle=Halo(),
-        )
-    )(jnp.array([3.0, 3.0 + np.pi]))
+    vectorized = jax.vmap(lambda t: rates(scene, path, t, speckle=Halo()))(
+        jnp.array([3.0, 3.0 + np.pi])
+    )
     for index, expected in enumerate(snapshots):
         for a, b in zip(
             jax.tree.leaves(vectorized), jax.tree.leaves(expected), strict=True
