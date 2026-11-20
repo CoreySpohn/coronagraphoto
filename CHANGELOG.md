@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.1.0](https://github.com/CoreySpohn/coronagraphoto/compare/v6.0.0...v6.1.0) (2026-11-20)
+
+
+### Miscellaneous Chores
+
+* release 6.1.0 ([66c35a9](https://github.com/CoreySpohn/coronagraphoto/commit/66c35a9ece6a717ff665ad9df547e1a7cbb2801e))
+
 ## [6.0.0](https://github.com/CoreySpohn/coronagraphoto/compare/v5.0.0...v6.0.0) (2026-11-19)
 
 
