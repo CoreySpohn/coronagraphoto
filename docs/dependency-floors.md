@@ -15,13 +15,13 @@ the canary uses the same overrides as CI.
 | Build | hatch-fancy-pypi-readme | 24.1.0 |
 | Build | hatch-vcs | 0.4.0 |
 | Runtime | equinox | 0.13.2 |
-| Runtime | hwoutils | 2.0.0 |
+| Runtime | hwoutils | 2.1.0 |
 | Runtime | jax | 0.8.1 |
 | Runtime | numpy | 2.1.2 |
-| Runtime | optixstuff | 6.0.0 |
+| Runtime | optixstuff | 6.1.0 |
 | Runtime | orbix | 5.0.0 |
 | Runtime | yippy | 3.0.0 |
-| Runtime | skyscapes | 5.0.0 |
+| Runtime | skyscapes | 5.1.0 |
 | Runtime | zodi[jax] | 2.0.0 |
 | Dev | pre-commit | 3.5.0 |
 | Docs | sphinx | 7.2.6 |

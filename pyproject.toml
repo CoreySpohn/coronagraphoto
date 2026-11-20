@@ -18,13 +18,13 @@ classifiers = [
 ]
 dependencies = [
   "equinox>=0.13.2",
-  "hwoutils>=2.0.0",
+  "hwoutils>=2.1.0",
   "jax>=0.8.1",
   "numpy>=2.1.2",
-  "optixstuff>=6.0.0",
+  "optixstuff>=6.1.0",
   "orbix>=5.0.0",
   "yippy>=3.0.0",
-  "skyscapes>=5.0.0",
+  "skyscapes>=5.1.0",
   "zodi[jax]>=2.0.0",
 ]
 [project.optional-dependencies]
