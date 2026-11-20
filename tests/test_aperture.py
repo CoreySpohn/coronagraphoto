@@ -13,6 +13,7 @@ from conftest import (
     make_path,
     make_system,
     with_zodi,
+    write_yip,
 )
 from optixstuff import Detector, FramePlan
 from optixstuff.apertures import Circular, HalfMaximum
@@ -539,3 +540,43 @@ def test_records_of_two_targets_stack_and_read_under_vmap(sloped):
             )
     zodi = np.asarray(together.local_zodi)
     assert np.all(abs(zodi[0] / zodi[1] - 1) > 0.01)
+
+
+def test_response_throughput_matches_stored_curve(tmp_path):
+    """The aperture response and the YIP throughput curve describe one coronagraph.
+
+    The response integrates the off-axis PSF inside the rule's aperture on the
+    detector; the stored curve is the designer's tabulated throughput for the
+    same rule. Averaged over position angle they must agree to the response's
+    sampling error.
+    """
+    from optixstuff import ConstantThroughput, Instrument, SimplePrimary
+    from yippy import open_yip
+
+    rule = Circular(0.7)
+    coro = open_yip(write_yip(tmp_path / "yip")).prepare(rules=(rule,))
+    scale = float(coro.frame.lod_to_arcsec(550.0))
+    instrument = Instrument(
+        primary=SimplePrimary(
+            circumscribed_diameter_m=coro.frame.diameter_m, collecting_area_m2=10.0
+        ),
+        attenuating_elements=(ConstantThroughput(throughput=1.0),),
+        coronagraph=coro,
+        detector=Detector(pixel_scale_arcsec=0.1 * scale, shape=(96, 96), qe=1.0),
+    )
+    quadrature = cp.build_exposure(
+        make_system(), instrument, (Band(549.0, 551.0),), time_d=0.0
+    ).quadrature
+    response = cp.aperture_response(
+        instrument,
+        quadrature,
+        rule=rule,
+        n_separations=6,
+        n_angles=8,
+        max_separation_arcsec=3.0 * scale,
+    )
+    n_sep = response.throughput.shape[-1]
+    sep_lod = np.arange(n_sep) * response.separation_step_arcsec / scale
+    expected = np.asarray(coro.curves().evaluate("throughput", sep_lod))
+    got = np.asarray(response.throughput)[0, 0].mean(axis=0)
+    np.testing.assert_allclose(got, expected, rtol=2e-2, atol=7e-3)

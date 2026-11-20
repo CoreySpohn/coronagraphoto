@@ -59,7 +59,7 @@ def test_aperture_closure_two_samplings():
     omega = (
         float(record.evaluate("core_area_lod2", 0.5)) * lod_arcsec**2 * arcsec2rad**2
     )
-    transmission = float(coro.uniform_sky_response(0.5, 550.0))
+    transmission = float(coro.uniform_sky_profile.evaluate(0.5))
     reference = (
         40
         * 0.4

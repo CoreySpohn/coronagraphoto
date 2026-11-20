@@ -94,9 +94,8 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 
+from optixstuff import ConstantThroughput, FramePlan, IdealDetector, Instrument
 from optixstuff.spectral import Band
-from yippy import open_yip
-from optixstuff import FramePlan, Instrument
 from skyscapes import from_exovista
 from skyscapes.datasets import fetch_scene
 from yippy import fetch_yip, open_yip
@@ -104,12 +103,11 @@ from coronagraphoto import build_exposure, expected, observe
 
 scene = from_exovista(fetch_scene(), load_disk=False)
 coronagraph = open_yip(fetch_yip("eac1_aavc_2d")).prepare()
-instrument = Instrument.from_default_setup(
-    coronagraph,
-    attenuating_throughput=0.4,
-    qe=0.8,
-    detector_shape=(128, 128),
-    pixel_scale_arcsec=0.01,
+instrument = Instrument(
+    primary=coronagraph.primary,  # the telescope the YIP was computed for
+    attenuating_elements=(ConstantThroughput(throughput=0.4),),
+    coronagraph=coronagraph,
+    detector=IdealDetector(pixel_scale_arcsec=0.01, shape=(128, 128)),
 )
 bands = (Band(500.0, 600.0),)
 exposure = build_exposure(

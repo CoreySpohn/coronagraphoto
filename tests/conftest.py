@@ -136,7 +136,6 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
     sky_trans: Image
     uniform_sky_profile: SampledProfile
     bandpass: Band | None = None
-    outer_working_angle_lod: object = None
     sigma_lod: float = 0.35
     chromatic: bool = eqx.field(static=True, default=False)
 

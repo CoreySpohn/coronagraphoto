@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import GaussianCoronagraph, centroid, make_path, make_system
-from optixstuff import Exposure, MultiBandCoronagraph, ScalarCoronagraph
+from optixstuff import Exposure, MultiBandCoronagraph
 from optixstuff.grids import Frame, PixelGrid, SkyOrientation
 from optixstuff.spectral import Band, Quadrature
 from skyscapes.disk import ExovistaDisk
@@ -213,18 +213,8 @@ def test_compact_disk_planet_centroids():
     )
 
 
-@pytest.mark.parametrize("throughput_only", [False, True])
-def test_imaging_capability_required(throughput_only):
-    """ETC-only and throughput-only paths cannot produce detector pixels."""
-    path = make_path(n=8)
-    scalar = ScalarCoronagraph(
-        grid=path.coronagraph.grid,
-        throughput_fraction=0.3,
-        aperture_area_lod2=1.0,
-        stellar_leakage_density_lod2=1e-9,
-    )
-    path = eqx.tree_at(
-        lambda p: p.coronagraph, path, None if throughput_only else scalar
-    )
+def test_imaging_capability_required():
+    """A throughput-only path cannot produce detector pixels."""
+    path = eqx.tree_at(lambda p: p.coronagraph, make_path(n=8), None)
     with pytest.raises(TypeError, match="AbstractImagingCoronagraph"):
         rates_at(make_system(), path, Quadrature.monochromatic(550.0))
