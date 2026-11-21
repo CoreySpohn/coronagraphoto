@@ -174,7 +174,8 @@ frame_time_s=100.0, post_processing=...)` returns one time per band, planet and 
   disk and any speckle realization are those of `exposure.time_d`.
 - The star's sky position is the one the scene held when the record was
   built; a scene edited afterwards needs a new record.
-- Thermal and companion terms are zero, as in the image readers.
+- Thermal is the record's per-pixel warm-telescope rate times `n_pix`, as in the
+  image readers; companion terms are zero.
 
 ## Agreement with the images
 

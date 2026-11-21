@@ -1,8 +1,9 @@
 """Closure of the analytic aperture rates against the image path's aperture record.
 
 ``jaxedith.rates`` reads four sources from tabulated performance curves of the
-coronagraph. ``coronagraphoto.aperture_rates`` reads the same four from images
-of the same scene rendered on the detector. They share the telescope, the
+coronagraph, plus the warm telescope's thermal emission.
+``coronagraphoto.aperture_rates`` reads the same five from images of the same
+scene rendered on the detector. They share the telescope, the
 scene, the detector and the aperture rule, so the gap between them is the gap
 between the idealized curve read and the image. It is measured here, source by
 source, against separation, and each part of it is tied to a cause by a check
@@ -43,7 +44,7 @@ import numpy as np
 import pytest
 from conftest import closure_system, make_path, write_yip
 from jaxedith import rates as analytic_rates
-from optixstuff import Detector
+from optixstuff import Detector, WarmEmission
 from optixstuff.apertures import Circular
 from optixstuff.spectral import Band
 from scipy.interpolate import PchipInterpolator
@@ -56,7 +57,7 @@ pytestmark = pytest.mark.medium(
     reason="two YIP loads and a dozen aperture responses at three pixel pitches"
 )
 
-SOURCES = ("planet", "star_leakage", "local_zodi", "exozodi")
+SOURCES = ("planet", "star_leakage", "local_zodi", "exozodi", "thermal")
 RULE = Circular(0.7)
 ROLL, CONTRAST = 15.0, 1e-9
 BANDS = (Band(500.0, 550.0), Band(550.0, 600.0))
@@ -99,7 +100,13 @@ class Case:
             qe_curve=(jnp.array([500.0, 600.0]), jnp.array([0.9, 0.7])),
             survival_fraction=0.9,
         )
-        self.path = eqx.tree_at(lambda p: p.detector, base, self.detector)
+        path = eqx.tree_at(lambda p: p.detector, base, self.detector)
+        self.path = eqx.tree_at(
+            lambda p: p.warm_emission,
+            path,
+            WarmEmission(290.0, 0.5),
+            is_leaf=lambda x: x is None,
+        )
         self.exposure = cp.build_exposure(
             system, self.path, bands, time_d=0.0, roll_deg=ROLL
         )
@@ -351,8 +358,9 @@ def test_registered_bounds(table):
     - star_leakage: 4.1e-3, the second-order chromatic term. Bound 6.2e-3. On
       the radial-leakage YIP the curve interpolation adds and the worst is
       3.4e-2 at 0.8 lambda/D: bound 5.1e-2.
-    - local_zodi and n_pix: the zodi and the sky transmission are uniform and
-      both readers use the same aperture, so only rounding remains: 1e-9.
+    - local_zodi, thermal and n_pix: the zodi, the sky transmission and the
+      warm emission (290 K, emissivity 0.5) are uniform and both readers use
+      the same aperture, so only rounding remains: 1e-9.
     - exozodi: the raw gap falls from 36% at 0.8 lambda/D to 0.9% at 3
       (``EXOZODI_GAP``); ``test_disk_structure`` explains it.
 
@@ -366,6 +374,7 @@ def test_registered_bounds(table):
     assert _worst(table, "star_leakage", radial=True) < 5.1e-2
     for radial in (False, True):
         assert _worst(table, "local_zodi", radial=radial) < 1e-9
+        assert _worst(table, "thermal", radial=radial) < 1e-9
         assert _worst(table, "n_pix", radial=radial) < 1e-9
     for s in SEPARATIONS:
         for angle in POSITION_ANGLES:
@@ -374,7 +383,7 @@ def test_registered_bounds(table):
     # The tabulated sources are the same across the two YIPs.
     for angle in POSITION_ANGLES:
         for s in SEPARATIONS:
-            for source in ("planet", "exozodi", "local_zodi"):
+            for source in ("planet", "exozodi", "local_zodi", "thermal"):
                 np.testing.assert_allclose(
                     table[True, angle, s]["band"][source],
                     table[False, angle, s]["band"][source],

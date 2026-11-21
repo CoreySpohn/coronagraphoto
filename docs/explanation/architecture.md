@@ -29,7 +29,8 @@ produces NaN in the corresponding planet or disk rate image. Zero-flux planets
 and dark scene pixels require no response.
 
 Photon quantities come directly from the scene. Photon `Rates` retains those
-four terms and zero thermal/companion fields. `expected` sends each
+four terms, a uniform thermal term from `Instrument.warm_emission` and a zero
+companion field. `expected` sends each
 photon record carrying that node's wavelength and integration weight to `detector.electrons`.
 `observe` calls `detector.draw` after all electron terms have been accumulated.
 

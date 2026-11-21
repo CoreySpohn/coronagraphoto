@@ -45,8 +45,8 @@ from coronagraphoto.simulation import _run
 # the rings together sample every pixel phase and no azimuth is favoured.
 _GOLDEN = (np.sqrt(5.0) - 1.0) / 2.0
 
-# The fields of a read that vary; thermal and companion terms are zero.
-_READ_FIELDS = ("planet", "star_leakage", "local_zodi", "exozodi")
+# The fields of a read that vary; companion terms are zero.
+_READ_FIELDS = ("planet", "star_leakage", "local_zodi", "exozodi", "thermal")
 
 
 class ApertureResponse(eqx.Module):
@@ -115,6 +115,9 @@ class ApertureRecord(eqx.Module):
         exozodi: The same sums for the scene's disk.
         n_pix: Sum of the aperture weights at each lattice position, shape
             (2, W, 2 ny, 2 nx).
+        thermal: The warm telescope's emission per detector pixel at each
+            node, shape (W, Q); zero without ``warm_emission``. The emission
+            is uniform, so a read is this times the aperture's ``n_pix``.
         local_zodi: The scene's local-zodi model, or None for no local zodi.
         sky_frame: The scene's ``SkyFrame``: its right ascension and
             declination (None for an unplaced scene) and the epoch, which is
@@ -134,6 +137,7 @@ class ApertureRecord(eqx.Module):
     uniform_sky: Array
     exozodi: Array
     n_pix: Array
+    thermal: Array
     local_zodi: AbstractLocalZodi | None
     sky_frame: SkyFrame
     reads: tuple[str, ...] = eqx.field(static=True)
@@ -434,6 +438,11 @@ def aperture_record(
     leakage with the old planet throughput. The check costs one source image
     per band, small beside the build.
 
+    The warm telescope's emission is uniform and carries no coronagraph factor,
+    so the record keeps its per-pixel rate at each node (zero when the
+    instrument has no ``warm_emission``) and a read multiplies it by the
+    aperture's pixel count.
+
     The record's ``reads`` lists the scene paths it was built from: the ``star``
     and the ``dynamics.frame`` (distance, position and epoch), plus the
     ``local_zodi`` when there is one and the ``disk`` with its two midplane angles
@@ -478,6 +487,7 @@ def aperture_record(
         uniform_sky,
         exozodi,
         n_pix,
+        components["thermal"][:, :, 0, 0],
         scene.local_zodi,
         scene.sky_frame,
         reads=(
@@ -552,7 +562,8 @@ def aperture_rates(
     ``detector.electrons``. Planet rates are linear in separation between the
     response's rings; backgrounds are bilinear between half-pixel
     positions. Everything is NaN where the aperture leaves the detector or the
-    separation leaves the planet table. Thermal and companion terms are zero.
+    separation leaves the planet table. Thermal is the per-pixel rate of the
+    record times ``n_pix``; companion terms are zero.
 
     All arguments are scalars apart from ``contrast``. Batch with
     ``jax.vmap``; a ``time_d`` shared by a batch of planets (``in_axes`` None,
@@ -574,6 +585,7 @@ def aperture_rates(
     star_leakage = _bilinear(record.star_leakage, *here)
     local_zodi = _bilinear(record.uniform_sky, *here)
     exozodi = _bilinear(record.exozodi, *fixed)
+    n_pix = _bilinear(record.n_pix, *here)
     if record.local_zodi is not None:
         local_zodi = local_zodi * record.local_zodi.photon_radiance(
             record.quadrature.nodes_nm, record.sky_frame, time_d
@@ -581,7 +593,6 @@ def aperture_rates(
     planet = contrast * _linear(
         record.planet_per_contrast, separation / record.separation_step_arcsec
     )
-    n_pix = _bilinear(record.n_pix, *here)
 
     def rates(moment, variance=None):
         return Rates(
@@ -591,6 +602,7 @@ def aperture_rates(
             star_leakage=star_leakage[moment],
             local_zodi=local_zodi[moment],
             exozodi=exozodi[moment],
+            thermal=record.thermal * n_pix[moment][:, None],
             n_pix=n_pix[moment],
             variance=variance,
         )

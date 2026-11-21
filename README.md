@@ -51,8 +51,9 @@ the epoch, roll, wavelength quadrature and frame plan. The image reader takes
 | `observe` | `Image`, data `(W, ny, nx)` | electrons/pixel |
 
 The fields are `planet`, `star_leakage`, `local_zodi`, `exozodi`, `thermal`
-and `stellar_companions`; the reader does not model the last two, so they hold
-zeros. Call `.total()`
+and `stellar_companions`; the reader does not model the last one, so it holds
+zeros. `thermal` is the warm telescope's uniform emission from
+`Instrument.warm_emission`, zero without it. Call `.total()`
 to combine terms. Optical throughput excludes detector yield. Only
 `detector.electrons` applies QE and survival, at the quadrature nodes.
 `observe` calls `detector.draw` once on the combined electron budget.

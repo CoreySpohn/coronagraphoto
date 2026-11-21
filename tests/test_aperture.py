@@ -560,6 +560,90 @@ def test_scene_route_is_a_vmap_of_the_read_and_feeds_the_calculator(plateau):
         cp.scene_aperture_rates(record, scene, 0.0)
 
 
+def _warm(instrument, temperature_K=290.0, emissivity=0.5):
+    """The instrument with a lumped warm-telescope emission."""
+    return eqx.tree_at(
+        lambda p: p.warm_emission,
+        instrument,
+        ox.WarmEmission(temperature_K, emissivity),
+        is_leaf=lambda x: x is None,
+    )
+
+
+def _pixel_thermal_rate(instrument, nodes_nm, temperature_K, emissivity):
+    """Warm emission per detector pixel in photons/s/nm, from primitives.
+
+    Planck photon radiance 2 c / lambda**4 / expm1(h c / (lambda k T)) per
+    meter of wavelength, converted to per nanometer, times the emissivity, the
+    geometric collecting area and the pixel solid angle.
+    """
+    from scipy import constants
+
+    wavelength_m = np.asarray(nodes_nm) * 1e-9
+    x = constants.h * constants.c / (wavelength_m * constants.k * temperature_K)
+    radiance = 2 * constants.c / wavelength_m**4 / np.expm1(x) * 1e-9
+    pixel_sr = np.deg2rad(instrument.detector.pixel_scale_arcsec / 3600.0) ** 2
+    return emissivity * radiance * instrument.primary.collecting_area_m2 * pixel_sr
+
+
+def test_thermal_record_and_scene_read(plateau):
+    """Fails if the record drops, double counts or misshapes warm emission.
+
+    Basis: the per-pixel rate from primitives times the aperture pixel count,
+    for the mean and the squared-weight records, at rtol 1e-12 in float64
+    (a Planck exponential and a four-factor product); the scalar read and the
+    scene read equal exactly; an invalid planet reads zero; an instrument
+    without warm emission reads exact zeros.
+    """
+    _, cold, exposure, response, _ = plateau
+    instrument = _warm(cold)
+    scene = make_system(
+        separation_arcsec=jnp.array([0.012, 0.03]),
+        planet_groups=(
+            Planet(
+                jnp.ones(2),
+                GridPhysicalModel(
+                    jnp.array([400.0, 500.0, 600.0, 700.0]),
+                    jnp.array([0.0, 90.0, 180.0]),
+                    jnp.full((2, 4, 3), 1e-10),
+                ),
+            ),
+        ),
+    )
+    scene = eqx.tree_at(lambda s: s.valid, scene, jnp.array([True, False]))
+    record = cp.aperture_record(scene, instrument, exposure, response)
+    pixel = _pixel_thermal_rate(instrument, record.quadrature.nodes_nm, 290.0, 0.5)
+    assert record.thermal.shape == (1, 4)
+    np.testing.assert_allclose(record.thermal, pixel, rtol=1e-12)
+    times = jnp.array([0.0, 30.0, 90.0])
+    rates = cp.scene_aperture_rates(record, scene, times)
+    assert rates.thermal.shape == (1, 4, 2, 3)
+    assert rates.variance.thermal.shape == (1, 4, 2, 3)
+    east, north = scene.positions(times)
+    for t, time in enumerate(times):
+        single = cp.aperture_rates(record, east[0, t], north[0, t], 1e-10, time_d=time)
+        np.testing.assert_allclose(
+            single.thermal, pixel * single.n_pix[:, None], rtol=1e-12
+        )
+        np.testing.assert_allclose(
+            single.variance.thermal,
+            pixel * single.variance.n_pix[:, None],
+            rtol=1e-12,
+        )
+        np.testing.assert_array_equal(rates.thermal[..., 0, t], single.thermal)
+        np.testing.assert_array_equal(
+            rates.variance.thermal[..., 0, t], single.variance.thermal
+        )
+    assert np.all(np.asarray(rates.thermal[..., 1, :]) == 0.0)
+    assert np.all(np.asarray(rates.thermal[..., 0, :]) > 0.0)
+    off = cp.aperture_rates(record, 1.0, 1.0, 1e-10, time_d=0.0)
+    assert np.all(np.isnan(np.asarray(off.thermal)))
+    cold_record = cp.aperture_record(scene, cold, exposure, response)
+    np.testing.assert_array_equal(cold_record.thermal, 0.0)
+    cold_rates = cp.scene_aperture_rates(cold_record, scene, times)
+    np.testing.assert_array_equal(cold_rates.thermal, 0.0)
+
+
 @pytest.mark.medium(reason="4096 detector frames of 48 by 48 pixels drawn on the host")
 @vv.case("aperture-photon-budget", "code-verification")
 def test_variance_matches_weighted_pixel_draws(sloped):

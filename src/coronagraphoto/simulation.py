@@ -130,13 +130,28 @@ def _node_rates(
         rendered = coro.render_scene(scene, wavelength_nm, grid=detector_pixels(native))
         disk = gain * rendered.image.data
         disk = jnp.where(rendered.valid, disk, jnp.nan)
+    # The warm telescope radiates uniformly: no coronagraph factor, system
+    # throughput, flux scale or sky transmission, only the pixel solid angle.
+    thermal = (
+        Image(
+            jnp.broadcast_to(
+                instrument.thermal_photon_rate_per_sr(wavelength_nm), grid.shape
+            ),
+            grid,
+            (),
+            Measure.density("sr"),
+            "ph s^-1 nm^-1",
+        )
+        .integrated()
+        .data
+    )
     zero = jnp.zeros(grid.shape)
     return dict(
         planet=planet,
         star_leakage=leakage,
         local_zodi=local,
         exozodi=disk,
-        thermal=zero,
+        thermal=thermal,
         stellar_companions=zero,
     )
 
@@ -326,7 +341,8 @@ def photon_rates(scene: Scene, instrument: Instrument, exposure: Exposure) -> Ra
     Call integrate() on the returned record to integrate its spectral nodes.
     No QE or survival is applied. Local zodi comes from ``scene.local_zodi`` (None
     disables it); the speckle field from ``instrument.speckle`` (None adds
-    none). Thermal and companion terms are zero.
+    none). Thermal is the warm telescope's uniform emission from
+    ``instrument.warm_emission`` (zero when None); companion terms are zero.
     """
     components = _run(scene, instrument, exposure, "photons")
     return Rates(exposure.quadrature, "photon", **components)
