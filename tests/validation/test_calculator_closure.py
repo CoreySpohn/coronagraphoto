@@ -83,7 +83,7 @@ def closure(tmp_path_factory):
     east, north = system.positions(jnp.array([0.0]))[:2, 0, 0]
     separation = jnp.hypot(east, north)
     x, y = SkyOrientation(roll).sky_to_detector(east, north)
-    pp = ox.PostProcessing(1e-4, 0.01)
+    pp = ox.PostProcessing(1e-4, 0.01, background_variance_factor=1.0)
     frame_time, n_frames = 100.0, 360.0
     plan = FramePlan(frame_time, n_frames)
     levels = []

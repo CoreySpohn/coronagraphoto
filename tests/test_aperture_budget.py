@@ -82,7 +82,7 @@ def test_record_meets_the_planner_budget(tmp_path):
     record, first_build_s = build()
     build_s = np.median([build()[1] for _ in range(5)])
 
-    pp = ox.PostProcessing(1e-4, 0.01)
+    pp = ox.PostProcessing(1e-4, 0.01, background_variance_factor=1.0)
 
     def read(east, north, contrast, time_d):
         rates = cp.aperture_rates(record, east, north, contrast, time_d=time_d)

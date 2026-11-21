@@ -100,8 +100,10 @@ its live seconds `b`, and the squared residual rate `f2`:
 squared-weight rates, dark current, clock-induced charge and read noise over
 the aperture's pixels. `optixstuff.PostProcessing` sets the residual speckle and exozodi
 fractions behind `f2` and a `background_variance_factor` that multiplies the
-variance of every source but the planet (one by default; two is the AYO and
-pyEDITH convention); without it the residual is zero and the factor is one.
+variance of every source but the planet. The factor is a required argument:
+two for differential imaging, as in AYO and pyEDITH, one when no reference
+image is subtracted. Omit the `post_processing` argument of the calculator and
+the residual is zero and the factor is one.
 
 `optixstuff.exposure_time` returns `optixstuff.ExposureTime(time_s, valid)`. The time is continuous;
 round it to whole frames with `optixstuff.frames_for_time`. A target that no
