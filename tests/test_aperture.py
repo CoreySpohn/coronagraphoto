@@ -5,6 +5,7 @@ import ineedvalidation as vv
 import jax
 import jax.numpy as jnp
 import numpy as np
+import optixstuff as ox
 import pytest
 from conftest import (
     GaussianCoronagraph,
@@ -365,7 +366,7 @@ def test_read_under_jax_transformations(sloped):
         rates = cp.aperture_rates(
             record, *_offsets(separation, angle), contrast, time_d=0.0
         )
-        return cp.snr(rates, detector, 3600.0, frame_time_s=100.0)[0]
+        return ox.snr(rates, detector, 3600.0, frame_time_s=100.0)[0]
 
     separations = jnp.array([0.021, 0.04, 0.0633])
     angles = jnp.array([10.0, 200.0, 310.0])
@@ -406,8 +407,8 @@ def test_reads_outside_the_tables_and_unsupported_builds(sloped):
             record, *_offsets(separation, 0.0), 1e-10, time_d=0.0
         )
         assert np.all(np.isnan(outside.planet))
-        assert np.isnan(cp.snr(outside, detector, 3600.0, frame_time_s=100.0)).all()
-        solved = cp.exposure_time(outside, detector, 5.0, frame_time_s=100.0)
+        assert np.isnan(ox.snr(outside, detector, 3600.0, frame_time_s=100.0)).all()
+        solved = ox.exposure_time(outside, detector, 5.0, frame_time_s=100.0)
         assert not solved.valid.any() and float(solved.time_s[0]) == 0.0
     # The aperture leaves the detector before the pixel centre does.
     half = 24 * float(detector.pixel_scale_arcsec)

@@ -61,8 +61,8 @@ cd coronagraphoto
 uv sync --all-packages
 ```
 
-`uv` and `--all-packages` ensure every workspace dependency (yippy,
-skyscapes, optixstuff, ...) installs as an editable workspace member.
+`uv` and `--all-packages` ensure every workspace dependency (skyscapes,
+optixstuff, ...) installs as an editable workspace member.
 
 ## Sibling libraries
 
@@ -73,12 +73,13 @@ forward model:
 |---|---|
 | `skyscapes` | `Scene`, `Star`, `Planet`, `Disk`, physical models |
 | `optixstuff` | `Instrument`, detectors, throughput, filters, bands and grids |
-| `yippy` | YIP-based PSF synthesis (the coronagraph backend) |
 | `hwoutils` | Shared constants, unit conversions and JAX configuration |
 
 `pip install coronagraphoto` pulls all of these as transitive
 dependencies. If you `uv sync` from source, use `--all-packages` to
-get the workspace-editable versions.
+get the workspace-editable versions. The quick start and the tests read
+Yield Input Packages through `yippy`, which is a separate install
+(`pip install yippy`) and is not a runtime dependency.
 
 ## Verifying the install
 

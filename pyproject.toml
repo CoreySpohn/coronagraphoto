@@ -23,7 +23,6 @@ dependencies = [
   "numpy>=2.1.2",
   "optixstuff>=6.1.0",
   "orbix>=5.0.0",
-  "yippy>=3.0.0",
   "skyscapes>=6.0.0",
 ]
 [project.optional-dependencies]
@@ -35,6 +34,7 @@ docs = [
   "sphinx-autoapi>=3.0.0",
   "sphinxcontrib-mermaid>=0.9.2",
   "ipython>=8.18.1",
+  "yippy>=3.0.0",
   "zodi>=2.0.0",
 ]
 test = [
@@ -50,6 +50,7 @@ test = [
   "pytest-fail-slow>=0.1.0",
   "lod_unit>=1.8.0",
   "packaging>=23.1",
+  "yippy>=3.0.0",
   "zodi>=2.0.0",
 ]
 
@@ -107,10 +108,6 @@ slow_s = 300
 [tool.deptry]
 known_first_party = ["coronagraphoto"]
 optional_dependencies_dev_groups = ["dev", "docs", "test"]
-
-[tool.deptry.per_rule_ignores]
-# yippy is not imported by the library; it stays installed for the tutorial.
-DEP002 = ["yippy"]
 
 [tool.ty.environment]
 python-version = "3.11"

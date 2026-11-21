@@ -11,7 +11,8 @@ The reader composes shared contracts without owning the underlying physics.
 | Aperture rules and YIP PSFs | yippy |
 | Collecting area, optical throughput, coronagraph, detector and frame plan | optixstuff |
 | Per-pixel assembly and node streaming | coronagraphoto |
-| Aperture tables, S/N and exposure time | coronagraphoto |
+| Aperture tables | coronagraphoto |
+| S/N and exposure time from rates | optixstuff |
 
 With collecting area A and throughput T excluding the detector, one node is:
 
@@ -50,7 +51,7 @@ use `(x,y)`, and the exposure's `roll_deg` describes the observation roll.
 The aperture tables are a reduction of the same node images. The background
 terms of one render are summed in a photometric aperture at every half-pixel
 position, and the planet term is replaced by a throughput curve calibrated
-once per instrument. `snr` and `exposure_time` then read
+once per instrument. `optixstuff.snr` and `optixstuff.exposure_time` then read
 `detector.mean_and_variance`, so the analytic exposure time and a drawn image
 share one statistical model. See
 [aperture rates and exposure time](exposure_time).

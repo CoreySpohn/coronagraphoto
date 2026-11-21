@@ -98,16 +98,19 @@ its live seconds `b`, and the squared residual rate `f2`:
 
 `b` comes from `detector.mean_and_variance`: source shot noise from the
 squared-weight rates, dark current, clock-induced charge and read noise over
-the aperture's pixels. `ResidualFractions` sets the residual speckle and exozodi
-fractions behind `f2`; without it the residual is zero.
+the aperture's pixels. `optixstuff.PostProcessing` sets the residual speckle and exozodi
+fractions behind `f2` and a `background_variance_factor` that multiplies the
+variance of every source but the planet (one by default; two is the AYO and
+pyEDITH convention); without it the residual is zero and the factor is one.
 
-`exposure_time` returns `ExposureTime(time_s, valid)`. The time is continuous;
+`optixstuff.exposure_time` returns `optixstuff.ExposureTime(time_s, valid)`. The time is continuous;
 round it to whole frames with `optixstuff.frames_for_time`. A target that no
 time can reach, because the planet is at or below the residual floor, has
 `valid` False and a time of zero, so no infinity enters later arithmetic.
 
 ```python notest
 import jax
+import optixstuff as ox
 import coronagraphoto as cp
 
 exposure = cp.build_exposure(scene, instrument, bands, time_d=0.0)
@@ -119,7 +122,7 @@ def time_to_snr(east_arcsec, north_arcsec, contrast, time_d):
     rates = cp.aperture_rates(
         record, east_arcsec, north_arcsec, contrast, time_d=time_d
     )
-    return cp.exposure_time(rates, instrument.detector, 7.0, frame_time_s=100.0)
+    return ox.exposure_time(rates, instrument.detector, 7.0, frame_time_s=100.0)
 
 
 # One observation time for the whole batch of planets, then a batch of times.

@@ -4,6 +4,7 @@ import equinox as eqx
 import ineedvalidation as vv
 import jax.numpy as jnp
 import numpy as np
+import optixstuff as ox
 import pytest
 from conftest import make_path, make_system, with_zodi, write_yip
 from optixstuff import Detector, FramePlan
@@ -82,7 +83,7 @@ def closure(tmp_path_factory):
     east, north = system.positions(jnp.array([0.0]))[:2, 0, 0]
     separation = jnp.hypot(east, north)
     x, y = SkyOrientation(roll).sky_to_detector(east, north)
-    pp = cp.ResidualFractions(1e-4, 0.01)
+    pp = ox.PostProcessing(1e-4, 0.01)
     frame_time, n_frames = 100.0, 360.0
     plan = FramePlan(frame_time, n_frames)
     levels = []
@@ -182,8 +183,8 @@ def closure(tmp_path_factory):
         )
         _, variance = detector.mean_and_variance(image_rates, plan)
         image_snr = image[0, 0] * live / np.sqrt(variance + residual_sq(image[0], live))
-        kwargs = dict(frame_time_s=frame_time, residuals=pp)
-        solved = cp.exposure_time(rates, detector, image_snr, **kwargs)
+        kwargs = dict(frame_time_s=frame_time, post_processing=pp)
+        solved = ox.exposure_time(rates, detector, image_snr, **kwargs)
 
         doubled = eqx.tree_at(lambda s: s.disk.amplitude.level, system, 6.0)
         doubled_record = cp.aperture_record(doubled, path, exposure, response)
@@ -197,7 +198,7 @@ def closure(tmp_path_factory):
                 pixels=np.stack([electrons.n_pix, electrons.variance.n_pix]) / pixels,
                 planet_band=planet_band.max(-1),
                 lattice_band=lattice_band,
-                snr=np.stack([cp.snr(rates, detector, live, **kwargs), image_snr]),
+                snr=np.stack([ox.snr(rates, detector, live, **kwargs), image_snr]),
                 time=np.asarray(solved.time_s),
                 valid=np.asarray(solved.valid),
                 live=live,

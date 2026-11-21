@@ -419,7 +419,7 @@ def aperture_rates(
 
     The returned ``Rates`` has fields of shape (W, Q), ``n_pix`` of shape (W,)
     and squared-weight ``variance`` rates. Pass it to
-    :func:`coronagraphoto.snr` or :func:`coronagraphoto.exposure_time`, or to
+    :func:`optixstuff.snr` or :func:`optixstuff.exposure_time`, or to
     ``detector.electrons``. Planet rates are linear in separation between the
     response's rings; backgrounds are bilinear between half-pixel
     positions. Everything is NaN where the aperture leaves the detector or the

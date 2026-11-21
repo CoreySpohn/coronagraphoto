@@ -6,6 +6,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import optixstuff as ox
 import pytest
 from conftest import make_path, make_system, with_zodi, write_yip
 from optixstuff import Detector
@@ -81,14 +82,14 @@ def test_record_meets_the_planner_budget(tmp_path):
     record, first_build_s = build()
     build_s = np.median([build()[1] for _ in range(5)])
 
-    pp = cp.ResidualFractions(1e-4, 0.01)
+    pp = ox.PostProcessing(1e-4, 0.01)
 
     def read(east, north, contrast, time_d):
         rates = cp.aperture_rates(record, east, north, contrast, time_d=time_d)
-        kwargs = dict(frame_time_s=100.0, residuals=pp)
+        kwargs = dict(frame_time_s=100.0, post_processing=pp)
         return (
-            cp.snr(rates, detector, 36000.0, **kwargs),
-            cp.exposure_time(rates, detector, 7.0, **kwargs).time_s,
+            ox.snr(rates, detector, 36000.0, **kwargs),
+            ox.exposure_time(rates, detector, 7.0, **kwargs).time_s,
         )
 
     def timed(function, *args, repeats):
