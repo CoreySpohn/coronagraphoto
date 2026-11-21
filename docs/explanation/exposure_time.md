@@ -94,8 +94,9 @@ it fell at the roll the record was rendered at. `roll_deg` is the position angle
 
 ## S/N and exposure time
 
-`snr(rates, detector, time_s, frame_time_s=...)` and
-`exposure_time(rates, detector, target_snr, frame_time_s=...)` take the read.
+`snr(rates, detector, time_s, frame_time_s=..., post_processing=...)` and
+`exposure_time(rates, detector, target_snr, frame_time_s=..., post_processing=...)`
+take the read.
 With planet electrons/s `p`, the detector variance of one frame divided by
 its live seconds `b`, and the squared residual rate `f2`:
 
@@ -108,8 +109,9 @@ the aperture's pixels. `optixstuff.PostProcessing` sets the residual speckle and
 fractions behind `f2` and a `background_variance_factor` that multiplies the
 variance of every source but the planet. The factor is a required argument:
 two for differential imaging, as in AYO and pyEDITH, one when no reference
-image is subtracted. Omit the `post_processing` argument of the calculator and
-the residual is zero and the factor is one.
+image is subtracted. Both calculators require the `post_processing` argument:
+there is no default, so no residual and a factor of one must be stated as
+`PostProcessing(background_variance_factor=1.0)`.
 
 `optixstuff.exposure_time` returns `optixstuff.ExposureTime(time_s, valid)`. The time is continuous;
 round it to whole frames with `optixstuff.frames_for_time`. A target that no
@@ -121,6 +123,7 @@ import jax
 import optixstuff as ox
 import coronagraphoto as cp
 
+post_processing = ox.PostProcessing(1 / 30, 1 / 30, background_variance_factor=2.0)
 exposure = cp.build_exposure(scene, instrument, bands, time_d=0.0)
 response = cp.aperture_response(instrument, exposure.quadrature)
 record = cp.aperture_record(scene, instrument, exposure, response)
@@ -130,7 +133,13 @@ def time_to_snr(east_arcsec, north_arcsec, contrast, time_d):
     rates = cp.aperture_rates(
         record, east_arcsec, north_arcsec, contrast, time_d=time_d
     )
-    return ox.exposure_time(rates, instrument.detector, 7.0, frame_time_s=100.0)
+    return ox.exposure_time(
+        rates,
+        instrument.detector,
+        7.0,
+        frame_time_s=100.0,
+        post_processing=post_processing,
+    )
 
 
 # One observation time for the whole batch of planets, then a batch of times.
@@ -144,7 +153,7 @@ times = by_time(easts, norths, contrasts, observation_times_d)
 planet of a scene and every time in `time_d`, with the positions and contrasts
 taken from the scene at the record's wavelength nodes. Its `Rates` fields have
 shape `(W, Q, K, T)`, so `optixstuff.exposure_time(rates, detector, 7.0,
-frame_time_s=100.0)` returns one time per band, planet and time; a planet with
+frame_time_s=100.0, post_processing=...)` returns one time per band, planet and time; a planet with
 `scene.valid` False reads zero and its time is invalid.
 
 ## What the tables do not hold

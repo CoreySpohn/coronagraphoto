@@ -76,8 +76,8 @@ path fills tables once and the answer is read from them:
 | `aperture_record(scene, instrument, exposure, response)` | once per target and exposure | star-leakage, uniform-sky and exozodi tables summed in the aperture on a half-pixel lattice, and `planet_per_contrast` |
 | `aperture_rates(record, east_arcsec, north_arcsec, contrast, time_d=...)` | once per planet and time | aperture `Rates`, photons/s/nm, with `n_pix` and squared-weight `variance` |
 | `scene_aperture_rates(record, scene, time_d)` | once per scene and set of times | the same read for every planet at every time, `Rates` fields `(W, Q, K, T)`, ready for `optixstuff.exposure_time` |
-| `optixstuff.snr(rates, detector, time_s, frame_time_s=...)` | once per planet | S/N per band |
-| `optixstuff.exposure_time(rates, detector, target_snr, frame_time_s=...)` | once per planet | `ExposureTime(time_s, valid)` per band |
+| `optixstuff.snr(rates, detector, time_s, frame_time_s=..., post_processing=...)` | once per planet | S/N per band |
+| `optixstuff.exposure_time(rates, detector, target_snr, frame_time_s=..., post_processing=...)` | once per planet | `ExposureTime(time_s, valid)` per band |
 
 The last three are pure array functions for `jax.jit`, `jax.vmap` and
 `jax.grad`. The local zodi is read from `scene.local_zodi` and the disk from the

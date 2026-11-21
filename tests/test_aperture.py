@@ -51,6 +51,10 @@ class SlopedLeakage(GaussianCoronagraph):
         )
 
 
+# No residual and each background counted once.
+_NO_RESIDUAL = ox.PostProcessing(background_variance_factor=1.0)
+
+
 def _instrument(coronagraph):
     """Worked instrument with 0.3 lambda/D pixels and the given coronagraph."""
     path = make_path(detector_n=48, detector_step=0.3)
@@ -370,7 +374,9 @@ def test_read_under_jax_transformations(sloped):
         rates = cp.aperture_rates(
             record, *_offsets(separation, angle), contrast, time_d=0.0
         )
-        return ox.snr(rates, detector, 3600.0, frame_time_s=100.0)[0]
+        return ox.snr(
+            rates, detector, 3600.0, frame_time_s=100.0, post_processing=_NO_RESIDUAL
+        )[0]
 
     separations = jnp.array([0.021, 0.04, 0.0633])
     angles = jnp.array([10.0, 200.0, 310.0])
@@ -411,8 +417,18 @@ def test_reads_outside_the_tables_and_unsupported_builds(sloped):
             record, *_offsets(separation, 0.0), 1e-10, time_d=0.0
         )
         assert np.all(np.isnan(outside.planet))
-        assert np.isnan(ox.snr(outside, detector, 3600.0, frame_time_s=100.0)).all()
-        solved = ox.exposure_time(outside, detector, 5.0, frame_time_s=100.0)
+        assert np.isnan(
+            ox.snr(
+                outside,
+                detector,
+                3600.0,
+                frame_time_s=100.0,
+                post_processing=_NO_RESIDUAL,
+            )
+        ).all()
+        solved = ox.exposure_time(
+            outside, detector, 5.0, frame_time_s=100.0, post_processing=_NO_RESIDUAL
+        )
         assert not solved.valid.any() and float(solved.time_s[0]) == 0.0
     # The aperture leaves the detector before the pixel centre does.
     half = 24 * float(detector.pixel_scale_arcsec)
@@ -530,7 +546,13 @@ def test_scene_route_is_a_vmap_of_the_read_and_feeds_the_calculator(plateau):
         np.testing.assert_array_equal(rates.n_pix[:, 0, t], single.n_pix)
     for field in (rates.planet, rates.star_leakage, rates.n_pix, rates.exozodi):
         assert np.all(np.asarray(field[..., 1, :]) == 0.0)
-    solved = ox.exposure_time(rates, instrument.detector, 7.0, frame_time_s=100.0)
+    solved = ox.exposure_time(
+        rates,
+        instrument.detector,
+        7.0,
+        frame_time_s=100.0,
+        post_processing=_NO_RESIDUAL,
+    )
     assert solved.time_s.shape == solved.valid.shape == (1, 2, 3)
     assert np.all(np.asarray(solved.valid[:, 0])) and not solved.valid[:, 1].any()
     assert np.all(np.asarray(solved.time_s[:, 1]) == 0.0)
