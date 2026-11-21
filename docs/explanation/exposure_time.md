@@ -12,6 +12,7 @@ too slow, so the answer is read from tables that the image path fills once.
 | Response | `aperture_response(instrument, quadrature, rule=...)` | once per instrument and band set | seconds to minutes |
 | Record | `aperture_record(scene, instrument, exposure, response)` | once per target, instrument and band set | one background render |
 | Read | `aperture_rates(record, east_arcsec, north_arcsec, contrast, time_d=...)` | once per planet and observation time | a few gathers |
+| Scene read | `scene_aperture_rates(record, scene, time_d, roll_deg=...)` | once per scene and set of times | a vmap of the read |
 
 **Response.** Point sources are placed on rings around the star, imaged on
 the detector pixels by the coronagraph, and summed in a circular aperture
@@ -138,6 +139,13 @@ times = jax.jit(per_planet)(easts, norths, contrasts, 120.0)
 by_time = jax.jit(jax.vmap(per_planet, in_axes=(None, None, None, 0)))
 times = by_time(easts, norths, contrasts, observation_times_d)
 ```
+
+`scene_aperture_rates(record, scene, time_d)` is that read mapped over every
+planet of a scene and every time in `time_d`, with the positions and contrasts
+taken from the scene at the record's wavelength nodes. Its `Rates` fields have
+shape `(W, Q, K, T)`, so `optixstuff.exposure_time(rates, detector, 7.0,
+frame_time_s=100.0)` returns one time per band, planet and time; a planet with
+`scene.valid` False reads zero and its time is invalid.
 
 ## What the tables do not hold
 

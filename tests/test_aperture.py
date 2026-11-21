@@ -29,6 +29,8 @@ from optixstuff.apertures import Circular, HalfMaximum
 from optixstuff.grids import Image, Measure, SkyOrientation
 from optixstuff.spectral import Band
 from skyscapes import AYOZodi, LeinertZodi
+from skyscapes.physical_model import GridPhysicalModel
+from skyscapes.scene import Planet
 from yippy import open_yip
 
 import coronagraphoto as cp
@@ -473,6 +475,67 @@ def test_flux_scale_scales_every_record_table_and_passes_the_guard(plateau):
             getattr(other, name), 1.5 * getattr(record, name), rtol=1e-6
         )
     np.testing.assert_array_equal(other.n_pix, record.n_pix)
+
+
+def test_scene_route_is_a_vmap_of_the_read_and_feeds_the_calculator(plateau):
+    """Fails if the scene route differs from per-planet reads or mishandles axes.
+
+    Basis: exact equality (0 ULP) with ``aperture_rates`` called planet by
+    planet at positions and contrasts taken from the scene, an invalid planet
+    reading zero in every field, and the calculator returning one value per
+    band, planet and time from the returned ``Rates``.
+    """
+    _, instrument, exposure, response, _ = plateau
+    scene = make_system(
+        separation_arcsec=jnp.array([0.012, 0.03]),
+        planet_groups=(
+            Planet(
+                jnp.ones(2),
+                GridPhysicalModel(
+                    jnp.array([400.0, 500.0, 600.0, 700.0]),
+                    jnp.array([0.0, 90.0, 180.0]),
+                    jnp.full((2, 4, 3), 1e-10),
+                ),
+            ),
+        ),
+    )
+    scene = eqx.tree_at(lambda s: s.valid, scene, jnp.array([True, False]))
+    record = cp.aperture_record(scene, instrument, exposure, response)
+    times = jnp.array([0.0, 30.0, 90.0])
+    rates = cp.scene_aperture_rates(record, scene, times)
+    nodes = record.quadrature.nodes_nm
+    assert nodes.shape == (1, 4)
+    assert rates.planet.shape == (1, 4, 2, 3) and rates.n_pix.shape == (1, 2, 3)
+    assert rates.variance.planet.shape == (1, 4, 2, 3)
+    assert rates.quadrature is record.quadrature and rates.carrier == "photon"
+    east, north = scene.positions(times)
+    for t, time in enumerate(times):
+        contrast = jnp.array(
+            [
+                [float(scene.contrasts(w, jnp.atleast_1d(time))[0, 0]) for w in row]
+                for row in np.asarray(nodes)
+            ]
+        )
+        single = cp.aperture_rates(
+            record, east[0, t], north[0, t], contrast, time_d=time
+        )
+        for name in ("planet", "star_leakage", "local_zodi", "exozodi"):
+            np.testing.assert_array_equal(
+                getattr(rates, name)[..., 0, t], getattr(single, name)
+            )
+            np.testing.assert_array_equal(
+                getattr(rates.variance, name)[..., 0, t],
+                getattr(single.variance, name),
+            )
+        np.testing.assert_array_equal(rates.n_pix[:, 0, t], single.n_pix)
+    for field in (rates.planet, rates.star_leakage, rates.n_pix, rates.exozodi):
+        assert np.all(np.asarray(field[..., 1, :]) == 0.0)
+    solved = ox.exposure_time(rates, instrument.detector, 7.0, frame_time_s=100.0)
+    assert solved.time_s.shape == solved.valid.shape == (1, 2, 3)
+    assert np.all(np.asarray(solved.valid[:, 0])) and not solved.valid[:, 1].any()
+    assert np.all(np.asarray(solved.time_s[:, 1]) == 0.0)
+    with pytest.raises(ValueError, match="shape"):
+        cp.scene_aperture_rates(record, scene, 0.0)
 
 
 @pytest.mark.medium(reason="4096 detector frames of 48 by 48 pixels drawn on the host")

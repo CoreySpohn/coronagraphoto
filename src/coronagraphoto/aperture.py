@@ -11,6 +11,7 @@ Three steps, each paid at its own cadence:
 - :func:`aperture_rates`, once per planet and observation time, interpolates
   both tables and scales the local zodi to the sightline of that time. It is
   a few gathers, so it can sit under ``jax.vmap`` over millions of planets.
+  :func:`scene_aperture_rates` maps it over a scene's planets and times.
 
 Every number comes from the same coronagraph products as the images, so an
 aperture sum of :func:`coronagraphoto.expected` images and a read of the
@@ -43,6 +44,9 @@ from coronagraphoto.simulation import _run
 # Successive rings start a golden-ratio fraction of the angular step apart, so
 # the rings together sample every pixel phase and no azimuth is favoured.
 _GOLDEN = (np.sqrt(5.0) - 1.0) / 2.0
+
+# The fields of a read that vary; thermal and companion terms are zero.
+_READ_FIELDS = ("planet", "star_leakage", "local_zodi", "exozodi")
 
 
 class ApertureResponse(eqx.Module):
@@ -585,3 +589,69 @@ def aperture_rates(
         )
 
     return rates(0, rates(1))
+
+
+def scene_aperture_rates(
+    record: ApertureRecord,
+    scene: Scene,
+    time_d: ArrayLike,
+    *,
+    roll_deg: ArrayLike | None = None,
+) -> Rates:
+    """Read every planet of a scene at every time, in photons/s/nm, from a record.
+
+    A ``jax.vmap`` of :func:`aperture_rates` over the scene's planets and the
+    times: positions come from ``scene.positions(time_d)`` and each planet's
+    contrast from ``scene.contrasts`` at every wavelength node of the record.
+    Nothing is rebuilt. The scene should be the one the record was built from
+    (``record.reads`` lists what the record holds fixed).
+
+    ``time_d`` has shape ``(T,)``, days from the scene's epoch; ``roll_deg`` is
+    as in :func:`aperture_rates`. The returned ``Rates`` follows the layout of
+    every ``Rates`` with a quadrature: the band and node axes lead and the
+    batch axes trail, so fields have shape ``(W, Q, K, T)``, ``n_pix`` has
+    shape ``(W, K, T)``, and ``variance`` has the squared-weight rates. Pass it
+    to :func:`optixstuff.snr` or :func:`optixstuff.exposure_time`, which return
+    one value per band, planet and time. A planet with ``scene.valid`` False
+    reads zero in every field, so its exposure time is invalid, not a number.
+    A scene with a batch of systems is not read; map this function over them.
+    """
+    time_d = jnp.asarray(time_d)
+    if time_d.ndim != 1:
+        raise ValueError("time_d must have shape (T,)")
+    if scene.batch_shape:
+        raise ValueError("scene_aperture_rates reads one system; vmap it over a batch")
+    east, north = scene.positions(time_d)
+    nodes = record.quadrature.nodes_nm
+    contrast = jax.vmap(
+        jax.vmap(lambda wavelength: scene.contrasts(wavelength, time_d))
+    )(nodes)
+
+    def read(east_arcsec, north_arcsec, contrast, time):
+        rates = aperture_rates(
+            record, east_arcsec, north_arcsec, contrast, time_d=time, roll_deg=roll_deg
+        )
+        return tuple(
+            (
+                *(getattr(r, name) for name in _READ_FIELDS),
+                r.n_pix,
+            )
+            for r in (rates, rates.variance)
+        )
+
+    over_times = jax.vmap(read, in_axes=(0, 0, -1, 0), out_axes=-1)
+    mean, variance = jax.vmap(over_times, in_axes=(0, 0, -2, None), out_axes=-2)(
+        east, north, contrast, time_d
+    )
+
+    def rates(values, variance=None):
+        *fields, n_pix = (jnp.where(scene.valid[:, None], v, 0.0) for v in values)
+        return Rates(
+            record.quadrature,
+            "photon",
+            **dict(zip(_READ_FIELDS, fields, strict=True)),
+            n_pix=n_pix,
+            variance=variance,
+        )
+
+    return rates(mean, rates(variance))
