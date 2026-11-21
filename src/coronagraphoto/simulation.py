@@ -149,7 +149,7 @@ def _band_ids(instrument, scene, quadrature):
     traced) and picks among them from the traced node wavelength.
     """
     coro = instrument.coronagraph
-    models = coro.bands if isinstance(coro, MultiBandCoronagraph) else (coro,)
+    models = coro.coronagraphs if isinstance(coro, MultiBandCoronagraph) else (coro,)
     nodes = quadrature.nodes_nm
     if isinstance(coro, MultiBandCoronagraph) and not isinstance(
         nodes, jax.core.Tracer
@@ -225,7 +225,7 @@ def _render(scene, instrument, exposure, *, kind, band_ids, planets, uniform_sky
     """Render every node of one observation as a single traced program."""
     coro = instrument.coronagraph
     models = (
-        tuple(coro.bands[i] for i in band_ids)
+        tuple(coro.coronagraphs[i] for i in band_ids)
         if isinstance(coro, MultiBandCoronagraph)
         else (coro,)
     )
