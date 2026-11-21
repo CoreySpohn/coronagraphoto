@@ -665,6 +665,39 @@ def test_records_of_two_targets_stack_and_read_under_vmap(sloped):
     assert np.all(abs(zodi[0] / zodi[1] - 1) > 0.01)
 
 
+def test_record_builds_under_jit_and_jit_vmap_with_the_instrument_closed_over(sloped):
+    """Fails if the response guard breaks a jitted record build.
+
+    Basis: exact. The guard measures concrete values at trace time even
+    inside ``jax.jit``, so ``aperture_record`` with the instrument closed
+    over runs under ``jit`` and ``jit(vmap)`` over the scene's pointing, and
+    equals the eager record to a 1e-13 relative rounding allowance.
+    """
+    scene, instrument, exposure, response, _ = sloped
+    scene = with_zodi(scene, LeinertZodi())
+
+    def build(ra_deg, dec_deg):
+        pointed = eqx.tree_at(
+            lambda s: (s.dynamics.frame.ra_deg, s.dynamics.frame.dec_deg),
+            scene,
+            (ra_deg, dec_deg),
+        )
+        return cp.aperture_record(pointed, instrument, exposure, response)
+
+    ra, dec = jnp.asarray([250.0, 260.0]), jnp.asarray([35.0, 40.0])
+    eager = [build(ra[i], dec[i]) for i in range(2)]
+    jitted = jax.jit(build)(ra[0], dec[0])
+    batched = jax.jit(jax.vmap(build))(ra, dec)
+    for name in ("planet_per_contrast", "star_leakage", "exozodi", "n_pix"):
+        np.testing.assert_allclose(
+            getattr(jitted, name), getattr(eager[0], name), rtol=1e-13
+        )
+        for i in range(2):
+            np.testing.assert_allclose(
+                getattr(batched, name)[i], getattr(eager[i], name), rtol=1e-13
+            )
+
+
 def test_response_throughput_matches_stored_curve(tmp_path):
     """The aperture response and the YIP throughput curve describe one coronagraph.
 

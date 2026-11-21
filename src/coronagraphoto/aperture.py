@@ -242,10 +242,17 @@ def _check_response(instrument, quadrature, response):
     Compared in order of cost: the wavelength nodes and bands, the aperture
     radius in pixels (which carries each band's lambda/D frame, the rule and
     the detector pixel scale), then one measured source per band, which
-    carries the coronagraph's own tables. Traced inputs are not checked.
+    carries the coronagraph's own tables. Traced inputs are not checked. The
+    comparison runs eagerly even inside ``jax.jit``, so a closed-over
+    instrument is checked once at trace time.
     """
     if not _concrete(instrument, quadrature, response):
         return
+    with jax.ensure_compile_time_eval():
+        _compare_response(instrument, quadrature, response)
+
+
+def _compare_response(instrument, quadrature, response):
     nodes, built = (
         np.asarray(quadrature.nodes_nm),
         np.asarray(response.quadrature.nodes_nm),
