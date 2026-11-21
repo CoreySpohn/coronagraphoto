@@ -1,4 +1,4 @@
-"""Per-pixel photon budgets, detector observations and aperture exposure times."""
+"""Per-pixel photon budgets, detector observations and aperture rates."""
 
 from coronagraphoto.aperture import (
     ApertureRecord,
