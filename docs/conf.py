@@ -29,7 +29,6 @@ intersphinx_mapping = {
     "skyscapes": ("https://skyscapes.readthedocs.io/en/latest/", None),
     "optixstuff": ("https://optixstuff.readthedocs.io/en/latest/", None),
     "yippy": ("https://yippy.readthedocs.io/en/latest/", None),
-    "coronalyze": ("https://coronalyze.readthedocs.io/en/latest/", None),
 }
 
 templates_path = ["_templates"]
