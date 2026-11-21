@@ -179,7 +179,7 @@ def _band_models(instrument, quadrature, rule):
     models, frames, radii = [], [], []
     for band in quadrature.bands:
         model = (
-            coro.band(band.center_nm)
+            coro.coronagraph_at(band.center_nm)
             if isinstance(coro, MultiBandCoronagraph)
             else coro
         )

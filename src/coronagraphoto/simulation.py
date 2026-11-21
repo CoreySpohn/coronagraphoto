@@ -154,7 +154,7 @@ def _band_ids(instrument, scene, quadrature):
     if isinstance(coro, MultiBandCoronagraph) and not isinstance(
         nodes, jax.core.Tracer
     ):
-        chosen = [coro.band(float(w)) for w in np.unique(np.asarray(nodes))]
+        chosen = [coro.coronagraph_at(float(w)) for w in np.unique(np.asarray(nodes))]
         ids = tuple(i for i, m in enumerate(models) if any(m is c for c in chosen))
     else:
         ids = tuple(range(len(models)))
