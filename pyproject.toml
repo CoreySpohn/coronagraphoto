@@ -21,8 +21,8 @@ dependencies = [
   "jax>=0.8.1",
   "jaxtyping>=0.3.3",
   "numpy>=2.1.2",
-  "optixstuff>=6.1.0",
-  "orbix>=5.0.0",
+  "optixstuff>=7.0.0",  # unreleased: next release, see .github/sibling-pins.txt
+  "orbix>=6.0.0",  # unreleased: next release
   "skyscapes>=6.0.0",
 ]
 [project.optional-dependencies]
@@ -34,12 +34,10 @@ docs = [
   "sphinx-autoapi>=3.0.0",
   "sphinxcontrib-mermaid>=0.9.2",
   "ipython>=8.18.1",
-  "yippy>=3.0.0",
-  "zodi>=2.0.0",
 ]
 test = [
   "astropy>=6.0.0",
-  "hwoutils[jax]>=1.16.0",
+  "hwoutils[jax]>=3.0.0",  # unreleased: next release
   "ineedvalidation>=1.1.0",
   "pytest>=7.3.2",
   "hypothesis>=6.79.1",
@@ -50,7 +48,7 @@ test = [
   "pytest-fail-slow>=0.1.0",
   "lod_unit>=1.8.0",
   "packaging>=23.1",
-  "yippy>=3.0.0",
+  "yippy>=4.0.0",  # unreleased: next release
   "zodi>=2.0.0",
 ]
 

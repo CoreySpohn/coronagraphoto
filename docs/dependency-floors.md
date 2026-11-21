@@ -7,7 +7,10 @@ at their exact lower bounds using `--build-constraint`.
 
 `.github/sibling-pins.txt` lists sibling libraries that are installed from a pinned source
 commit while their release is pending; it is empty when PyPI covers every declared floor, and
-the canary uses the same overrides as CI.
+the canary uses the same overrides as CI. The optixstuff 7.0.0, orbix 6.0.0, skyscapes 6.0.0,
+hwoutils 3.0.0 and yippy 4.0.0 floors name the next releases of those libraries; they are
+pinned to their branches until PyPI carries them, and each pin is deleted once its release
+is published.
 
 | Group | Dependency | Lower bound |
 | --- | --- | --- |
@@ -18,8 +21,8 @@ the canary uses the same overrides as CI.
 | Runtime | jax | 0.8.1 |
 | Runtime | jaxtyping | 0.3.3 |
 | Runtime | numpy | 2.1.2 |
-| Runtime | optixstuff | 6.1.0 |
-| Runtime | orbix | 5.0.0 |
+| Runtime | optixstuff | 7.0.0 |
+| Runtime | orbix | 6.0.0 |
 | Runtime | skyscapes | 6.0.0 |
 | Dev | pre-commit | 3.5.0 |
 | Docs | sphinx | 7.2.6 |
@@ -28,8 +31,6 @@ the canary uses the same overrides as CI.
 | Docs | sphinx-autoapi | 3.0.0 |
 | Docs | sphinxcontrib-mermaid | 0.9.2 |
 | Docs | ipython | 8.18.1 |
-| Docs | yippy | 3.0.0 |
-| Docs | zodi | 2.0.0 |
 | Test | pytest | 7.3.2 |
 | Test | hypothesis | 6.79.1 |
 | Test | pytest-xdist | 2.5 |
@@ -39,7 +40,8 @@ the canary uses the same overrides as CI.
 | Test | pytest-fail-slow | 0.1.0 |
 | Test | lod_unit | 1.8.0 |
 | Test | packaging | 23.1 |
-| Test | yippy | 3.0.0 |
+| Test | hwoutils | 3.0.0 |
+| Test | yippy | 4.0.0 |
 | Test | zodi | 2.0.0 |
 
 The NumPy and pytest-markdown-docs bounds match the lowest versions selected
