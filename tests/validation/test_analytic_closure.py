@@ -42,7 +42,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import closure_system, make_path, write_yip
+from conftest import (
+    YIP_PITCH_LOD,
+    YIP_SIGMA_LOD,
+    closure_system,
+    make_path,
+    write_yip,
+)
 from jaxedith import rates as analytic_rates
 from optixstuff import Detector, WarmEmission
 from optixstuff.apertures import Circular
@@ -68,18 +74,23 @@ SEPARATIONS = (0.8, 1.0, 1.5, 2.0, 2.5, 3.0)
 BEYOND = 3.4
 POSITION_ANGLES = (250.0, 20.0)
 # Registered exozodi bounds by separation: the raw band gap, and what remains
-# after the blurred-disk prediction (measured, times 1.5 and rounded up).
+# after the prediction with the widened blur kernel (measured, times 1.5 and
+# rounded up; 2.5 and 3.0 lambda/D keep their earlier bounds).
 EXOZODI_GAP = {0.8: 0.40, 1.0: 0.30, 1.5: 0.16, 2.0: 0.09, 2.5: 0.05, 3.0: 0.011}
 EXOZODI_RESIDUAL = {
-    0.8: 3.7e-2,
-    1.0: 3.0e-2,
-    1.5: 1.6e-2,
-    2.0: 8e-3,
+    0.8: 4.5e-3,
+    1.0: 4.5e-3,
+    1.5: 4.5e-3,
+    2.0: 1.5e-3,
     2.5: 3e-3,
     3.0: 6e-3,
 }
 # The synthetic YIP of conftest.write_yip.
-YIP_SIGMA, YIP_INTEGRAL = 0.7, 0.3
+YIP_SIGMA, YIP_INTEGRAL = YIP_SIGMA_LOD, 0.3
+# The disk is rendered on the YIP's native grid and reconstructed linearly to
+# the detector, which adds the variance pitch**2 / 6 to the PSF's own, so the
+# disk is blurred by a kernel wider than the point-source PSF by this factor.
+DISK_KERNEL_WIDENING = np.sqrt(1 + (YIP_PITCH_LOD**2 / 6) / YIP_SIGMA_LOD**2)
 
 
 def radial_leakage(radius_lod):
@@ -423,14 +434,21 @@ def causes(build):
     out["disk"] = {}
     for s in (0.8, 1.0, 1.5, 2.0, 2.5, 3.0):
         node, band, *_ = wide.gaps(s, 250.0)
-        blurred, raw = disk_blur_factors(wide, s, 250.0)
+        plain, raw = disk_blur_factors(wide, s, 250.0)
+        widened, _ = disk_blur_factors(wide, s, 250.0, sigma_scale=DISK_KERNEL_WIDENING)
+
+        def left(factor, s=s):
+            return wide.gaps(s, 250.0, scale_nodes={"exozodi": factor})[1]["exozodi"]
+
         out["disk"][s] = dict(
             gap=band["exozodi"],
-            residual=wide.gaps(s, 250.0, scale_nodes={"exozodi": blurred})[1][
-                "exozodi"
-            ],
-            unblurred=wide.gaps(s, 250.0, scale_nodes={"exozodi": raw})[1]["exozodi"],
+            residual=left(widened),
+            unwidened=left(plain),
+            unblurred=left(raw),
         )
+    tau = float(np.asarray(wide.curves.throughput)[0])
+    ideal = YIP_INTEGRAL * (1 - np.exp(-0.5 * (RULE.radius_lod / YIP_SIGMA) ** 2))
+    out["point_source"] = dict(curves=tau, ideal=ideal)
     # Curve interpolation: radial YIP in 2 nm bands, uniform YIP as the control.
     out["interp"] = {}
     radial, uniform = build(radial=True, bands=NARROW_BANDS), build(bands=NARROW_BANDS)
@@ -496,16 +514,23 @@ def test_pixelization(causes):
 def test_disk_structure(causes):
     """Fails if the exozodi gap is not the blurred disk read across the aperture.
 
-    Basis: the prediction blurs the node's disk radiance with the PSF
-    (Gaussian, sigma 0.7 lambda/D scaled with the node) and averages it over
-    the aperture, from ``photon_radiance_at`` on a 0.1 lambda/D grid. For 0.8
-    to 2.5 lambda/D it removes at least 90% of the band gap; without the blur
-    (aperture mean of the raw disk) it removes less than a fifth of the gap
-    at 0.8 and 1.0 lambda/D, where the disk's inner edge lies within the
-    aperture and PSF. What remains is measured at 2.3e-2 at 0.8 lambda/D and
-    falls to 1.5e-3 at 2.5 (bounds below, 1.5 times the measured) and is
-    removed by a 4% wider blur kernel, which would be the signature of
-    interpolating the PSF between the YIP offsets (not tested here).
+    Basis: the prediction blurs the node's disk radiance with a Gaussian
+    kernel (sigma 0.7 lambda/D scaled with the node) and averages it over the
+    aperture, from ``photon_radiance_at`` on a 0.1 lambda/D grid. The kernel is
+    wider than the point-source PSF by ``sqrt(1 + (h**2 / 6) / sigma**2)``, 1.042
+    for the YIP pixel pitch ``h`` of 0.5 lambda/D: the disk is rendered on the
+    YIP's native grid and reconstructed linearly to the detector, which adds the
+    variance ``h**2 / 6``, while a point source is not resampled that way.
+    The widening is computed from the pitch alone, not fitted. With it the
+    prediction removes at least 90% of the band gap from 0.8 to 2.5
+    lambda/D and leaves 2.7e-3, 2.2e-3, 1.9e-3 and 7e-4 at 0.8, 1.0, 1.5 and
+    2.0 (bounds ``EXOZODI_RESIDUAL``, 1.5 times the measured). The same
+    prediction with the unwidened kernel leaves 2.4e-2 at 0.8 lambda/D, so
+    the widening is what the test sees; without any blur (aperture mean of the
+    raw disk) the prediction removes less than a fifth of the gap at 0.8 and
+    1.0 lambda/D, where the disk's inner edge lies within the aperture and
+    PSF. The point-source path is not widened: the curves' planet throughput
+    equals the ideal Gaussian enclosed fraction (0.118011 against 0.118041).
     """
     for s, row in causes["disk"].items():
         gap, left = np.abs(row["gap"]), np.abs(row["residual"])
@@ -515,6 +540,9 @@ def test_disk_structure(causes):
             assert np.all(left < 0.1 * gap), s
         if s <= 1.0:
             assert np.all(np.abs(row["unblurred"]) > 0.8 * gap), s
+    assert np.all(np.abs(causes["disk"][0.8]["unwidened"]) > 1.5e-2)
+    point = causes["point_source"]
+    assert abs(point["curves"] / point["ideal"] - 1) < 5e-4
 
 
 @vv.case("etc-count-rates", "code-verification", srq="analytic against image rates")

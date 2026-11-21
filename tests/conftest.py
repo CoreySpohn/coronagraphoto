@@ -468,6 +468,10 @@ def closure_system(scale):
     )
 
 
+# Pixel pitch and Gaussian sigma of the synthetic YIP, in lambda/D.
+YIP_PITCH_LOD, YIP_SIGMA_LOD = 0.5, 0.7
+
+
 def write_yip(path, *, distinct_products=False, stellar_profile=None):
     """Synthetic YIP package with SI-labelled wavelength headers and even centre.
 
@@ -478,7 +482,7 @@ def write_yip(path, *, distinct_products=False, stellar_profile=None):
     from yippy.testing import write_synthetic_yip
     from yippy.writer import yip_header
 
-    n, step, sigma = 24, 0.5, 0.7
+    n, step, sigma = 24, YIP_PITCH_LOD, YIP_SIGMA_LOD
     yy, xx = np.indices((n, n))
     xx, yy = (xx - (n - 1) / 2) * step, (yy - (n - 1) / 2) * step
     offsets = np.array(
