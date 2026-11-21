@@ -6,15 +6,12 @@ import jax.numpy as jnp
 import numpy as np
 import optixstuff as ox
 import pytest
-from conftest import make_path, make_system, with_zodi, write_yip
+from conftest import closure_system, make_path, write_yip
 from optixstuff import Detector, FramePlan
 from optixstuff.apertures import Circular
 from optixstuff.grids import Image, Measure, SkyOrientation
 from optixstuff.spectral import Band
-from skyscapes import PrecomputedZodi
-from skyscapes.disk import GraterDisk
 from yippy import open_yip
-from zodi import SurfaceBrightnessDust
 
 import coronagraphoto as cp
 
@@ -56,28 +53,7 @@ def closure(tmp_path_factory):
     )
     base = eqx.tree_at(lambda p: p.coronagraph, make_path(), coro)
     scale = float(base.primary.frame(550.0).lod_to_arcsec(550.0))
-    disk = GraterDisk(
-        sma_AU=1.0,
-        alpha_in=2.0,
-        alpha_out=-2.0,
-        ksi0_AU=0.05,
-        gamma=2.0,
-        beta=1.0,
-        rmin_AU=0.1,
-        rmax_AU=5.0,
-        wavelengths_nm=jnp.array([500.0, 600.0]),
-        g_HG_grid=jnp.zeros(2),
-        Ag_grid=jnp.ones(2),
-        amplitude=SurfaceBrightnessDust(level=3.0),
-        n_slices_los=24,
-    )
-    zodi = PrecomputedZodi(jnp.array([500.0, 600.0]), jnp.full(2, 1e12))
-    system = with_zodi(
-        make_system(
-            contrast=1e-9, separation_arcsec=2.3 * scale, sky_pa_deg=250.0, disk=disk
-        ),
-        zodi,
-    )
+    system = closure_system(scale)
     bands = (Band(500.0, 550.0), Band(550.0, 600.0))
     roll, contrast = 15.0, 1e-9
     east, north = system.positions(jnp.array([0.0]))[:2, 0, 0]

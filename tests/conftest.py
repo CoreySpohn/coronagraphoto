@@ -433,8 +433,48 @@ def write_scene(path):
     return str(path)
 
 
-def write_yip(path, *, distinct_products=False):
-    """Synthetic YIP package with SI-labelled wavelength headers and even centre."""
+def closure_system(scale):
+    """The scene of the aperture closure tests: one planet, a disk and a local zodi.
+
+    ``scale`` is the arcsecond size of one lambda/D at 550 nm. The planet sits
+    at 2.3 lambda/D, contrast 1e-9, with a parametric disk and a uniform local
+    zodi radiance.
+    """
+    from skyscapes import PrecomputedZodi
+    from skyscapes.disk import GraterDisk
+    from zodi import SurfaceBrightnessDust
+
+    disk = GraterDisk(
+        sma_AU=1.0,
+        alpha_in=2.0,
+        alpha_out=-2.0,
+        ksi0_AU=0.05,
+        gamma=2.0,
+        beta=1.0,
+        rmin_AU=0.1,
+        rmax_AU=5.0,
+        wavelengths_nm=jnp.array([500.0, 600.0]),
+        g_HG_grid=jnp.zeros(2),
+        Ag_grid=jnp.ones(2),
+        amplitude=SurfaceBrightnessDust(level=3.0),
+        n_slices_los=24,
+    )
+    zodi = PrecomputedZodi(jnp.array([500.0, 600.0]), jnp.full(2, 1e12))
+    return with_zodi(
+        make_system(
+            contrast=1e-9, separation_arcsec=2.3 * scale, sky_pa_deg=250.0, disk=disk
+        ),
+        zodi,
+    )
+
+
+def write_yip(path, *, distinct_products=False, stellar_profile=None):
+    """Synthetic YIP package with SI-labelled wavelength headers and even centre.
+
+    ``stellar_profile`` is an optional function of the radius in lambda/D that
+    multiplies the uniform stellar leakage, for a leakage that varies with
+    separation.
+    """
     from yippy.testing import write_synthetic_yip
     from yippy.writer import yip_header
 
@@ -456,6 +496,8 @@ def write_yip(path, *, distinct_products=False):
     grid = PixelGrid.focal(n, step, Frame(550.0, 6.0, "circumscribed"))
     diameters = np.array([0.0, 0.1, 0.2])
     stellar = np.full((len(diameters), n, n), 1e-9 * step**2)
+    if stellar_profile is not None:
+        stellar *= stellar_profile(np.hypot(xx, yy))
     sky = np.full((n, n), 0.3)
     metadata = dict(
         inscribed_diameter_m=4.7,

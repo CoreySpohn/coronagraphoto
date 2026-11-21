@@ -7,6 +7,7 @@
 # merged first, replace the branch with the merge commit on main until the release lands.
 # The file is empty (comments only) once PyPI carries every declared floor.
 hwoutils @ git+https://github.com/CoreySpohn/hwoutils@fit-posterior
+jaxedith @ git+https://github.com/CoreySpohn/jaxEDITH@stack-v3
 optixstuff @ git+https://github.com/CoreySpohn/optixstuff@fit-posterior
 orbix @ git+https://github.com/CoreySpohn/orbix@fit-posterior
 skyscapes @ git+https://github.com/CoreySpohn/skyscapes@stack-v3
