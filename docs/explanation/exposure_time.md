@@ -25,7 +25,12 @@ by the same program as `photon_rates`. Each image is then summed in the
 aperture at every position of a half-pixel lattice, by one convolution. The
 planet table is the response throughput times the star's photon flux
 density, the collecting area and the optical throughput, per unit
-planet-to-star contrast.
+planet-to-star contrast. The collecting area, optical throughput and the
+instrument's `flux_scale` come from one product, `instrument.effective_area_m2`,
+so a record carries the scale of the instrument it was built for. The record
+refuses a response built for another instrument: another coronagraph, detector
+pixel scale, band set or set of wavelength nodes raises a `ValueError`, so a
+coronagraph swapped with `equinox.tree_at` needs a new response.
 
 **Read.** A planet is an east and a north offset from the star and a contrast, observed
 at a time. The planet rate is read linearly between rings and scaled by the

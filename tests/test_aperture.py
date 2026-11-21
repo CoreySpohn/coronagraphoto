@@ -1,5 +1,7 @@
 """Aperture response, record and read against closed forms and image sums."""
 
+import copy
+
 import equinox as eqx
 import ineedvalidation as vv
 import jax
@@ -421,6 +423,56 @@ def test_reads_outside_the_tables_and_unsupported_builds(sloped):
     other = cp.build_exposure(scene, instrument, (Band(510.0, 590.0),), time_d=0.0)
     with pytest.raises(ValueError, match="other wavelength nodes"):
         cp.aperture_record(scene, instrument, other, response)
+
+
+def test_record_refuses_a_response_built_for_another_instrument(plateau):
+    """Fails if a swapped coronagraph, pixel scale or band pairs with an old response.
+
+    Basis: exact. Each swap keeps the wavelength nodes of the response and
+    changes one thing: the coronagraph tables (a Gaussian for the flat PSF,
+    seen only by the measured source), the detector pixel scale (seen in the
+    aperture radius) and the band edges (seen in the bands). The instrument
+    the response was built for passes.
+    """
+    scene, instrument, exposure, response, _ = plateau
+    cp.aperture_record(scene, instrument, exposure, response)
+    swapped = _instrument(GaussianCoronagraph(40, 0.25))
+    with pytest.raises(ValueError, match="another coronagraph or detector"):
+        cp.aperture_record(scene, swapped, exposure, response)
+    detector = instrument.detector
+    coarse = eqx.tree_at(
+        lambda i: i.detector,
+        instrument,
+        Detector(
+            pixel_scale_arcsec=1.1 * float(detector.pixel_scale_arcsec),
+            shape=detector.shape,
+        ),
+    )
+    with pytest.raises(ValueError, match="pixel scale"):
+        cp.aperture_record(scene, coarse, exposure, response)
+    shifted = copy.copy(response.quadrature)
+    object.__setattr__(shifted, "bands", (Band(500.0, 600.0001),))
+    other = eqx.tree_at(lambda r: r.quadrature, response, shifted)
+    with pytest.raises(ValueError, match="other bands"):
+        cp.aperture_record(scene, instrument, exposure, other)
+
+
+def test_flux_scale_scales_every_record_table_and_passes_the_guard(plateau):
+    """Fails if the flux scale misses a table or invalidates the response.
+
+    Basis: exact algebra, 1e-6 relative float32 rounding allowance. The scale
+    acts once, in the effective area, so every rate table of a record built
+    with scale 1.5 is 1.5 times the unit-scale table from the same response,
+    and the pixel counts are unchanged.
+    """
+    scene, instrument, exposure, response, record = plateau
+    scaled = eqx.tree_at(lambda i: i.flux_scale, instrument, jnp.asarray(1.5))
+    other = cp.aperture_record(scene, scaled, exposure, response)
+    for name in ("planet_per_contrast", "star_leakage", "uniform_sky", "exozodi"):
+        np.testing.assert_allclose(
+            getattr(other, name), 1.5 * getattr(record, name), rtol=1e-6
+        )
+    np.testing.assert_array_equal(other.n_pix, record.n_pix)
 
 
 @pytest.mark.medium(reason="4096 detector frames of 48 by 48 pixels drawn on the host")

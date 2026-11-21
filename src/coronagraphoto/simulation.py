@@ -57,9 +57,7 @@ def _node_rates(
     native = products.source_grid
     angular = replace(native.to_arcsec(wavelength_nm), orientation=grid.orientation)
     lod_arcsec = native.frame.lod_to_arcsec(wavelength_nm)
-    gain = instrument.primary.collecting_area_m2 * instrument.system_throughput(
-        wavelength_nm
-    )
+    gain = instrument.effective_area_m2(wavelength_nm)
 
     def detector_pixels(product_grid):
         # The detector pixels in a product's lambda/D frame at this node, so

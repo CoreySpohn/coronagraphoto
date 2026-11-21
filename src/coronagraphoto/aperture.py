@@ -64,6 +64,11 @@ class ApertureResponse(eqx.Module):
         kernels: Aperture weights on detector pixels for a centre at each
             half-pixel phase, shape (2, W, 2, 2, n, n): moment, band, y
             phase, x phase.
+        probe: Aperture fraction of one source per band, shape (W,): the
+            middle node of the band, a source on the +x axis at the middle
+            separation that has a response. :func:`aperture_record` repeats
+            the measurement to refuse a response built for another
+            instrument. NaN for a band with no response anywhere.
     """
 
     rule: Circular = eqx.field(static=True)
@@ -73,6 +78,7 @@ class ApertureResponse(eqx.Module):
     throughput: Array
     throughput_ring_std: Array
     kernels: Array
+    probe: Array
 
 
 class ApertureRecord(eqx.Module):
@@ -162,6 +168,116 @@ def _ring_moments(model, detector, wavelengths_nm, x_arcsec, y_arcsec, weights):
     return jax.lax.map(node, wavelengths_nm)
 
 
+def _band_models(instrument, quadrature, rule):
+    """Per band: coronagraph model, lambda/D frame and aperture radius in pixels."""
+    detector, coro = instrument.detector, instrument.coronagraph
+    scale = float(detector.pixel_scale_arcsec)
+    models, frames, radii = [], [], []
+    for band in quadrature.bands:
+        model = (
+            coro.band(band.center_nm)
+            if isinstance(coro, MultiBandCoronagraph)
+            else coro
+        )
+        if not isinstance(model, AbstractImagingCoronagraph):
+            raise TypeError("aperture tables require an AbstractImagingCoronagraph")
+        frame = model.at_wavelength(band.center_nm).source_grid.frame
+        models.append(model)
+        frames.append(frame)
+        radii.append(
+            rule.radius_lod * float(frame.lod_to_arcsec(band.center_nm)) / scale
+        )
+    return models, frames, radii
+
+
+def _probe_index(throughput_row):
+    """Index of the middle separation that has a response, or None."""
+    finite = np.flatnonzero(np.isfinite(np.asarray(throughput_row)))
+    return None if finite.size == 0 else int(finite[finite.size // 2])
+
+
+def _probe(model, instrument, rule, frame, radius, nodes_nm, throughput, step):
+    """Aperture fraction of one source on the +x axis at the middle node of a band.
+
+    ``throughput`` is the band's ``(2, Q, K)`` table and ``step`` its separation
+    spacing; both fix the source, so the build and the check measure the same one.
+    """
+    k = _probe_index(throughput[0, len(nodes_nm) // 2])
+    if k is None:
+        return np.nan
+    detector = instrument.detector
+    separation = k * float(step)
+    weights = _weights(
+        rule,
+        frame,
+        detector.grid.shape,
+        radius,
+        separation / float(detector.pixel_scale_arcsec),
+        0.0,
+    )
+    moments = _ring_moments(
+        model,
+        detector,
+        nodes_nm[len(nodes_nm) // 2 :][:1],
+        np.array([separation]),
+        np.array([0.0]),
+        weights[None],
+    )
+    return float(moments[0, 0, 0])
+
+
+def _concrete(*trees):
+    """True when no array leaf of the trees is traced."""
+    leaves = jax.tree_util.tree_leaves(eqx.filter(trees, eqx.is_array))
+    return not any(isinstance(leaf, jax.core.Tracer) for leaf in leaves)
+
+
+def _check_response(instrument, quadrature, response):
+    """Raise a ValueError when ``response`` was built for something else.
+
+    Compared in order of cost: the wavelength nodes and bands, the aperture
+    radius in pixels (which carries each band's lambda/D frame, the rule and
+    the detector pixel scale), then one measured source per band, which
+    carries the coronagraph's own tables. Traced inputs are not checked.
+    """
+    if not _concrete(instrument, quadrature, response):
+        return
+    nodes, built = (
+        np.asarray(quadrature.nodes_nm),
+        np.asarray(response.quadrature.nodes_nm),
+    )
+    if nodes.shape != built.shape or not np.array_equal(nodes, built):
+        raise ValueError("the response was built for other wavelength nodes")
+    if quadrature.bands != response.quadrature.bands:
+        raise ValueError("the response was built for other bands")
+    models, frames, radii = _band_models(instrument, quadrature, response.rule)
+    if not np.allclose(radii, np.asarray(response.radius_pix), rtol=1e-6):
+        raise ValueError(
+            "the response was built for another detector pixel scale or "
+            "lambda/D frame: its aperture radius is "
+            f"{np.asarray(response.radius_pix).tolist()} pixels, this instrument's "
+            f"is {radii}"
+        )
+    for w, (model, frame) in enumerate(zip(models, frames, strict=True)):
+        expected = float(response.probe[w])
+        measured = _probe(
+            model,
+            instrument,
+            response.rule,
+            frame,
+            float(response.radius_pix[w]),
+            nodes[w],
+            np.asarray(response.throughput[:, w]),
+            response.separation_step_arcsec,
+        )
+        if not np.isclose(measured, expected, rtol=1e-4, atol=1e-7, equal_nan=True):
+            raise ValueError(
+                f"the response was built for another coronagraph or detector: "
+                f"a source in band {w} puts {measured:.6g} of its light in the "
+                f"aperture, the response recorded {expected:.6g}"
+            )
+
+
 def aperture_response(
     instrument: Instrument,
     quadrature: Quadrature,
@@ -191,24 +307,10 @@ def aperture_response(
         )
     if n_separations < 2 or n_angles < 1:
         raise ValueError("need at least two separations and one angle")
-    detector, coro = instrument.detector, instrument.coronagraph
+    detector = instrument.detector
     grid = detector.grid
     scale = float(detector.pixel_scale_arcsec)
-    models, frames, radii = [], [], []
-    for band in quadrature.bands:
-        model = (
-            coro.band(band.center_nm)
-            if isinstance(coro, MultiBandCoronagraph)
-            else coro
-        )
-        if not isinstance(model, AbstractImagingCoronagraph):
-            raise TypeError("aperture tables require an AbstractImagingCoronagraph")
-        frame = model.at_wavelength(band.center_nm).source_grid.frame
-        models.append(model)
-        frames.append(frame)
-        radii.append(
-            rule.radius_lod * float(frame.lod_to_arcsec(band.center_nm)) / scale
-        )
+    models, frames, radii = _band_models(instrument, quadrature, rule)
     if max_separation_arcsec is None:
         max_separation_arcsec = (min(grid.shape) / 2 - 1 - max(radii)) * scale
     if max_separation_arcsec <= 0:
@@ -238,6 +340,21 @@ def aperture_response(
             )
             throughput[:, w, :, k] = moments.mean(axis=-1).T
             ring_std[w, :, k] = moments[:, 0].std(axis=-1)
+    probe = [
+        _probe(
+            model,
+            instrument,
+            rule,
+            frame,
+            radius,
+            nodes[w],
+            throughput[:, w],
+            separations[1],
+        )
+        for w, (model, frame, radius) in enumerate(
+            zip(models, frames, radii, strict=True)
+        )
+    ]
     return ApertureResponse(
         rule,
         quadrature,
@@ -246,6 +363,7 @@ def aperture_response(
         jnp.asarray(throughput),
         jnp.asarray(ring_std),
         jnp.asarray(kernels),
+        jnp.asarray(probe),
     )
 
 
@@ -296,7 +414,14 @@ def aperture_record(
     enters the read only as an east offset, a north offset and a contrast.
 
     ``response`` must have been built for this instrument and for
-    ``exposure.quadrature``.
+    ``exposure.quadrature``. On concrete inputs the call refuses another one
+    with a ``ValueError`` naming what differs: the wavelength nodes or bands,
+    the detector pixel scale or a band's lambda/D frame (through the aperture
+    radius), or the coronagraph tables (through one source per band,
+    measured again against the value the response stored). A coronagraph or
+    detector swapped with ``equinox.tree_at`` therefore cannot pair its star
+    leakage with the old planet throughput. The check costs one source image
+    per band, small beside the build.
 
     The record's ``reads`` lists the scene paths it was built from: the ``star``
     and the ``dynamics.frame`` (distance, position and epoch), plus the
@@ -304,13 +429,8 @@ def aperture_record(
     when there is one. The planets and their orbits are not read.
     """
     quadrature = exposure.quadrature
-    nodes, built = quadrature.nodes_nm, response.quadrature.nodes_nm
-    if nodes.shape != built.shape or (
-        not isinstance(nodes, jax.core.Tracer)
-        and not isinstance(built, jax.core.Tracer)
-        and not np.array_equal(np.asarray(nodes), np.asarray(built))
-    ):
-        raise ValueError("the response was built for other wavelength nodes")
+    nodes = quadrature.nodes_nm
+    _check_response(instrument, quadrature, response)
     components = _run(
         scene, instrument, exposure, "photons", planets=False, uniform_sky=True
     )
@@ -331,9 +451,7 @@ def aperture_record(
     )[:, :, 0]
 
     def per_contrast(wavelength_nm):
-        gain = instrument.primary.collecting_area_m2 * instrument.system_throughput(
-            wavelength_nm
-        )
+        gain = instrument.effective_area_m2(wavelength_nm)
         return gain * scene.star.photon_flux_density(
             wavelength_nm, jnp.asarray(exposure.time_d), dist_pc=scene.dist_pc
         )
