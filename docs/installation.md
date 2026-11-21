@@ -73,6 +73,7 @@ forward model:
 |---|---|
 | `skyscapes` | `Scene`, `Star`, `Planet`, `Disk`, physical models |
 | `optixstuff` | `Instrument`, detectors, throughput, filters, bands and grids |
+| `orbix` | Orbits, sky offsets and the ecliptic pointing behind the local zodi |
 | `hwoutils` | Shared constants, unit conversions and JAX configuration |
 
 `pip install coronagraphoto` pulls all of these as transitive

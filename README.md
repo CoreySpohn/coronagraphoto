@@ -82,7 +82,8 @@ path fills tables once and the answer is read from them:
 The last three are pure array functions for `jax.jit`, `jax.vmap` and
 `jax.grad`. The local zodi is read from `scene.local_zodi` and the disk from the
 scene, exactly as in the images. See
-[aperture rates and exposure time](docs/explanation/exposure_time.md).
+[aperture rates and exposure time](docs/explanation/exposure_time.md) and
+[how an exposure time is computed](https://optixstuff.readthedocs.io/en/latest/explanation/exposure_time.html).
 
 ## Quick start
 

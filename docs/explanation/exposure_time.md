@@ -94,6 +94,9 @@ it fell at the roll the record was rendered at. `roll_deg` is the position angle
 
 ## S/N and exposure time
 
+The reduction belongs to optixstuff, which the jaxedith analytic path also
+ends at; [how an exposure time is computed](https://optixstuff.readthedocs.io/en/latest/explanation/exposure_time.html) follows both roads. In short:
+
 `snr(rates, detector, time_s, frame_time_s=..., post_processing=...)` and
 `exposure_time(rates, detector, target_snr, frame_time_s=..., post_processing=...)`
 take the read.

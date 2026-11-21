@@ -18,7 +18,8 @@ and `aperture_rates` reads that table once per planet under `jax.vmap`;
 
 See the [README quick start](https://github.com/CoreySpohn/coronagraphoto#quick-start),
 [rate contracts](explanation/rate_vs_readout),
-[aperture rates and exposure time](explanation/exposure_time), and
+[aperture rates and exposure time](explanation/exposure_time),
+[how an exposure time is computed](https://optixstuff.readthedocs.io/en/latest/explanation/exposure_time.html), and
 [JAX and memory](explanation/performance).
 
 ```{toctree}
