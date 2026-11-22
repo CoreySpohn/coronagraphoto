@@ -73,6 +73,26 @@ NARROW_BANDS = (Band(524.0, 526.0), Band(574.0, 576.0))
 SEPARATIONS = (0.8, 1.0, 1.5, 2.0, 2.5, 3.0)
 BEYOND = 3.4
 POSITION_ANGLES = (250.0, 20.0)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def band_limited_stellar_maps():
+    """Resample the synthetic stellar maps band-limited, as the closures assume.
+
+    Each closure predicts the image route from the exact synthetic profile. The
+    profiles are smooth, so band-limited resampling reproduces them; the shipped
+    linear default adds about 1e-2 on the 0.5 lambda/D radial table, which would
+    hide the curve interpolation that test_curve_interpolation isolates.
+    """
+    import yippy._stellar_intens as stellar_intens
+    import yippy.coronagraph as coronagraph
+
+    with pytest.MonkeyPatch.context() as patch:
+        for module in (coronagraph, stellar_intens):
+            patch.setattr(module, "STELLAR_RECONSTRUCTION", "band_limited")
+        yield
+
+
 # Registered exozodi bounds by separation: the raw band gap, and what remains
 # after the prediction with the widened blur kernel (measured, times 1.5 and
 # rounded up; 2.5 and 3.0 lambda/D keep their earlier bounds).
