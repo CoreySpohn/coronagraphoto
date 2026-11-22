@@ -429,7 +429,7 @@ def test_reads_outside_the_tables_and_unsupported_builds(sloped):
         solved = ox.exposure_time(
             outside, detector, 5.0, frame_time_s=100.0, post_processing=_NO_RESIDUAL
         )
-        assert not solved.valid.any() and float(solved.time_s[0]) == 0.0
+        assert not solved.valid.any() and np.isnan(float(solved.time_s[0]))
     # The aperture leaves the detector before the pixel centre does.
     half = 24 * float(detector.pixel_scale_arcsec)
     edge = cp.aperture_rates(record, *_offsets(half * 0.99, 90.0), 1e-10, time_d=0.0)
@@ -555,7 +555,7 @@ def test_scene_route_is_a_vmap_of_the_read_and_feeds_the_calculator(plateau):
     )
     assert solved.time_s.shape == solved.valid.shape == (1, 2, 3)
     assert np.all(np.asarray(solved.valid[:, 0])) and not solved.valid[:, 1].any()
-    assert np.all(np.asarray(solved.time_s[:, 1]) == 0.0)
+    assert np.all(np.isnan(np.asarray(solved.time_s[:, 1])))
     with pytest.raises(ValueError, match="shape"):
         cp.scene_aperture_rates(record, scene, 0.0)
 

@@ -122,7 +122,8 @@ there is no default, so no residual and a factor of one must be stated as
 `optixstuff.exposure_time` returns `optixstuff.ExposureTime(time_s, valid)`. The time is continuous;
 round it to whole frames with `optixstuff.frames_for_time`. A target that no
 time can reach, because the planet is at or below the residual floor, has
-`valid` False and a time of zero, so no infinity enters later arithmetic.
+`valid` False and a time of NaN, so it cannot be summed or scheduled as a
+zero-cost target; mask on `valid` first.
 
 ```python notest
 import jax
