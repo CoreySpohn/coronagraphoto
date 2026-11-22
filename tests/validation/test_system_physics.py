@@ -31,10 +31,9 @@ def test_aperture_closure_two_samplings():
     disk convolved with the square PSF is a separable tapered map, not a
     global plateau. Along each native axis h[j] is the sum of the square's
     unit interior and half boundary weights over source pixels, weighted
-    by their deposited flux. Linear sky sampling and native deposition give
-    that source vector as (detector_step/native_step)*W.T@W@ones, where W
-    is the triangular interpolation kernel; at 2:1 its edge entries are
-    25/32, not one. The 2-D map is f*.3/16*step**2*h[y]*h[x].
+    by their deposited flux. The disk radiance is evaluated on the
+    coronagraph's native source grid, so the source vector is ones at either
+    detector sampling. The 2-D map is f*.3/16*step**2*h[y]*h[x].
     Zero-extended band-limited pixel
     integration multiplies each Fourier mode by sinc(frequency*pixel_width).
     The independently integrated separable DFT supplies the disk oracle;
@@ -95,9 +94,7 @@ def test_aperture_closure_two_samplings():
         weights = rule.weights(psf, (0.5, 0.0))
         # Independent finite-source convolution and exact Fourier pixel integrals.
         delta = (np.arange(32)[:, None] - np.arange(32)[None, :]) * 0.25
-        sky_positions = (np.arange(n) - (n - 1) / 2) * step / 0.25 + 15.5
-        linear = np.maximum(1 - abs(sky_positions[:, None] - np.arange(32)), 0)
-        source = step / 0.25 * linear.T @ linear @ np.ones(32)
+        source = np.ones(32)
         h = ((abs(delta) < 2) + 0.5 * (abs(delta) == 2)) @ source
         padded = np.pad(h, (16, 16))
         frequencies = np.fft.fftfreq(len(padded))

@@ -94,22 +94,23 @@ def band_limited_stellar_maps():
 
 
 # Registered exozodi bounds by separation: the raw band gap, and what remains
-# after the prediction with the widened blur kernel (measured, times 1.5 and
-# rounded up; 2.5 and 3.0 lambda/D keep their earlier bounds).
-EXOZODI_GAP = {0.8: 0.40, 1.0: 0.30, 1.5: 0.16, 2.0: 0.09, 2.5: 0.05, 3.0: 0.011}
+# after the prediction with the point-source blur kernel (measured, times 1.5
+# and rounded up).
+EXOZODI_GAP = {0.8: 0.40, 1.0: 0.30, 1.5: 0.16, 2.0: 0.09, 2.5: 0.05, 3.0: 0.017}
 EXOZODI_RESIDUAL = {
-    0.8: 4.5e-3,
-    1.0: 4.5e-3,
-    1.5: 4.5e-3,
-    2.0: 1.5e-3,
-    2.5: 3e-3,
-    3.0: 6e-3,
+    0.8: 2.6e-2,
+    1.0: 1.7e-2,
+    1.5: 5.1e-3,
+    2.0: 1.7e-3,
+    2.5: 3e-4,
+    3.0: 2e-3,
 }
 # The synthetic YIP of conftest.write_yip.
 YIP_SIGMA, YIP_INTEGRAL = YIP_SIGMA_LOD, 0.3
-# The disk is rendered on the YIP's native grid and reconstructed linearly to
-# the detector, which adds the variance pitch**2 / 6 to the PSF's own, so the
-# disk is blurred by a kernel wider than the point-source PSF by this factor.
+# Resampling the disk from the detector grid to the YIP's native grid used to
+# add the variance pitch**2 / 6 to the PSF's own, a kernel wider than the
+# point-source PSF by this factor. The radiance is now evaluated on the native
+# grid, so the factor marks the retired kernel, not the prediction.
 DISK_KERNEL_WIDENING = np.sqrt(1 + (YIP_PITCH_LOD**2 / 6) / YIP_SIGMA_LOD**2)
 
 
@@ -462,8 +463,8 @@ def causes(build):
 
         out["disk"][s] = dict(
             gap=band["exozodi"],
-            residual=left(widened),
-            unwidened=left(plain),
+            residual=left(plain),
+            widened=left(widened),
             unblurred=left(raw),
         )
     tau = float(np.asarray(wide.curves.throughput)[0])
@@ -534,22 +535,20 @@ def test_pixelization(causes):
 def test_disk_structure(causes):
     """Fails if the exozodi gap is not the blurred disk read across the aperture.
 
-    Basis: the prediction blurs the node's disk radiance with a Gaussian
-    kernel (sigma 0.7 lambda/D scaled with the node) and averages it over the
-    aperture, from ``photon_radiance_at`` on a 0.1 lambda/D grid. The kernel is
-    wider than the point-source PSF by ``sqrt(1 + (h**2 / 6) / sigma**2)``, 1.042
-    for the YIP pixel pitch ``h`` of 0.5 lambda/D: the disk is rendered on the
-    YIP's native grid and reconstructed linearly to the detector, which adds the
-    variance ``h**2 / 6``, while a point source is not resampled that way.
-    The widening is computed from the pitch alone, not fitted. With it the
-    prediction removes at least 90% of the band gap from 0.8 to 2.5
-    lambda/D and leaves 2.7e-3, 2.2e-3, 1.9e-3 and 7e-4 at 0.8, 1.0, 1.5 and
-    2.0 (bounds ``EXOZODI_RESIDUAL``, 1.5 times the measured). The same
-    prediction with the unwidened kernel leaves 2.4e-2 at 0.8 lambda/D, so
-    the widening is what the test sees; without any blur (aperture mean of the
-    raw disk) the prediction removes less than a fifth of the gap at 0.8 and
-    1.0 lambda/D, where the disk's inner edge lies within the aperture and
-    PSF. The point-source path is not widened: the curves' planet throughput
+    Basis: the prediction blurs the node's disk radiance with the
+    point-source Gaussian kernel (sigma 0.7 lambda/D scaled with the node) and
+    averages it over the aperture, from ``photon_radiance_at`` on a 0.1
+    lambda/D grid. The disk radiance is evaluated on the YIP's native source
+    grid, so the disk sees the point-source PSF with no extra blur. The
+    prediction removes at least 90% of the band gap from 0.8 to 2.5 lambda/D
+    and leaves 1.7e-2, 1.1e-2, 3.4e-3, 1.1e-3, 1.5e-4 and 1.2e-3 at 0.8, 1.0,
+    1.5, 2.0, 2.5 and 3.0 (bounds ``EXOZODI_RESIDUAL``, 1.5 times the
+    measured). The kernel widened by the retired detector-to-native
+    resampling (``DISK_KERNEL_WIDENING``) leaves 4.1e-2 at 0.8 lambda/D, so
+    the test sees the kernel; without any blur (aperture mean of the raw disk)
+    the prediction removes less than a fifth of the gap at 0.8 and 1.0
+    lambda/D, where the disk's inner edge lies within the aperture and PSF.
+    The point-source path is not widened: the curves' planet throughput
     equals the ideal Gaussian enclosed fraction (0.118011 against 0.118041).
     """
     for s, row in causes["disk"].items():
@@ -560,7 +559,7 @@ def test_disk_structure(causes):
             assert np.all(left < 0.1 * gap), s
         if s <= 1.0:
             assert np.all(np.abs(row["unblurred"]) > 0.8 * gap), s
-    assert np.all(np.abs(causes["disk"][0.8]["unwidened"]) > 1.5e-2)
+    assert np.all(np.abs(causes["disk"][0.8]["widened"]) > 1.5e-2)
     point = causes["point_source"]
     assert abs(point["curves"] / point["ideal"] - 1) < 5e-4
 
@@ -587,15 +586,15 @@ def test_curve_interpolation(causes):
 
 @vv.case("etc-count-rates", "code-verification", srq="analytic against image rates")
 def test_detector_edge(causes):
-    """Fails if the 3.4 lambda/D exozodi gap is not a truncation at the detector edge.
+    """Fails if the 3.4 lambda/D exozodi gap depends on the detector extent.
 
-    The disk is rendered only where sources lie on the detector, so the blur
-    loses the light of sources beyond it. On the 9.6 lambda/D field the gap at
-    3.4 lambda/D depends on the position angle (the edge is nearer along some
-    angles); on a 12.8 lambda/D field the two angles agree. Basis: measured
-    angle differences of 3.6e-2 and 4.8e-2 on the small field and 4.2e-3 at
-    most on the large one, bounded at 2e-2 and 1e-2.
+    Disk light from sky beyond the detector edge scatters onto it, so the
+    rendered exozodi must not change with the field. The gap at 3.4 lambda/D
+    on a 9.6 and a 12.8 lambda/D field agrees at both position angles.
+    Basis: the radiance is evaluated on the YIP's native source grid, the same
+    sources in both fields, so the gaps agree to 1e-9 (measured 0). With the
+    radiance evaluated on the detector grid the angle differences were 3.6e-2
+    and 4.8e-2 on the small field and 4.2e-3 on the large one.
     """
     small, large = causes["edge"][96], causes["edge"][128]
-    assert np.abs(small[0] - small[1]).max() > 2e-2
-    assert np.abs(large[0] - large[1]).max() < 1e-2
+    np.testing.assert_allclose(small, large, rtol=0, atol=1e-9)

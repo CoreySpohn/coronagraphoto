@@ -124,9 +124,10 @@ def _node_rates(
 
     disk = jnp.zeros(grid.shape)
     if system.disk is not None:
-        radiance = system.photon_radiance(wavelength_nm, time_d, grid=grid)
-        scene = radiance.integrated()
-        scene = replace(resample(scene, angular), grid=native)
+        # Evaluated on the coronagraph's source grid so sky just off the
+        # detector still scatters onto it.
+        radiance = system.photon_radiance(wavelength_nm, time_d, grid=angular)
+        scene = replace(radiance.integrated(), grid=native)
         rendered = coro.render_scene(scene, wavelength_nm, grid=detector_pixels(native))
         disk = gain * rendered.image.data
         disk = jnp.where(rendered.valid, disk, jnp.nan)

@@ -293,3 +293,38 @@ def test_source_scales_are_linear_in_the_image_and_live_for_gradients():
         np.testing.assert_allclose(
             jax.grad(total)(1.0), float(getattr(base, name).sum()), rtol=1e-12
         )
+
+
+def test_disk_render_does_not_depend_on_detector_extent():
+    """Fails if disk light off the detector is dropped; 1e-10 relative to peak.
+
+    A small detector's exozodi equals the crop of a detector that spans the
+    whole coronagraph grid, for the same scene and a disk wider than the small
+    detector. Sky just off the small detector scatters onto it, so the
+    radiance must be evaluated on the coronagraph source grid, not on the
+    detector. Evaluating it on the detector grid gave a crop sum of 0.9919 of
+    the full render's here, worst pixel error 1.6e-3 of peak (0.8905 and 68 %
+    for an 8 lambda/D detector under a 20 lambda/D disk). Basis: both paths
+    sample the same float64 radiance on matching grids, so they agree to
+    rounding well inside 1e-10.
+    """
+    from conftest import make_path, make_system
+    from optixstuff.spectral import Band
+    from skyscapes.disk import AYOExozodi
+
+    import coronagraphoto as cp
+
+    scene = make_system(disk=AYOExozodi(level_zodis=3.0))
+    bands = (Band(500.0, 600.0),)
+
+    def exozodi(detector_n):
+        path = make_path(n=64, cube=True, detector_n=detector_n)
+        exposure = cp.build_exposure(scene, path, bands, time_d=0.0)
+        return np.asarray(cp.photon_rates(scene, path, exposure).exozodi)[0]
+
+    small, full = exozodi(32), exozodi(64)
+    crop = full[:, 16:48, 16:48]
+    assert np.isfinite(crop).all() and crop.max() > 0
+    print(f"sum ratio {small.sum() / crop.sum():.4f}")
+    print(f"worst/peak {np.abs(small - crop).max() / crop.max():.3e}")
+    np.testing.assert_allclose(small, crop, rtol=0, atol=1e-10 * crop.max())
