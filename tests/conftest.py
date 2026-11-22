@@ -215,24 +215,39 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
         )
 
 
+class _GaussianSceneOperator(eqx.Module):
+    """One closed-form Gaussian PSF per source pixel, contracted with the flux.
+
+    Satisfies the scene-operator contract of yippy (``render(flux, grid)``) for an
+    analytic model that has no yield input package to build an operator from.
+    """
+
+    psfs: jax.Array
+    valid: jax.Array
+
+    def render(self, flux, grid):
+        """Return the image and whether every lit source is valid."""
+        valid = jnp.all((flux == 0) | (jnp.isfinite(flux) & self.valid))
+        image = jnp.einsum("ij,ijyx->yx", flux, self.psfs)
+        return jnp.where(valid, image, jnp.nan), valid
+
+
 class GaussianSceneCoronagraph(GaussianCoronagraph, AbstractSceneCoronagraph):
-    """Full dense operator built from the same synthetic off-axis PSFs."""
+    """Dense scene operator built from the same synthetic off-axis PSFs."""
 
     operator: object
 
     def __init__(self, n=40, step=0.25, *, chromatic=False):
         """Prepare a full set of native Gaussian source responses."""
-        from yippy import DenseSceneOperator
-
         super().__init__(n, step, chromatic=chromatic)
         x, y = self.grid.coordinates()
         psfs = self.source_psfs(550.0, x.ravel(), y.ravel(), grid=None)
-        self.operator = DenseSceneOperator(
+        self.operator = _GaussianSceneOperator(
             psfs.image.data.reshape(n, n, n, n), psfs.valid.reshape(n, n)
         )
 
     def render_scene(self, scene, wavelength_nm, *, grid):
-        """Apply the production dense operator to per-pixel incident flux."""
+        """Apply the dense operator to per-pixel incident flux."""
         flux = resample(scene, self.grid).data
         data, valid = self.operator.render(flux, self.grid)
         native = Image(
