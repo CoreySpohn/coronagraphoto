@@ -18,6 +18,7 @@ from conftest import (
     with_zodi,
     write_yip,
 )
+from hwoutils.constants import Rsun2m
 from optixstuff import (
     ConstantThroughput,
     Detector,
@@ -29,8 +30,8 @@ from optixstuff.apertures import Circular, HalfMaximum
 from optixstuff.grids import Image, Measure, SkyOrientation
 from optixstuff.spectral import Band
 from skyscapes import AYOZodi, LeinertZodi
-from skyscapes.physical_model import GridPhysicalModel
-from skyscapes.scene import Planet
+from skyscapes.physical_model import BlackbodyPhysicalModel, GridPhysicalModel
+from skyscapes.scene import BlackbodyStar, Planet
 from yippy import open_yip
 
 import coronagraphoto as cp
@@ -491,6 +492,45 @@ def test_flux_scale_scales_every_record_table_and_passes_the_guard(plateau):
             getattr(other, name), 1.5 * getattr(record, name), rtol=1e-6
         )
     np.testing.assert_array_equal(other.n_pix, record.n_pix)
+
+
+@pytest.mark.parametrize(
+    "leaf, planet_factor, leakage_factor",
+    [("star", 1.0, 2.0), ("planet", 2.0, 1.0)],
+)
+def test_thermal_planet_scale_is_its_own_on_the_record_route(
+    plateau, leaf, planet_factor, leakage_factor
+):
+    """Fails if a star's ``flux_scale`` reaches a thermal planet on the record route.
+
+    Basis: a 300 K blackbody planet's flux does not depend on the host, so a
+    star scale of two doubles only the leakage and a planet scale of two
+    doubles only the planet, each by its factor within 1e-5 relative float32
+    rounding; the record and the contrasts are rebuilt for each scene.
+    """
+    _, instrument, exposure, response, _ = plateau
+    planet = Planet(jnp.ones(1), BlackbodyPhysicalModel(teff_K=jnp.array([300.0])))
+    scene = make_system(
+        star=BlackbodyStar(5772.0, Rsun2m),
+        separation_arcsec=0.03,
+        planet_groups=(planet,),
+    )
+    where = {
+        "star": lambda s: s.star.flux_scale,
+        "planet": lambda s: s.planets[0].flux_scale,
+    }[leaf]
+
+    def read(scene):
+        record = cp.aperture_record(scene, instrument, exposure, response)
+        return cp.scene_aperture_rates(record, scene, jnp.array([0.0]))
+
+    base = read(scene)
+    scaled = read(eqx.tree_at(where, scene, jnp.full_like(where(scene), 2.0)))
+    assert float(jnp.max(base.planet)) > 0
+    np.testing.assert_allclose(scaled.planet, planet_factor * base.planet, rtol=1e-5)
+    np.testing.assert_allclose(
+        scaled.star_leakage, leakage_factor * base.star_leakage, rtol=1e-5
+    )
 
 
 def test_scene_route_is_a_vmap_of_the_read_and_feeds_the_calculator(plateau):
