@@ -94,24 +94,24 @@ def band_limited_stellar_maps():
 
 
 # Registered exozodi bounds by separation: the raw band gap, and what remains
-# after the prediction with the point-source blur kernel (measured, times 1.5
+# after the prediction with the box-widened blur kernel (measured, times 1.5
 # and rounded up).
 EXOZODI_GAP = {0.8: 0.40, 1.0: 0.30, 1.5: 0.16, 2.0: 0.09, 2.5: 0.05, 3.0: 0.017}
 EXOZODI_RESIDUAL = {
-    0.8: 2.6e-2,
-    1.0: 1.7e-2,
-    1.5: 5.1e-3,
-    2.0: 1.7e-3,
-    2.5: 3e-4,
+    0.8: 7e-3,
+    1.0: 2.7e-3,
+    1.5: 3.3e-3,
+    2.0: 7e-4,
+    2.5: 9e-4,
     3.0: 2e-3,
 }
 # The synthetic YIP of conftest.write_yip.
 YIP_SIGMA, YIP_INTEGRAL = YIP_SIGMA_LOD, 0.3
-# Resampling the disk from the detector grid to the YIP's native grid used to
-# add the variance pitch**2 / 6 to the PSF's own, a kernel wider than the
-# point-source PSF by this factor. The radiance is now evaluated on the native
-# grid, so the factor marks the retired kernel, not the prediction.
-DISK_KERNEL_WIDENING = np.sqrt(1 + (YIP_PITCH_LOD**2 / 6) / YIP_SIGMA_LOD**2)
+# The disk reaches the YIP as one cell-integrated flux per native cell, placed
+# at the cell centre: the disk is smoothed by the cell's box (variance
+# pitch**2 / 12 per axis) before the PSF, so the kernel is wider than the
+# point-source PSF by this factor.
+DISK_CELL_WIDENING = np.sqrt(1 + (YIP_PITCH_LOD**2 / 12) / YIP_SIGMA_LOD**2)
 
 
 def radial_leakage(radius_lod):
@@ -268,7 +268,7 @@ def chromatic_planet_factor(case, tau_curve):
     return enclosed / tau_curve
 
 
-def disk_blur_factors(case, separation_lod, angle_deg, *, step=0.1, sigma_scale=1.0):
+def disk_blur_factors(case, separation_lod, angle_deg, *, step=0.05, sigma_scale=1.0):
     """Node ratios image / analytic of the exozodi from the disk alone.
 
     Returns (blurred, unblurred). The image sums the disk blurred by the
@@ -456,15 +456,15 @@ def causes(build):
     for s in (0.8, 1.0, 1.5, 2.0, 2.5, 3.0):
         node, band, *_ = wide.gaps(s, 250.0)
         plain, raw = disk_blur_factors(wide, s, 250.0)
-        widened, _ = disk_blur_factors(wide, s, 250.0, sigma_scale=DISK_KERNEL_WIDENING)
+        boxed, _ = disk_blur_factors(wide, s, 250.0, sigma_scale=DISK_CELL_WIDENING)
 
         def left(factor, s=s):
             return wide.gaps(s, 250.0, scale_nodes={"exozodi": factor})[1]["exozodi"]
 
         out["disk"][s] = dict(
             gap=band["exozodi"],
-            residual=left(plain),
-            widened=left(widened),
+            residual=left(boxed),
+            plain=left(plain),
             unblurred=left(raw),
         )
     tau = float(np.asarray(wide.curves.throughput)[0])
@@ -535,21 +535,25 @@ def test_pixelization(causes):
 def test_disk_structure(causes):
     """Fails if the exozodi gap is not the blurred disk read across the aperture.
 
-    Basis: the prediction blurs the node's disk radiance with the
-    point-source Gaussian kernel (sigma 0.7 lambda/D scaled with the node) and
-    averages it over the aperture, from ``photon_radiance_at`` on a 0.1
-    lambda/D grid. The disk radiance is evaluated on the YIP's native source
-    grid, so the disk sees the point-source PSF with no extra blur. The
+    Basis: the prediction blurs the node's disk radiance with a Gaussian
+    kernel (sigma 0.7 lambda/D scaled with the node, widened by
+    ``DISK_CELL_WIDENING``, 1.021) and averages it over the aperture, from
+    ``photon_radiance_at`` on a 0.05 lambda/D grid (0.1 is not converged at
+    the inner edge: it moves the 0.8 lambda/D residual by 4e-3). The widening
+    is computed from the YIP pitch alone, not fitted. The image feeds the YIP
+    the disk's cell integral on its 0.5 lambda/D source grid, built from 4x4
+    sub-samples per cell; the operator places each cell's flux at the cell
+    centre, which smooths the disk by the cell's box. With the box the
     prediction removes at least 90% of the band gap from 0.8 to 2.5 lambda/D
-    and leaves 1.7e-2, 1.1e-2, 3.4e-3, 1.1e-3, 1.5e-4 and 1.2e-3 at 0.8, 1.0,
+    and leaves 4.6e-3, 1.8e-3, 2.2e-3, 4.1e-4, 5.5e-4 and 1.2e-3 at 0.8, 1.0,
     1.5, 2.0, 2.5 and 3.0 (bounds ``EXOZODI_RESIDUAL``, 1.5 times the
-    measured). The kernel widened by the retired detector-to-native
-    resampling (``DISK_KERNEL_WIDENING``) leaves 4.1e-2 at 0.8 lambda/D, so
-    the test sees the kernel; without any blur (aperture mean of the raw disk)
-    the prediction removes less than a fifth of the gap at 0.8 and 1.0
-    lambda/D, where the disk's inner edge lies within the aperture and PSF.
-    The point-source path is not widened: the curves' planet throughput
-    equals the ideal Gaussian enclosed fraction (0.118011 against 0.118041).
+    measured). The bare point-source kernel leaves 8.4e-3 and 9.5e-3 at 0.8
+    and 1.0, so the test sees the widening; without any blur (aperture mean of
+    the raw disk) the prediction removes less than a fifth of the gap at 0.8
+    and 1.0 lambda/D, where the disk's inner edge lies within the aperture
+    and PSF. The point-source path is not widened: the curves' planet
+    throughput equals the ideal Gaussian enclosed fraction (0.118011 against
+    0.118041).
     """
     for s, row in causes["disk"].items():
         gap, left = np.abs(row["gap"]), np.abs(row["residual"])
@@ -559,7 +563,10 @@ def test_disk_structure(causes):
             assert np.all(left < 0.1 * gap), s
         if s <= 1.0:
             assert np.all(np.abs(row["unblurred"]) > 0.8 * gap), s
-    assert np.all(np.abs(causes["disk"][0.8]["widened"]) > 1.5e-2)
+    for s in (0.8, 1.0):
+        row = causes["disk"][s]
+        # The cell box is what the test sees: the bare PSF kernel does worse.
+        assert np.abs(row["plain"]).max() > 1.5 * np.abs(row["residual"]).max(), s
     point = causes["point_source"]
     assert abs(point["curves"] / point["ideal"] - 1) < 5e-4
 

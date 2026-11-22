@@ -33,7 +33,8 @@ def test_aperture_closure_two_samplings():
     unit interior and half boundary weights over source pixels, weighted
     by their deposited flux. The disk radiance is evaluated on the
     coronagraph's native source grid, so the source vector is ones at either
-    detector sampling. The 2-D map is f*.3/16*step**2*h[y]*h[x].
+    detector sampling except for the edge cells, whose cell mean of the
+    zero-extended linear table is 0.875. The 2-D map is f*.3/16*step**2*h[y]*h[x].
     Zero-extended band-limited pixel
     integration multiplies each Fourier mode by sinc(frequency*pixel_width).
     The independently integrated separable DFT supplies the disk oracle;
@@ -94,7 +95,10 @@ def test_aperture_closure_two_samplings():
         weights = rule.weights(psf, (0.5, 0.0))
         # Independent finite-source convolution and exact Fourier pixel integrals.
         delta = (np.arange(32)[:, None] - np.arange(32)[None, :]) * 0.25
+        # The disk is a linear reconstruction of its table, zero outside: an
+        # edge cell's mean over its 4 sub-samples is (.625+.875+1+1)/4.
         source = np.ones(32)
+        source[[0, -1]] = 0.875
         h = ((abs(delta) < 2) + 0.5 * (abs(delta) == 2)) @ source
         padded = np.pad(h, (16, 16))
         frequencies = np.fft.fftfreq(len(padded))
@@ -145,9 +149,13 @@ def test_aperture_closure_two_samplings():
 def test_disk_equals_pixel_center_source():
     """Fails on an even-grid half-pixel offset or a disk without a scene operator.
 
-    A one-pixel scene contracts to its point PSF before reconstruction.
-    Both outputs then integrate the same zero-extended band-limited density
-    over detector pixels, so equality holds to 64 eps of peak. Declaring the
+    The disk table is a linear reconstruction, so a one-pixel table has the
+    cell integral of a unit tent: weights 1/8, 3/4, 1/8 per axis over the
+    pixel and its neighbours (exact for the linear interpolant). Each cell's
+    flux contracts to its point PSF before reconstruction, so the disk equals
+    the planet path's point PSFs at those nine pixel centres with those
+    weights, both integrating the same zero-extended band-limited density
+    over detector pixels. Equality holds to 1e3 eps of peak. Declaring the
     point PSF linear would compare different continuous images. A source
     shift of half a native pixel differs by >.05 of peak.
     """
@@ -188,8 +196,23 @@ def test_disk_equals_pixel_center_source():
     )
     rates = photon_rates(scene, path, exposure)
     a, b = np.asarray(rates.planet), np.asarray(rates.exozodi)
-    np.testing.assert_allclose(a, b, atol=64 * np.finfo(float).eps * a.max(), rtol=0)
     native = path.coronagraph.grid
+    lod = float(native.frame.lod_to_arcsec(550.0))
+    pixels = replace(grid.to_lod(550.0, native.frame), orientation=native.orientation)
+    offsets = np.array([(i, j) for j in (-1, 0, 1) for i in (-1, 0, 1)])
+    tent = np.array([1 / 8, 3 / 4, 1 / 8])
+    weights = np.array([tent[j + 1] * tent[i + 1] for i, j in offsets])
+    psfs = path.coronagraph.source_psfs(
+        550.0,
+        float(x) / lod + native.step * offsets[:, 0],
+        float(y) / lod + native.step * offsets[:, 1],
+        grid=pixels,
+    ).image.data
+    scale = a.max() / float(psfs[4].max())
+    expected = scale * np.einsum("k,kyx->yx", weights, np.asarray(psfs))
+    np.testing.assert_allclose(
+        b[0, 0], expected, atol=1e3 * np.finfo(float).eps * a.max(), rtol=0
+    )
     shifted = path.coronagraph.source_psfs(
         550.0,
         jnp.array([float(x) / float(native.frame.lod_to_arcsec(550.0)) + 0.15]),

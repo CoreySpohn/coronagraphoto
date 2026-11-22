@@ -24,7 +24,15 @@ from optixstuff.coronagraph import (
     AbstractSceneCoronagraph,
     MultiBandCoronagraph,
 )
-from optixstuff.grids import Image, Measure, SkyOrientation, resample
+from optixstuff.grids import (
+    Image,
+    Measure,
+    PixelGrid,
+    SkyOrientation,
+    footprint_overlap,
+    integrate_footprints,
+    resample,
+)
 from optixstuff.spectral import Band, Quadrature
 from skyscapes import Scene
 
@@ -34,6 +42,24 @@ def _detector_grid(instrument, orientation):
     if orientation is not None and orientation.parity != -1:
         raise ValueError("detector pointing must have parity=-1")
     return replace(instrument.detector.grid, orientation=orientation)
+
+
+# Disk sub-samples per source-cell side; see ``_refined``.
+_DISK_SUBSAMPLE = 4
+
+
+def _refined(grid, factor):
+    """The same field of view cut into ``factor`` times finer cells per side."""
+    (bxx, bxy), (byx, byy) = grid.basis
+    return PixelGrid(
+        tuple(n * factor for n in grid.shape),
+        (grid.center_x + 0.5) * factor - 0.5,
+        (grid.center_y + 0.5) * factor - 0.5,
+        ((bxx / factor, bxy / factor), (byx / factor, byy / factor)),
+        grid.unit,
+        grid.frame,
+        grid.orientation,
+    )
 
 
 def _node_rates(
@@ -55,7 +81,6 @@ def _node_rates(
     speckle = instrument.speckle
     products = coro.at_wavelength(wavelength_nm)
     native = products.source_grid
-    angular = replace(native.to_arcsec(wavelength_nm), orientation=grid.orientation)
     lod_arcsec = native.frame.lod_to_arcsec(wavelength_nm)
     gain = instrument.effective_area_m2(wavelength_nm)
 
@@ -124,10 +149,20 @@ def _node_rates(
 
     disk = jnp.zeros(grid.shape)
     if system.disk is not None:
-        # Evaluated on the coronagraph's source grid so sky just off the
-        # detector still scatters onto it.
-        radiance = system.photon_radiance(wavelength_nm, time_d, grid=angular)
-        scene = replace(radiance.integrated(), grid=native)
+        # The scene operator places each source cell's flux at the cell centre,
+        # so it needs the cell integral of the disk, not a midpoint sample.
+        # Evaluated on the coronagraph's source grid, refined by an integer
+        # factor and summed back to source cells, so sky just off the detector
+        # still scatters onto it.
+        fine = _refined(native, _DISK_SUBSAMPLE)
+        radiance = system.photon_radiance(
+            wavelength_nm,
+            time_d,
+            grid=replace(fine.to_arcsec(wavelength_nm), orientation=grid.orientation),
+        )
+        scene = integrate_footprints(
+            replace(radiance.integrated(), grid=fine), footprint_overlap(fine, native)
+        )
         rendered = coro.render_scene(scene, wavelength_nm, grid=detector_pixels(native))
         disk = gain * rendered.image.data
         disk = jnp.where(rendered.valid, disk, jnp.nan)
