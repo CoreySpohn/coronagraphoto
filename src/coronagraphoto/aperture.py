@@ -447,6 +447,13 @@ def aperture_record(
     and the ``dynamics.frame`` (distance, position and epoch), plus the
     ``local_zodi`` when there is one and the ``disk`` with its two midplane angles
     when there is one. The planets and their orbits are not read.
+
+    The scene's ``flux_scale`` leaves enter as follows. The star's and the
+    disk's scales are part of the nodes the record reads, so they are fixed at
+    the build: changing one leaves the record stale. The local zodi's scale is
+    applied at each read, through the kept model. A planet's scale is not
+    read here; it multiplies the contrast the caller passes, which
+    :func:`scene_aperture_rates` takes from the scene.
     """
     quadrature = exposure.quadrature
     nodes = quadrature.nodes_nm

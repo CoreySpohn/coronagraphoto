@@ -217,3 +217,79 @@ def test_expected_integrates_declared_response_kink():
     np.testing.assert_allclose(
         image.local_zodi[0, 4, 4], expected, rtol=32 * np.finfo(float).eps, atol=0
     )
+
+
+def test_source_scales_are_linear_in_the_image_and_live_for_gradients():
+    """Fails if a source's flux_scale misses its image or leaks into another.
+
+    Basis: each rate is a product of float64 factors, so a scale multiplies
+    its rates by exactly its factor to 1e-14 relative. The star scale reaches
+    the leakage and the planet, the planet scale the planet, the disk scale the
+    exozodi and the zodi scale the local zodi. The set is bilinear in star and
+    planet, not jointly linear. The leaf is live: the gradient of the rate
+    with respect to it is the rate.
+    """
+    import equinox as eqx
+    import jax
+    import jax.numpy as jnp
+    from conftest import make_path, make_system, with_zodi
+    from optixstuff.spectral import Band
+    from skyscapes import AYOZodi
+    from skyscapes.disk import AYOExozodi
+
+    import coronagraphoto as cp
+
+    scene = with_zodi(make_system(disk=AYOExozodi(level_zodis=3.0)), AYOZodi())
+    path = make_path(n=8, cube=True)
+    exposure = cp.build_exposure(scene, path, (Band(500.0, 600.0),), time_d=0.0)
+    names = ("planet", "star_leakage", "local_zodi", "exozodi")
+    where = dict(
+        star=lambda s: s.star.flux_scale,
+        planet=lambda s: s.planets[0].flux_scale,
+        disk=lambda s: s.disk.flux_scale,
+        zodi=lambda s: s.local_zodi.flux_scale,
+    )
+
+    def rates(**scales):
+        varied = scene
+        for source, value in scales.items():
+            current = where[source](scene)
+            varied = eqx.tree_at(where[source], varied, jnp.full_like(current, value))
+        return cp.photon_rates(varied, path, exposure)
+
+    base = rates()
+    for scales, factors in (
+        (dict(star=2.0), (2.0, 2.0, 1.0, 1.0)),
+        (dict(planet=3.0), (3.0, 1.0, 1.0, 1.0)),
+        (dict(disk=5.0), (1.0, 1.0, 1.0, 5.0)),
+        (dict(zodi=7.0), (1.0, 1.0, 7.0, 1.0)),
+        (dict(star=2.0, planet=3.0), (6.0, 2.0, 1.0, 1.0)),
+    ):
+        scaled = rates(**scales)
+        for name, factor in zip(names, factors, strict=True):
+            np.testing.assert_allclose(
+                getattr(scaled, name),
+                factor * getattr(base, name),
+                rtol=1e-14,
+                atol=0.0,
+                err_msg=f"{scales} on {name}",
+            )
+    for name in names:
+        assert float(jnp.max(jnp.abs(getattr(base, name)))) > 0.0
+
+    for source, name in (
+        ("star", "star_leakage"),
+        ("planet", "planet"),
+        ("disk", "exozodi"),
+        ("zodi", "local_zodi"),
+    ):
+
+        def total(scale, source=source, name=name):
+            varied = eqx.tree_at(
+                where[source], scene, jnp.full_like(where[source](scene), scale)
+            )
+            return getattr(cp.photon_rates(varied, path, exposure), name).sum()
+
+        np.testing.assert_allclose(
+            jax.grad(total)(1.0), float(getattr(base, name).sum()), rtol=1e-12
+        )
