@@ -127,8 +127,9 @@ def _node_rates(
     )
     if speckle is not None:
         # The field owns its native lod grid, Frame and reconstruction, and
-        # ends where its data end; its clock subtracts its own epoch. Its
-        # coverage is kept apart from the static products'. The excess is
+        # ends where its data end: its grid, narrowed by its data mask when
+        # its array is wider than its data. Its clock subtracts its own epoch.
+        # Its coverage is kept apart from the static products'. The excess is
         # signed (coherent interference can lower the floor); only the total
         # leakage is clipped at zero below.
         excess = speckle.realize(wavelength_nm=wavelength_nm, time_d=time_d)
@@ -138,6 +139,7 @@ def _node_rates(
             grid,
             reconstruction=excess.reconstruction,
             measure=excess.measure,
+            valid=speckle.data_mask(),
         )
     # A guard on the star plus the signed speckle excess: a star read alone is
     # positive wherever it is supported, so this binds only on an excess.

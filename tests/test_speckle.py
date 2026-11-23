@@ -412,3 +412,70 @@ def test_observe_draws_the_default_render_beyond_the_field():
         rtol=1e-12,
         atol=0,
     )
+
+
+class MaskedPatch(Patch):
+    """A Patch whose array is wider than its data: zero-filled off ``mask``."""
+
+    mask: jax.Array = None
+
+    def data_mask(self):
+        """Cells that hold data (a leaf, so traced inside the render)."""
+        return self.mask
+
+    def realize(self, *, wavelength_nm, time_d=0.0):
+        """The Patch values where the mask holds, exactly 0.0 elsewhere."""
+        image = super().realize(wavelength_nm=wavelength_nm, time_d=time_d)
+        return replace(image, data=jnp.where(self.mask, image.data, 0.0))
+
+
+def test_masked_field_support_ends_at_its_data():
+    """Fails if a consumer ignores a field's data mask.
+
+    A 24 cell linear field on detector pixels of 2.5 cells whose right half
+    holds no data (zero-filled, mask False). Truth: ``coverage(valid=mask)``
+    from primitives, at both nodes. ``supported`` is ``static_supported`` AND
+    that coverage, so it is False and ``static_supported`` True on the pixels
+    over the cells without data; the keyword render equals the no-field render
+    exactly wherever the read reaches only cells without data (``coverage``
+    with the complementary mask), where the zero fill adds an exact zero.
+    """
+    plain = _patch(24, 0.25, "linear")
+    x, _ = plain.grid.coordinates()
+    mask = np.asarray(x) < 0
+    field = MaskedPatch(plain.grid, "linear", plain.data, mask=jnp.asarray(mask))
+    scene, path, exposure = _setup(2.5)
+    nodes = np.asarray(exposure.quadrature.nodes_nm).ravel()
+    alone = cp.expected(scene, path, exposure)
+    default = cp.expected(scene, _with(path, field), exposure)
+    kept = cp.expected(scene, _with(path, field), exposure, static_beyond_speckle=True)
+
+    detector = replace(path.detector.grid, orientation=SkyOrientation(0.0))
+
+    def covered(valid):
+        out = np.ones(detector.shape, bool)
+        for w in nodes:
+            source = replace(field.grid.to_arcsec(w), orientation=detector.orientation)
+            out &= np.asarray(
+                coverage(
+                    source,
+                    detector,
+                    reconstruction="linear",
+                    measure=Measure.integral(),
+                    valid=valid,
+                )
+            )
+        return out
+
+    static = np.asarray(default.static_supported)[0]
+    np.testing.assert_array_equal(static, np.asarray(alone.supported)[0])
+    strict = np.asarray(default.supported)[0]
+    np.testing.assert_array_equal(strict, static & covered(mask))
+    no_data = covered(~mask)
+    assert no_data.any() and strict.any()
+    assert not strict[no_data].any() and static[no_data].all()
+    assert (strict != (static & covered(np.ones_like(mask)))).any()
+    np.testing.assert_array_equal(
+        np.asarray(kept.star_leakage)[0][no_data],
+        np.asarray(alone.star_leakage)[0][no_data],
+    )
