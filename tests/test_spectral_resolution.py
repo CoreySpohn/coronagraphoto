@@ -9,6 +9,7 @@ response would test only the total.
 """
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -49,9 +50,13 @@ def _lines(n, seed, depth=0.7, rate=0.25):
     return 1.0 - depth * (rng.random(n) < rate) * rng.random(n)
 
 
-def _instrument(*, chromatic=False):
+def _instrument(*, chromatic=False, detector_step=0.5):
     path = make_path(
-        n=16, step=0.5, detector_n=10, detector_step=0.5, chromatic=chromatic
+        n=16,
+        step=0.5,
+        detector_n=10,
+        detector_step=detector_step,
+        chromatic=chromatic,
     )
     return eqx.tree_at(lambda p: p.attenuating_elements, path, (CubicThroughput(),))
 
@@ -94,16 +99,24 @@ def _rough_scene(zodi=None, tilt=0.0):
     return scene if zodi is None else with_zodi(scene, zodi)
 
 
-def _band_integral(table_nm, values, response):
-    """Closed-form band integral of a linear table times a cubic: Gauss on each cell."""
+def _band_integral(
+    table_nm, values, response, low_nm=_BAND.low_nm, high_nm=_BAND.high_nm
+):
+    """Closed-form integral of a source times a response: Gauss on each cell.
+
+    ``values`` is either the values of a linear table on ``table_nm`` or any
+    function of wavelength, whose cells are then those between the knots in
+    ``table_nm``. Eight Gauss points on every cell between the knots, exact
+    for a linear table times a cubic, and for the smooth functions used here.
+    """
     x, w = leggauss(8)
     knots = np.asarray(table_nm)
-    inside = knots[(knots > _BAND.low_nm) & (knots < _BAND.high_nm)]
-    edges = np.concatenate([[_BAND.low_nm], inside, [_BAND.high_nm]])
+    inside = knots[(knots > low_nm) & (knots < high_nm)]
+    edges = np.concatenate([[low_nm], inside, [high_nm]])
     length = np.diff(edges)[:, None]
     points = edges[:-1, None] + length * (x + 1) / 2
-    table = np.interp(points, knots, values)
-    return float(np.sum(length * w / 2 * table * response(points)))
+    source = values(points) if callable(values) else np.interp(points, knots, values)
+    return float(np.sum(length * w / 2 * source * response(points)))
 
 
 def _zodi(values):
@@ -111,38 +124,185 @@ def _zodi(values):
     return PrecomputedZodi(jnp.asarray(wave), jnp.asarray(values)), wave
 
 
-@pytest.mark.medium(reason="a 200-node fine rule beside the four-node rule")
-def test_image_path_star_and_planet_match_the_fine_rule():
+def _knots(scene):
+    """The merged knots of every table of the scene."""
+    tables = scene.spectral_tables()
+    return np.unique(np.concatenate([t.spectral_breaks_nm() for t in tables]))
+
+
+def _documented_sources(scene):
+    """The star and the planet as functions of wavelength, from their own reads."""
+
+    def star(wavelength_nm):
+        flux = scene.star.photon_flux_density(
+            jnp.asarray(wavelength_nm), 0.0, dist_pc=scene.dist_pc
+        )
+        return np.asarray(flux).reshape(np.shape(wavelength_nm))
+
+    def planet(wavelength_nm):
+        flat = jnp.asarray(wavelength_nm).reshape(-1)
+        flux = jax.vmap(lambda w: scene.planet_flux_densities(w, jnp.zeros(1))[0, 0])(
+            flat
+        )
+        return np.asarray(flux).reshape(np.shape(wavelength_nm))
+
+    return {"star_leakage": star, "planet": planet}
+
+
+def _lagrange(nodes, k):
+    """The Lagrange polynomial of node ``k`` as a function of wavelength."""
+
+    def polynomial(wavelength_nm):
+        out = np.ones_like(wavelength_nm)
+        for j, node in enumerate(nodes):
+            if j != k:
+                out = out * (wavelength_nm - node) / (nodes[k] - node)
+        return out
+
+    return polynomial
+
+
+def _node_effective(rule, source, knots):
+    """Closed-form node-effective values of ``source`` on the first band of a rule.
+
+    Node ``k`` of a piece gets ``(1 / w_k)`` times the integral over the piece
+    of the source times the Lagrange polynomial of that node.
+    """
+    nodes = np.asarray(rule.nodes_nm)[0]
+    weights = np.asarray(rule.weights_nm)[0]
+    values, first = [], 0
+    for low, high, count in rule.pieces[0]:
+        piece = nodes[first : first + count]
+        for k in range(count):
+            integral = _band_integral(knots, source, _lagrange(piece, k), low, high)
+            values.append(integral / weights[first + k])
+        first += count
+    return np.asarray(values)
+
+
+def _images(scene, instrument, exposure):
+    """Band-integrated star leakage and planet images of an exposure."""
+    rates = cp.photon_rates(scene, instrument, exposure).integrate()
+    return np.asarray(rates.star_leakage)[0], np.asarray(rates.planet)[0]
+
+
+@pytest.mark.medium(reason="six node renders beside a render for each node")
+def test_image_path_star_and_planet_are_the_node_sum_of_independent_renders():
+    """Fails if the node values, their pairing with the nodes or the render are wrong.
+
+    Code verification of every pixel of the band-integrated star leakage and
+    planet images. The exposure under test is the rough scene on the default
+    field and holds more than four real nodes. Its image must be the sum over
+    the nodes of ``w_k * phibar_k * R_k``. The response ``R_k`` comes from
+    renders that do not share that exposure: a second exposure of the same scene
+    whose bands are one-node bands at the nodes of the rule under test (order 1,
+    field 0), so every band has a node with index 0 and nothing in it depends on
+    which image the render under test gives to which node. ``R_k`` is the node
+    image of band ``k`` over that band's node value. The node-effective value
+    ``phibar_k`` is computed here in closed form from the documented source
+    reads: ``(1 / w_k)`` times the integral of the source times the Lagrange
+    polynomial of node ``k``, eight Gauss points on every cell between the
+    merged knots of the star and the planet; the node value of a one-node band
+    is its band mean from the same helper. Tolerance 1e-10 of the peak pixel,
+    ``atol`` only, basis floating point on a few dozen terms (measured about
+    1e-16).
+
+    The test cannot see a response that is wrong in the same way at every node,
+    since the one-node renders share it. That needs an anchor of the response
+    against a closed form, which this test does not provide.
+    """
+    scene, instrument = _rough_scene(), _instrument(chromatic=True)
+    exposure = cp.build_exposure(scene, instrument, (_BAND,), time_d=0.0)
+    rule = exposure.quadrature
+    nodes = np.asarray(rule.nodes_nm)[0]
+    weights = np.asarray(rule.weights_nm)[0]
+    count = sum(n for *_, n in rule.pieces[0])
+    assert count > 4
+    nodes, weights = nodes[:count], weights[:count]
+    got = cp.photon_rates(scene, instrument, exposure).integrate()
+
+    bands = tuple(Band(float(x) - 1e-3, float(x) + 1e-3) for x in nodes)
+    one_node = Quadrature.build(bands, instrument, order=1, field_lod=0.0)
+    assert one_node.nodes_nm.shape == (count, 1)
+    mono = cp.photon_rates(scene, instrument, exposure_for(scene, one_node))
+
+    knots = _knots(scene)
+    for name, source in _documented_sources(scene).items():
+        phibar = _node_effective(rule, source, knots)[:count]
+        means = np.array(
+            [
+                _band_integral(
+                    knots, source, lambda x: np.ones_like(x), b.low_nm, b.high_nm
+                )
+                / b.width_nm
+                for b in bands
+            ]
+        )
+        response = np.asarray(getattr(mono, name))[:, 0] / means[:, None, None]
+        expected = np.einsum("k,kyx->yx", weights * phibar, response)
+        image = np.asarray(getattr(got, name))[0]
+        assert np.max(np.abs(expected)) > 0
+        np.testing.assert_allclose(
+            image, expected, rtol=0, atol=1e-10 * np.max(np.abs(expected))
+        )
+
+
+@pytest.mark.medium(reason="a 220-node fine rule beside the default rule")
+def test_image_path_star_planet_and_contrast_match_the_fine_rule():
     """Fails if the image path samples a rough star or planet instead of integrating it.
 
     Truth: the same render on a rule with a piece between every knot of the star
-    and the planet (about 200 nodes), for which each node sample is exact Gauss
-    in the table and the table reduction is the identity. The exposure is built
-    with the default field, the detector half-diagonal, so the response has six
-    nodes here. The band-integrated star leakage must match to 1e-4 of the peak
-    pixel (measured 7.7e-5; the measured four-node value was 3.9e-5, so the
-    bound does not hide the table operator). The planet image is held to 1e-3
-    of its peak (measured 4.8e-4): the order rule assumes the pattern is
-    centered on the detector, and the planet's own pattern is centered 1.6
-    lambda/D off axis on a detector whose half-diagonal is 3.7, so its far wing
-    slides across the band by more cycles than the rule counted. A field of 20
-    lambda/D brings the planet to 1.0e-4 and one of 80 to 1.3e-5, which is the
-    response and not the table operator. An operator that point-sampled the
-    tables would miss by order 1e-1 on both.
+    and the planet (about 220 nodes), for which each node sample is exact Gauss
+    in the table and the reduction is the identity. The exposure under test uses
+    the default field, the detector half-diagonal. The detector is 0.45
+    lambda/D on 0.5 lambda/D tables: a pixel is smaller than a table cell across
+    the band and no pixel center crosses a table sample, so the read samples
+    the table across the band and the response is smooth in wavelength; the
+    comparison then measures the rule. At 0.5 lambda/D the pixel equals a table
+    cell at 550 nm, every pixel center meets a table sample there, and the
+    comparison would measure that point (4.8e-4 of the peak) and not the rule.
+    The guard on the fixture is asserted first.
+
+    Per pixel, the star leakage and the planet image are held to 1e-5 of their
+    peaks (measured 1.1e-8 and 8.3e-7; a build that ignores the field gives
+    2.3e-5 and 2.2e-4). The detector-summed star rate, planet rate and their
+    ratio, the contrast, are held to 1e-4 relative (measured 1.1e-8, 1.6e-7 and
+    1.5e-7; a star sampled at the nodes misses by 3.9e-3 and a planet sampled at
+    the nodes by 6e-2).
     """
-    scene, instrument = _rough_scene(), _instrument(chromatic=True)
+    scene = _rough_scene()
+    instrument = _instrument(chromatic=True, detector_step=0.45)
+    table = instrument.coronagraph.grid
+    cells = {}
+    for wavelength in (_BAND.low_nm, _BAND.high_nm):
+        pixels = instrument.detector.grid.to_lod(
+            wavelength, instrument.coronagraph.frame
+        )
+        assert pixels.pixel_area < table.pixel_area
+        cells[wavelength] = [
+            np.floor(np.asarray(axis))
+            for axis in table.unit_to_pixel(*pixels.coordinates())
+        ]
+    for low, high in zip(*cells.values(), strict=True):
+        np.testing.assert_array_equal(low, high)
+
     coarse = cp.build_exposure(scene, instrument, (_BAND,), time_d=0.0)
     fine_rule = Quadrature.build((_BAND,), scene, instrument)
-    fine = exposure_for(scene, fine_rule)
-    assert coarse.quadrature.nodes_nm.shape == (1, 6)
     assert fine_rule.nodes_nm.shape[1] > 150
+    assert coarse.quadrature.nodes_nm.shape == (1, 6)
     assert "table" in {r.kind for r in coarse.resolution.rules}
-    got = cp.photon_rates(scene, instrument, coarse).integrate()
-    truth = cp.photon_rates(scene, instrument, fine).integrate()
-    for name, tolerance in (("star_leakage", 1e-4), ("planet", 1e-3)):
-        a, b = np.asarray(getattr(got, name)), np.asarray(getattr(truth, name))
-        assert np.max(np.abs(b)) > 0
-        np.testing.assert_allclose(a, b, rtol=0, atol=tolerance * np.max(np.abs(b)))
+    star, planet = _images(scene, instrument, coarse)
+    star_truth, planet_truth = _images(
+        scene, instrument, exposure_for(scene, fine_rule)
+    )
+    for image, truth in ((star, star_truth), (planet, planet_truth)):
+        assert np.max(truth) > 0
+        np.testing.assert_allclose(image, truth, rtol=0, atol=1e-5 * np.max(truth))
+    np.testing.assert_allclose(star.sum(), star_truth.sum(), rtol=1e-4)
+    np.testing.assert_allclose(planet.sum(), planet_truth.sum(), rtol=1e-4)
+    np.testing.assert_allclose(
+        planet.sum() / star.sum(), planet_truth.sum() / star_truth.sum(), rtol=1e-4
+    )
 
 
 def test_image_path_local_zodi_is_the_exact_table_integral():
