@@ -25,8 +25,11 @@ With collecting area A and throughput T excluding the detector, one node is:
 Each wavelength uses the source, stellar and uniform-sky grids of its selected
 imaging band. A system with a disk requires a scene-capable band, such as a
 prepared YIP with `with_scene_operator()`. An unsupported illuminated position
-produces NaN in the corresponding planet or disk rate image. Zero-flux planets
-and dark scene pixels require no response.
+contributes zero to the corresponding planet or disk rate image. The
+coronagraph reports it (`SourcePSFs.valid` per planet, `SceneRender.valid` for
+the scene); the rate image does not carry that flag, so a caller that must not
+miss such light checks it before rendering. Zero-flux planets and dark scene
+pixels require no response.
 
 Photon quantities come directly from the scene. Photon `Rates` retains those
 four terms, a uniform thermal term from `Instrument.warm_emission` and a zero

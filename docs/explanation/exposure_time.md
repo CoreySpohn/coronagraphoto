@@ -171,9 +171,10 @@ frame_time_s=100.0, post_processing=...)` returns one time per band, planet and 
 - The planet throughput is a ring mean. It hides the dependence on azimuth
   and on where the planet falls within a pixel;
   `ApertureResponse.throughput_ring_std` reports how much.
-- Rates are NaN where the aperture leaves the detector, where the separation
-  leaves the planet table, and where the coronagraph has no response model.
-  S/N is then NaN and `valid` is False.
+- Rates are zero with `Rates.supported` False where the aperture leaves the
+  detector, where the separation leaves the planet table, and where the
+  coronagraph has no response model. S/N and exposure time are then NaN and
+  `valid` is False.
 - Apart from the local zodi, a record holds one time: the star's flux, the
   disk and any speckle realization are those of `exposure.time_d`.
 - The star's sky position is the one the scene held when the record was
