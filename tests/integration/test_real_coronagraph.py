@@ -98,7 +98,6 @@ def test_yip_image_absolute_photon_fraction(tmp_path, distinct_products):
         ),
     ):
         angular = replace(product.grid.to_arcsec(550.0), orientation=grid.orientation)
-        assert product.outside == "zero"
         expected = resample(replace(product, grid=angular), grid).data * scale
         covered = np.asarray(rates.supported[0])
         assert covered.any()

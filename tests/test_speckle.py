@@ -41,7 +41,6 @@ class Halo(AbstractSpeckleField):
             (),
             Measure.integral(),
             "stellar_flux_fraction",
-            outside="reflect",
         )
 
 
