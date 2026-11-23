@@ -80,11 +80,12 @@ def _node_rates(
     (one node-effective photon flux density per planet), ``sky_radiance`` (the
     local-zodi radiance in photons s^-1 m^-2 nm^-1 sr^-1, or None for no local
     zodi) and ``node_star``, the star the disk is rendered against. Returns the
-    component images and the boolean (ny, nx) of detector pixels the coronagraph
-    data cover at this node: the AND of ``coverage`` over every product the render
-    reads, each with the reach of the read ``resample`` performs. Nothing is
-    reflected or extrapolated, so the light at an uncovered pixel is not
-    modeled; the caller zeroes it.
+    component images and two booleans (ny, nx) of detector pixels covered at
+    this node: the static coverage, the AND of ``coverage`` over every
+    coronagraph product the render reads, each with the reach of the read
+    ``resample`` performs, and the coverage of the speckle field's grid (all
+    True without a field). Nothing is reflected or extrapolated, so the light
+    at an uncovered pixel is not modeled; the caller zeroes it.
     """
     speckle = instrument.speckle
     products = coro.at_wavelength(wavelength_nm)
@@ -117,6 +118,7 @@ def _node_rates(
         grid=detector_pixels(products.stellar_grid),
     )
     leakage = stellar.data
+    speckle_covered = jnp.ones(grid.shape, bool)
     supported = coverage(
         products.stellar_grid,
         detector_pixels(products.stellar_grid),
@@ -124,18 +126,21 @@ def _node_rates(
         measure=stellar.measure,
     )
     if speckle is not None:
-        # The field owns its native lod grid, Frame, reconstruction and
-        # extension; its clock subtracts its own epoch. The excess is signed
-        # (coherent interference can lower the floor); only the total
+        # The field owns its native lod grid, Frame and reconstruction, and
+        # ends where its data end; its clock subtracts its own epoch. Its
+        # coverage is kept apart from the static products'. The excess is
+        # signed (coherent interference can lower the floor); only the total
         # leakage is clipped at zero below.
         excess = speckle.realize(wavelength_nm=wavelength_nm, time_d=time_d)
         leakage = leakage + onto_detector(excess)
-        supported = supported & coverage(
+        speckle_covered = coverage(
             replace(excess.grid.to_arcsec(wavelength_nm), orientation=grid.orientation),
             grid,
             reconstruction=excess.reconstruction,
             measure=excess.measure,
         )
+    # A guard on the star plus the signed speckle excess: a star read alone is
+    # positive wherever it is supported, so this binds only on an excess.
     leakage = gain * phi_star * jnp.maximum(leakage, 0.0)
 
     planet = jnp.zeros(grid.shape)
@@ -219,7 +224,7 @@ def _node_rates(
         thermal=thermal,
         stellar_companions=zero,
     )
-    return components, supported
+    return components, supported, speckle_covered
 
 
 def _band_ids(instrument, scene, quadrature):
@@ -255,7 +260,8 @@ def _node_function(models, scene, instrument, exposure, grid, planets, uniform_s
     ``w`` is the traced node wavelength and ``(i, j)`` its band and node index
     in the exposure's quadrature. The sources are read once, on the exposure's
     quadrature and resolution, and each node takes its row. Works for any model
-    count; the result is ``(components, supported)``.
+    count; the result is ``(components, static, speckle)``, the static and
+    speckle coverage of :func:`_node_rates`.
 
     With ``planets`` False no planet is propagated or rendered and the planet
     term is zero. The local zodi is the scene model's node-effective radiance
@@ -316,13 +322,14 @@ def _node_function(models, scene, instrument, exposure, grid, planets, uniform_s
         covered = jnp.stack(
             [(m.bandpass.low_nm <= w) & (w <= m.bandpass.high_nm) for m in models]
         )
-        rates, supported = jax.lax.switch(
+        rates, static, speckle = jax.lax.switch(
             jnp.argmax(covered), [with_model(m) for m in models], w, i, j
         )
         # A node outside every declared band has no performance model.
         return (
             jax.tree.map(lambda x: jnp.where(jnp.any(covered), x, jnp.nan), rates),
-            supported,
+            static,
+            speckle,
         )
 
     return node
@@ -379,11 +386,23 @@ def _real_nodes(quadrature):
 
 
 @eqx.filter_jit
-def _render(scene, instrument, exposure, *, kind, band_ids, planets, uniform_sky):
+def _render(
+    scene,
+    instrument,
+    exposure,
+    *,
+    kind,
+    band_ids,
+    planets,
+    uniform_sky,
+    static_beyond_speckle=False,
+):
     """Render every node of one observation as a single traced program.
 
-    Returns the component images and the (W, ny, nx) pixel support, which
-    :func:`_run` wraps in the Rates record.
+    Returns the component images and the (W, ny, nx) static and speckle
+    support, which :func:`_run` wraps in the Rates record. The product terms
+    are zeroed where the strict support (both) is False, or only where the
+    static support is False when ``static_beyond_speckle``.
     """
     coro = instrument.coronagraph
     models = (
@@ -399,7 +418,7 @@ def _render(scene, instrument, exposure, *, kind, band_ids, planets, uniform_sky
     if kind == "photons":
         shape = quadrature.nodes_nm.shape
         bands, nodes, source = _real_nodes(quadrature)
-        values, covered = jax.lax.map(
+        values, static, speckle = jax.lax.map(
             lambda x: node(*x),
             (quadrature.nodes_nm[bands, nodes], bands, nodes),
         )
@@ -407,8 +426,12 @@ def _render(scene, instrument, exposure, *, kind, band_ids, planets, uniform_sky
         values = jax.tree.map(
             lambda x: x[source].reshape((*shape, *grid.shape)), values
         )
-        supported = jnp.all(covered[source].reshape((*shape, *grid.shape)), axis=1)
-        return _zero_unsupported(values, supported[:, None]), supported
+        static, speckle = (
+            jnp.all(c[source].reshape((*shape, *grid.shape)), axis=1)
+            for c in (static, speckle)
+        )
+        kept = static if static_beyond_speckle else static & speckle
+        return _zero_unsupported(values, kept[:, None]), static, speckle
 
     # Stream the nodes of each band: only its accumulated rate and one node
     # image are live.
@@ -417,9 +440,9 @@ def _render(scene, instrument, exposure, *, kind, band_ids, planets, uniform_sky
         initial = {name: jnp.zeros(grid.shape) for name in Rates.component_names()}
 
         def step(carry, node_and_weight):
-            total, supported = carry
+            total, static, speckle = carry
             w, weight, j = node_and_weight
-            components, covered = node(w, i, j)
+            components, static_node, speckle_node = node(w, i, j)
             single = Quadrature(row.bands, w[None, None], weight[None, None])
             photons = Rates(
                 single, "photon", **jax.tree.map(lambda x: x[None, None], components)
@@ -427,19 +450,24 @@ def _render(scene, instrument, exposure, *, kind, band_ids, planets, uniform_sky
             electrons = instrument.detector.electrons(photons)
             return (
                 {name: a + getattr(electrons, name)[0] for name, a in total.items()},
-                supported & covered,
+                static & static_node,
+                speckle & speckle_node,
             ), None
 
         real = _real_counts(quadrature)[i]
         xs = (row.nodes_nm[0, :real], row.weights()[0, :real], jnp.arange(real))
-        initial_support = jnp.ones(grid.shape, bool)
-        total, supported = jax.lax.scan(step, (initial, initial_support), xs)[0]
-        return _zero_unsupported(total, supported), supported
+        everywhere = jnp.ones(grid.shape, bool)
+        total, static, speckle = jax.lax.scan(
+            step, (initial, everywhere, everywhere), xs
+        )[0]
+        kept = static if static_beyond_speckle else static & speckle
+        return _zero_unsupported(total, kept), static, speckle
 
     rows = [render_band(i) for i in range(len(quadrature.bands))]
     return (
-        jax.tree.map(lambda *x: jnp.stack(x), *(values for values, _ in rows)),
-        jnp.stack([supported for _, supported in rows]),
+        jax.tree.map(lambda *x: jnp.stack(x), *(row[0] for row in rows)),
+        jnp.stack([row[1] for row in rows]),
+        jnp.stack([row[2] for row in rows]),
     )
 
 
@@ -449,9 +477,23 @@ def _draw(detector, key, electrons, plan):
     return detector.draw(key, electrons, plan)
 
 
-def _run(scene, instrument, exposure, kind, *, planets=True, uniform_sky=False):
-    """Run the shared program for one scene, instrument and exposure."""
-    values, supported = _render(
+def _run(
+    scene,
+    instrument,
+    exposure,
+    kind,
+    *,
+    planets=True,
+    uniform_sky=False,
+    static_beyond_speckle=False,
+):
+    """Run the shared program for one scene, instrument and exposure.
+
+    The record always carries both flags: ``supported`` is the static support
+    AND the speckle field's, and ``static_supported`` the static support alone
+    (the two are equal without a field).
+    """
+    values, static, speckle = _render(
         scene,
         instrument,
         exposure,
@@ -459,11 +501,19 @@ def _run(scene, instrument, exposure, kind, *, planets=True, uniform_sky=False):
         band_ids=_band_ids(instrument, scene, exposure.quadrature),
         planets=planets,
         uniform_sky=uniform_sky,
+        static_beyond_speckle=static_beyond_speckle,
     )
     quadrature = exposure.quadrature
-    if kind == "photons":
-        return Rates(quadrature, "photon", supported=supported, **values)
-    return Rates(quadrature.bands, "electron", supported=supported, **values)
+    sampling, carrier = (
+        (quadrature, "photon") if kind == "photons" else (quadrature.bands, "electron")
+    )
+    return Rates(
+        sampling,
+        carrier,
+        supported=static & speckle,
+        static_supported=static,
+        **values,
+    )
 
 
 def _dotted(key_path):
@@ -628,7 +678,13 @@ def build_exposure(
     )
 
 
-def photon_rates(scene: Scene, instrument: Instrument, exposure: Exposure) -> Rates:
+def photon_rates(
+    scene: Scene,
+    instrument: Instrument,
+    exposure: Exposure,
+    *,
+    static_beyond_speckle: bool = False,
+) -> Rates:
     """Return full (W,Q,ny,nx) photon integrands, in photons/s/nm/pixel.
 
     One entry per source term and wavelength node of ``exposure.quadrature``.
@@ -641,23 +697,50 @@ def photon_rates(scene: Scene, instrument: Instrument, exposure: Exposure) -> Ra
     The coronagraph renders only what its data hold. ``supported`` of shape
     (W, ny, nx) is False at a detector pixel whose footprint, with the reach of
     each product's reconstruction, leaves any product the render reads at any
-    node of the band; the planet, star leakage, local zodi and exozodi are zero
-    there at every node. A planet outside the coronagraph's source domain
-    contributes zero and leaves every other planet as it would be alone.
+    node of the band, the speckle field included; the planet, star leakage,
+    local zodi and exozodi are zero there at every node. ``static_supported``
+    is the same flag without the speckle field. A planet outside the
+    coronagraph's source domain contributes zero and leaves every other planet
+    as it would be alone.
 
     Args:
         scene: The scene to render.
         instrument: The instrument to render it with.
         exposure: The exposure giving the time, roll and wavelength nodes.
+        static_beyond_speckle: Keep the static light where only the speckle
+            field is missing. By default the product terms are zero wherever
+            ``supported`` is False. With True they are zero only where
+            ``static_supported`` is False: where that flag is True and
+            ``supported`` is False the record is the static-only model, with
+            no drift beyond the speckle field, and its star leakage is the
+            static leakage plus the field's stored samples, zero-filled, under
+            the field's own reconstruction. Both flags are the same as in the
+            default render. A frame drawn from such a record (``detector.draw``
+            on it) carries no flags, so an injection and recovery made that way
+            has no drift to recover beyond the field, and its frame peak, which
+            sets the tolerance of the detector's negative-rate floor, can be
+            higher than the default's. :func:`observe` has no such option.
 
     Returns:
         The photon integrands in photons/s/nm/pixel, with the ``supported``
-        flag of shape (W, ny, nx).
+        and ``static_supported`` flags of shape (W, ny, nx).
     """
-    return _run(scene, instrument, exposure, "photons")
+    return _run(
+        scene,
+        instrument,
+        exposure,
+        "photons",
+        static_beyond_speckle=static_beyond_speckle,
+    )
 
 
-def expected(scene: Scene, instrument: Instrument, exposure: Exposure) -> Rates:
+def expected(
+    scene: Scene,
+    instrument: Instrument,
+    exposure: Exposure,
+    *,
+    static_beyond_speckle: bool = False,
+) -> Rates:
     """Stream nodes into (W,ny,nx) electrons/s with detector-owned yield.
 
     These are the expected rates for the instantaneous scene at
@@ -671,17 +754,38 @@ def expected(scene: Scene, instrument: Instrument, exposure: Exposure) -> Rates:
     ``supported`` of shape (W, ny, nx) is False where any node of the band
     reads beyond a product's data (see :func:`photon_rates`); the band-integrated
     planet, star leakage, local zodi and exozodi are zero there.
+    ``static_supported`` is the same flag without the speckle field.
 
     Args:
         scene: The scene to render.
         instrument: The instrument to render it with, including its detector.
         exposure: The exposure giving the time, roll and wavelength nodes.
+        static_beyond_speckle: Keep the static light where only the speckle
+            field is missing. By default the product terms are zero wherever
+            ``supported`` is False. With True they are zero only where
+            ``static_supported`` is False: where that flag is True and
+            ``supported`` is False the record is the static-only model, with
+            no drift beyond the speckle field, and its star leakage is the
+            static leakage plus the field's stored samples, zero-filled, under
+            the field's own reconstruction. Both flags are the same as in the
+            default render. A frame drawn from such a record (``detector.draw``
+            on it) carries no flags, so an injection and recovery made that way
+            has no drift to recover beyond the field, and its frame peak, which
+            sets the tolerance of the detector's negative-rate floor, can be
+            higher than the default's. :func:`observe` has no such option.
 
     Returns:
         The expected rates in electrons/s, band integrated, shape (W, ny, nx),
-        with the ``supported`` flag of shape (W, ny, nx).
+        with the ``supported`` and ``static_supported`` flags of shape
+        (W, ny, nx).
     """
-    return _run(scene, instrument, exposure, "electrons")
+    return _run(
+        scene,
+        instrument,
+        exposure,
+        "electrons",
+        static_beyond_speckle=static_beyond_speckle,
+    )
 
 
 def observe(key, scene: Scene, instrument: Instrument, exposure: Exposure) -> Image:

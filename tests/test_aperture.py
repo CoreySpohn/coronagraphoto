@@ -27,7 +27,7 @@ from optixstuff import (
     SimplePrimary,
 )
 from optixstuff.apertures import Circular, HalfMaximum
-from optixstuff.grids import Image, Measure, SkyOrientation
+from optixstuff.grids import Frame, Image, Measure, PixelGrid, SkyOrientation
 from optixstuff.spectral import Band
 from skyscapes import AYOZodi, LeinertZodi
 from skyscapes.physical_model import BlackbodyPhysicalModel, GridPhysicalModel
@@ -1064,3 +1064,65 @@ def test_curves_and_record_routes_agree_on_the_flag_across_the_stamp_edge():
     assert flags(2.25, 0.0) == (False, True)
     assert flags(2.0, 2.0) == (True, False)
     assert flags(3.0, 3.0) == (False, False)
+
+
+class _CentralField(ox.AbstractSpeckleField):
+    """A uniform excess on 16 cells of 0.25 lambda/D, narrower than the table."""
+
+    grid: PixelGrid = eqx.field(
+        static=True,
+        default=PixelGrid.focal(16, 0.25, Frame(550.0, 6.0, "circumscribed")),
+    )
+    epoch_d: float = 0.0
+
+    def spectral_breaks_nm(self):
+        """The excess is achromatic."""
+        return np.empty(0)
+
+    def realize(self, *, wavelength_nm, time_d=0.0):
+        """Ten times the static floor in every cell."""
+        return Image(
+            jnp.full(self.grid.shape, 1e-8 * self.grid.pixel_area),
+            self.grid,
+            (),
+            Measure.integral(),
+            "stellar_flux_fraction",
+        )
+
+
+def test_aperture_beyond_the_field_reads_zero_inside_the_static_table():
+    """Guard: fails if static light beyond a speckle field leaks into an aperture.
+
+    A field reaching 2 lambda/D inside a table reaching 5 lambda/D. An aperture
+    of radius 0.7 lambda/D centred at about 3.2 lambda/D lies inside the table
+    and wholly beyond the field: without the field it is supported and reads
+    starlight; with it, it reads zero in every field with ``supported`` False.
+    Truth: the strict support rule; exact.
+    """
+    scene = make_system(separation_arcsec=0.03)
+    base = _instrument(GaussianCoronagraph(40, 0.25))
+    exposure = cp.build_exposure(scene, base, _BANDS, time_d=0.0, field_lod=0.0)
+    response = cp.aperture_response(
+        base,
+        exposure.quadrature,
+        n_separations=5,
+        n_angles=4,
+        max_separation_arcsec=0.08,
+    )
+    with_field = eqx.tree_at(
+        lambda p: p.speckle, base, _CentralField(), is_leaf=lambda v: v is None
+    )
+    offsets = _offsets(0.06, 90.0)
+    static = cp.aperture_rates(
+        cp.aperture_record(scene, base, exposure, response), *offsets, 1e-10, time_d=0.0
+    )
+    assert np.all(static.supported) and np.all(np.asarray(static.star_leakage) > 0)
+    rates = cp.aperture_rates(
+        cp.aperture_record(scene, with_field, exposure, response),
+        *offsets,
+        1e-10,
+        time_d=0.0,
+    )
+    assert not np.any(rates.supported)
+    for name in (*rates.component_names(), "n_pix"):
+        assert np.all(np.asarray(getattr(rates, name)) == 0.0), name
