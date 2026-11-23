@@ -567,9 +567,23 @@ def build_exposure(
     Each band is split at the breaks the instrument and the scene's local zodi
     declare, and a Gauss-Legendre rule is applied to every piece: ``order``
     nodes, raised for a piece the diffraction pattern slides across by the
-    detector field (``field_lod``), so every pixel of the detector, corners
-    included, is integrated over wavelength to the accuracy of the rule. The star, the
-    planets and a tabulated local zodi are not breaks: the exposure also holds
+    detector field (``field_lod``). The field is measured from the axis and
+    sets the nodes for a response that is smooth in wavelength. The per-pixel
+    accuracy of a product read from a table is set by how the detector pixels
+    read the table instead: the reconstruction the product declares, and
+    whether pixels sample it or table cells are deposited onto them, which
+    changes where a pixel equals a table cell. It depends on the package and
+    the pixel scale, and a wider field does not usefully reduce it. One
+    measured case is the ``eac1_aavc_2d`` package with 0.25 lambda/D pixels at
+    the center of a 20 percent band, on its 0.25 lambda/D tables: the star
+    leakage map is good to 2.9e-3 of its peak per pixel at the default field
+    (1.9e-3 at twice the field), to 1e-3 in a 0.7 lambda/D aperture and to 1.3e-4
+    on the detector sum. Other measured cases run from 1e-8 (a smooth test
+    table at 0.45 lambda/D) to 1.4e-2 (the same package at 0.40 lambda/D). The
+    image of an off-axis source slides about the source, which the default
+    field does not count; on that case, with a half-diagonal of 22.6 lambda/D,
+    planets at 3 to 20 lambda/D are held to 3.4e-5 of their own peak. The
+    star, the planets and a tabulated local zodi are not breaks: the exposure also holds
     the ``Resolution`` that reduces each tabulated spectrum of the scene on the
     nodes, so a band integral of a rough stellar spectrum is exact in the
     spectrum however few nodes the band has. ``roll_deg`` is the position angle

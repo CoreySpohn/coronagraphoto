@@ -8,9 +8,22 @@ frame plan. The star, planet and local-zodi values are not stored: the image pat
 asks `scene.sources` for them at each node, given the scene's sky frame and
 `time_d`. `field_lod` is the largest separation, in lambda/D at the band centre,
 at which the response is read. The default, None, takes the field the instrument
-declares, its detector half-diagonal, so every pixel of the detector is
-integrated over wavelength to the accuracy of the rule; the nodes of a piece
-grow with the field. A caller that reads a smaller field passes it and renders
+declares, its detector half-diagonal; the nodes of a piece grow with the field.
+The field is measured from the axis and sets the nodes for a response that is
+smooth in wavelength. The per-pixel accuracy of a product read from a table is
+set by how the detector pixels read the table instead: the reconstruction the
+product declares, and whether pixels sample it or table cells are deposited
+onto them, which changes where a pixel equals a table cell. It depends on the
+package and the pixel scale, and a wider field does not usefully reduce it. One
+measured case is the `eac1_aavc_2d` package with 0.25 lambda/D pixels at the
+centre of a 20 percent band, on its 0.25 lambda/D tables: the star leakage map
+is good to 2.9e-3 of its peak per pixel at the default field (1.9e-3 at twice
+the field), to 1e-3 in a 0.7 lambda/D aperture and to 1.3e-4 on the detector
+sum. Other measured cases run from 1e-8 (a smooth test table at 0.45 lambda/D)
+to 1.4e-2 (the same package at 0.40 lambda/D). The image of an off-axis source
+slides about the source, which the default field does not count; on that case,
+with a half-diagonal of 22.6 lambda/D, planets at 3 to 20 lambda/D are held to
+3.4e-5 of their own peak. A caller that reads a smaller field passes it and renders
 fewer nodes; with 0 each piece holds exactly `order` nodes. The image routes
 render the real nodes of each band only, so a band with fewer nodes than the
 widest costs no padded renders.
