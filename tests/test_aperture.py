@@ -1064,3 +1064,73 @@ def test_curves_and_record_routes_agree_on_the_flag_across_the_stamp_edge():
     assert flags(2.25, 0.0) == (False, True)
     assert flags(2.0, 2.0) == (True, False)
     assert flags(3.0, 3.0) == (False, False)
+
+
+@pytest.mark.medium(reason="aperture tables of a three-band exposure and each band")
+def test_aperture_tables_image_the_real_nodes_only(monkeypatch):
+    """Fails if the response or record images padded slots, or the padding moves them.
+
+    Three bands split at the local zodi's knots hold different numbers of real
+    nodes. Truth: the response images ``n_separations`` rings at each real
+    node plus one probe per band, and the record sums three maps (star,
+    uniform sky, disk) at each real node (both counts exact, from the static
+    layout). A band built alone has no padding, so its tables must equal the
+    joint tables' rows of that band (tolerance 1e-12 of each table's peak,
+    basis floating point on the same nodes in a different batch layout), and
+    each padded slot must repeat the band's first real node bit for bit.
+    """
+    from coronagraphoto import aperture
+
+    instrument = _instrument(PlateauCoronagraph(40, 0.25))
+    scene = with_zodi(make_system(separation_arcsec=0.03), AYOZodi())
+    bands = (Band(480.0, 520.0), Band(560.0, 600.0), Band(420.0, 498.0))
+    options = dict(n_separations=3, n_angles=2, max_separation_arcsec=0.04)
+    exposure = cp.build_exposure(scene, instrument, bands, time_d=0.0, field_lod=0.0)
+    counts = [sum(n for *_, n in band) for band in exposure.quadrature.pieces]
+    width = exposure.quadrature.nodes_nm.shape[1]
+    assert len(set(counts)) > 1 and max(counts) == width
+
+    imaged, summed = [], []
+    ring_moments, lattice = aperture._ring_moments, aperture._lattice
+
+    def counted_moments(model, detector, wavelengths_nm, *args):
+        imaged.append(len(wavelengths_nm))
+        return ring_moments(model, detector, wavelengths_nm, *args)
+
+    def counted_lattice(maps, *args):
+        summed.append(maps.shape[1])
+        return lattice(maps, *args)
+
+    monkeypatch.setattr(aperture, "_ring_moments", counted_moments)
+    monkeypatch.setattr(aperture, "_lattice", counted_lattice)
+    response = cp.aperture_response(instrument, exposure.quadrature, **options)
+    assert sum(imaged) == options["n_separations"] * sum(counts) + len(bands)
+    summed.clear()
+    record = cp.aperture_record(scene, instrument, exposure, response)
+    # One sum per band of the three maps, then the pixel count and support.
+    assert summed[: len(bands)] == [3 * n for n in counts]
+    monkeypatch.undo()
+
+    for i, band in enumerate(bands):
+        alone = cp.build_exposure(scene, instrument, (band,), time_d=0.0, field_lod=0.0)
+        assert alone.quadrature.nodes_nm.shape[1] == counts[i]
+        single = cp.aperture_response(instrument, alone.quadrature, **options)
+        single_record = cp.aperture_record(scene, instrument, alone, single)
+        n = counts[i]
+        pairs = (
+            (response.throughput[:, i, :n], single.throughput[:, 0]),
+            (record.star_leakage[:, i, :n], single_record.star_leakage[:, 0]),
+            (record.uniform_sky[:, i, :n], single_record.uniform_sky[:, 0]),
+        )
+        for joint, truth in pairs:
+            truth = np.asarray(truth)
+            np.testing.assert_allclose(
+                joint, truth, rtol=0, atol=1e-12 * np.max(np.abs(truth))
+            )
+        for table in (
+            response.throughput[:, i],
+            record.star_leakage[:, i],
+            record.uniform_sky[:, i],
+        ):
+            for q in range(n, width):
+                np.testing.assert_array_equal(table[:, q], table[:, 0])
