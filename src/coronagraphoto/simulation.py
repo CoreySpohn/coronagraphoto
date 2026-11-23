@@ -503,7 +503,9 @@ def _run(
         band_ids=_band_ids(instrument, scene, exposure.quadrature),
         planets=planets,
         uniform_sky=uniform_sky,
-        static_beyond_speckle=static_beyond_speckle,
+        # Structure, not a value: a NumPy or JAX boolean is read on the host so
+        # that filter_jit does not trace it.
+        static_beyond_speckle=bool(static_beyond_speckle),
     )
     quadrature = exposure.quadrature
     sampling, carrier = (
