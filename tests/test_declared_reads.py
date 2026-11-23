@@ -50,12 +50,8 @@ def _floating_leaves(scene):
     """Yield ``(dotted path, moved scene)`` with each floating leaf moved in turn."""
     flat, treedef = jax.tree_util.tree_flatten_with_path(scene)
     for i, (key_path, leaf) in enumerate(flat):
-        if not (
-            isinstance(leaf, float)
-            or (
-                isinstance(leaf, jax.Array) and jnp.issubdtype(leaf.dtype, jnp.floating)
-            )
-        ):
+        # NumPy leaves count: a table may keep host knots as given.
+        if not (isinstance(leaf, float) or eqx.is_inexact_array(leaf)):
             continue
         leaves = [x for _, x in flat]
         leaves[i] = leaf * 1.07 + 0.013
