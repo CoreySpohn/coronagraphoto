@@ -197,21 +197,22 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
         """Closed-form circular Gaussian and constant leakage integrals."""
         area = np.pi * rule.radius_lod**2
         tau = 0.3 * (1 - np.exp(-(rule.radius_lod**2) / (2 * self.sigma_lod**2)))
+        extent = min(self.grid.shape) * self.grid.step / 2
         return PerformanceCurves(
-            [0.0],
+            [0.0, extent],
             self.grid.frame,
             rule,
-            [tau],
-            [area],
-            [1e-9 * area],
-            [1e-9],
-            [1e-9 * area / tau],
+            [tau, tau],
+            [area, area],
+            [1e-9 * area] * 2,
+            [1e-9] * 2,
+            [1e-9 * area / tau] * 2,
             0.0,
-            min(self.grid.shape) * self.grid.step / 2,
-            throughput_variance=[tau],
-            core_area_variance_lod2=[area],
-            leakage_fraction_variance=[1e-9 * area],
-            leakage_density_variance_lod2=[1e-9],
+            extent,
+            throughput_variance=[tau, tau],
+            core_area_variance_lod2=[area, area],
+            leakage_fraction_variance=[1e-9 * area] * 2,
+            leakage_density_variance_lod2=[1e-9] * 2,
         )
 
 
@@ -391,21 +392,22 @@ class PlateauCoronagraph(GaussianSceneCoronagraph):
         """Independent exact area integrals of the manufactured uniform fields."""
         area = np.pi * rule.radius_lod**2
         tau, ell = 0.3 / 16 * area, 1e-9 * area
+        extent = min(self.grid.shape) * self.grid.step / 2
         return PerformanceCurves(
-            [0.0],
+            [0.0, extent],
             self.grid.frame,
             rule,
-            [tau],
-            [area],
-            [ell],
-            [1e-9],
-            [ell / tau],
+            [tau, tau],
+            [area, area],
+            [ell, ell],
+            [1e-9] * 2,
+            [ell / tau] * 2,
             0.0,
-            min(self.grid.shape) * self.grid.step / 2,
-            throughput_variance=[tau],
-            core_area_variance_lod2=[area],
-            leakage_fraction_variance=[ell],
-            leakage_density_variance_lod2=[1e-9],
+            extent,
+            throughput_variance=[tau, tau],
+            core_area_variance_lod2=[area, area],
+            leakage_fraction_variance=[ell, ell],
+            leakage_density_variance_lod2=[1e-9] * 2,
         )
 
 
