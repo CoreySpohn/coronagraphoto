@@ -518,3 +518,151 @@ def test_returned_products_carry_the_measure_of_the_read():
     sky = coro.uniform_sky_map(550.0, grid=path.detector.grid)
     assert stellar.measure == Measure.integral()
     assert sky.measure == Measure.intensive()
+
+
+_TABLE_N = 32
+_TABLE_STEP = 0.25
+_SAMPLING_MARGIN = {"linear": 0.5, "cubic": 2.0, "cubic_spline": 2.0}
+_DEPOSIT_HALF_SUPPORT = {"linear": 1.0, "cubic": 2.0}
+
+
+def _declared_star(reconstruction, pad=0):
+    """A table coronagraph whose star is a point-sampled density.
+
+    The stellar map is a smooth positive field sampled at the cell centers of a
+    ``_TABLE_N + 2 pad`` cell table and declared ``density("grid")`` with
+    ``reconstruction``. The inner ``_TABLE_N`` cells hold the same samples for
+    every ``pad``; the extra ring holds a different, much brighter field.
+    """
+    import equinox as eqx
+    import jax.numpy as jnp
+    from conftest import GaussianCoronagraph
+    from optixstuff.grids import Image, Measure
+
+    class DeclaredStar(GaussianCoronagraph):
+        stellar_reconstruction: str = eqx.field(static=True)
+        half_width: float = eqx.field(static=True)
+
+        def __init__(self):
+            super().__init__(_TABLE_N + 2 * pad, _TABLE_STEP)
+            self.stellar_reconstruction = reconstruction
+            self.half_width = _TABLE_N * _TABLE_STEP / 2
+
+        def _native_stellar_map(self, stellar_diameter_lod):
+            x, y = self.grid.coordinates()
+            field = 1e-9 * (1.5 + jnp.cos(0.9 * x + 0.3) * jnp.cos(0.7 * y - 0.2))
+            inside = (jnp.abs(x) < self.half_width) & (jnp.abs(y) < self.half_width)
+            data = jnp.where(inside, field, 40.0 * field + 3e-8)
+            return Image(
+                data,
+                self.grid,
+                (),
+                Measure.density("grid"),
+                "stellar_flux_fraction",
+                self.stellar_reconstruction,
+            )
+
+    return DeclaredStar()
+
+
+def _supported_from_corners(detector_n, pixel_cells, margin_cells):
+    """Detector pixels whose four corners lie ``margin_cells`` inside the table.
+
+    Pure geometry on a detector and a table that share their center and axes:
+    a pixel's far edge, in table cells, against the table half-width shrunk by
+    the margin. The 1e-9 cell slack is the one ``coverage`` allows.
+    """
+    centre = (detector_n - 1) / 2
+    far_edge = (np.abs(np.arange(detector_n) - centre) + 0.5) * pixel_cells
+    per_axis = far_edge <= _TABLE_N / 2 - margin_cells + 1e-9
+    return per_axis[:, None] & per_axis[None, :]
+
+
+@pytest.mark.parametrize("reconstruction", ["linear", "cubic", "cubic_spline"])
+@pytest.mark.parametrize(
+    ("pitch_lod", "detector_n"), [(0.25, 36), (0.5, 18), (0.75, 10)]
+)
+def test_star_support_matches_the_footprint_read(reconstruction, pitch_lod, detector_n):
+    """Fails if the star's support is not the reach of the read on_grid performs.
+
+    A density star with a declared reconstruction on a 32 cell table at 0.25
+    lambda/D, read on detectors of 0.25, 0.5 and 0.75 lambda/D (1, 2 and 3
+    table cells per pixel) that reach past the table, at one node at 550 nm.
+
+    1. ``cubic_spline``: the supported set equals the pixels whose corners are
+       2 cells inside the table. Truth: geometry, exact.
+    2. ``linear`` and ``cubic``: the star term at every supported pixel is
+       unchanged when the table is embedded in a wider one whose extra ring
+       holds a field 40 times brighter (a finite-reach read does not see it).
+       Truth: finite kernel reach. Tolerance: 64 eps relative, rounding only
+       (the wide read forms its kernel positions from a shifted source center
+       and sums over more columns, measured 7e-16; a pixel that reads the ring
+       moves by order one). The supported set
+       is the one the deposit rule gives, which is contained in the footprint
+       read's own set (corners ``m`` cells inside: 0.5 linear, 2 cubic). On
+       these detectors it is a ring narrower at 3 cells (36 pixels linear, 28
+       cubic) and equal at 1 and 2 cells, where the two nodes straddle 2 cells
+       and the bluer node sets both sets.
+    3. Every supported pixel of the star term is positive: with no speckle
+       excess the zero clip of the leakage does not bind.
+
+    Fails for a ``coverage`` call that drops the reconstruction (margin 0:
+    case 1 and the invariance of case 2), or a read whose reach exceeds the
+    margin it reports.
+    """
+    import equinox as eqx
+    from conftest import make_path, make_system
+    from optixstuff.spectral import Band
+
+    import coronagraphoto as cp
+
+    scene = make_system()
+    bands = (Band(549.5, 550.5),)
+
+    def render(pad):
+        path = make_path(
+            n=_TABLE_N, step=_TABLE_STEP, detector_n=detector_n, detector_step=pitch_lod
+        )
+        path = eqx.tree_at(
+            lambda p: p.coronagraph, path, _declared_star(reconstruction, pad)
+        )
+        exposure = cp.build_exposure(scene, path, bands, time_d=0.0, order=1)
+        return exposure, cp.expected(scene, path, exposure)
+
+    exposure, narrow = render(0)
+    nodes = np.asarray(exposure.quadrature.nodes_nm).ravel()
+    # The table is fixed in lambda/D and the detector in arcsec, so a pixel
+    # spans 550 / node of its 550 nm width; support is the AND over nodes.
+    cells = [pitch_lod * 550.0 / float(w) / _TABLE_STEP for w in nodes]
+    supported = np.asarray(narrow.supported)[0]
+    leakage = np.asarray(narrow.star_leakage)[0]
+
+    def expected(rule):
+        sets = [_supported_from_corners(detector_n, g, rule(g)) for g in cells]
+        return np.logical_and.reduce(sets)
+
+    sampling = _SAMPLING_MARGIN[reconstruction]
+    footprint_set = expected(lambda g: sampling)
+    if reconstruction == "cubic_spline":
+        np.testing.assert_array_equal(supported, footprint_set)
+    else:
+        k = _DEPOSIT_HALF_SUPPORT[reconstruction]
+
+        def deposit(g):
+            # The integral measure of the on_grid output takes the deposit
+            # rule wherever a pixel is at least a cell.
+            return max(sampling, (k - 0.5) * g - 0.5) if g >= 1 else sampling
+
+        np.testing.assert_array_equal(supported, expected(deposit))
+        assert not (supported & ~footprint_set).any()
+        lost = int(footprint_set.sum() - supported.sum())
+        print(f"{reconstruction} {pitch_lod}: {lost} pixels lost to the deposit rule")
+        _, wide = render(3)
+        np.testing.assert_allclose(
+            np.asarray(wide.star_leakage)[0][supported],
+            leakage[supported],
+            rtol=64 * np.finfo(float).eps,
+            atol=0,
+        )
+    assert supported.any() and not supported.all()
+    assert np.all(leakage[supported] > 0)
