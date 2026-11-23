@@ -46,7 +46,7 @@ from optixstuff.spectral import Quadrature, Resolution
 from orbix.system import SkyFrame
 from skyscapes import AbstractLocalZodi, Scene
 
-from coronagraphoto.simulation import _run
+from coronagraphoto.simulation import _real_counts, _run
 
 # Successive rings start a golden-ratio fraction of the angular step apart, so
 # the rings together sample every pixel phase and no azimuth is favoured.
@@ -262,6 +262,19 @@ def _probe(model, instrument, rule, frame, radius, nodes_nm, supported, step):
     return float(moments[0, 0, 0])
 
 
+def _padded_slots(quadrature):
+    """Per band, the real node each of the (Q,) slots repeats, as host arrays.
+
+    A real slot is its own node; a padded slot repeats the first real node of
+    its band, as the image routes do.
+    """
+    q = quadrature.nodes_nm.shape[1]
+    return [
+        np.where(np.arange(q) < real, np.arange(q), 0)
+        for real in _real_counts(quadrature)
+    ]
+
+
 def _concrete(*trees):
     """True when no array leaf of the trees is traced."""
     leaves = jax.tree_util.tree_leaves(eqx.filter(trees, eqx.is_array))
@@ -334,9 +347,11 @@ def aperture_response(
 
     A host-side build, run once per instrument and band set and reused for
     every target: it costs ``n_separations * n_angles`` point-source images
-    per wavelength node. Sources sit on ``n_separations`` rings, evenly spaced
-    from zero to ``max_separation_arcsec`` (by default the largest separation
-    whose aperture stays on the detector), ``n_angles`` to a ring. Each source
+    per real wavelength node. A padded slot of a band with fewer nodes than
+    the widest is not imaged; its tables repeat the band's first real node.
+    Sources sit on ``n_separations`` rings, evenly spaced from zero to
+    ``max_separation_arcsec`` (by default the largest separation whose
+    aperture stays on the detector), ``n_angles`` to a ring. Each source
     is imaged on the detector pixels by ``coronagraph.source_psfs`` and summed
     in an aperture centred on it.
 
@@ -376,6 +391,8 @@ def aperture_response(
     separations = np.linspace(0.0, max_separation_arcsec, n_separations)
 
     nodes = quadrature.nodes_nm
+    slots = _padded_slots(quadrature)
+    counts = _real_counts(quadrature)
     throughput = np.empty((2, *nodes.shape, n_separations))
     ring_std = np.empty((*nodes.shape, n_separations))
     ring_supported = np.empty((*nodes.shape, n_separations), bool)
@@ -394,11 +411,14 @@ def aperture_response(
                     for dx, dy in zip(x / scale, y / scale, strict=True)
                 ]
             )
-            moments, inside = _ring_moments(model, detector, nodes[w], x, y, weights)
-            moments = np.asarray(moments)
+            # Only the real nodes are imaged; a padded slot repeats the first.
+            moments, inside = _ring_moments(
+                model, detector, nodes[w, : counts[w]], x, y, weights
+            )
+            moments = np.asarray(moments)[slots[w]]
             throughput[:, w, :, k] = moments.mean(axis=-1).T
             ring_std[w, :, k] = moments[:, 0].std(axis=-1)
-            ring_supported[w, :, k] = np.asarray(inside).all(axis=-1)
+            ring_supported[w, :, k] = np.asarray(inside)[slots[w]].all(axis=-1)
     probe = [
         _probe(
             model,
@@ -475,7 +495,9 @@ def aperture_record(
     The star leakage (with the instrument's speckle field, if any), a uniform
     sky of unit radiance and the scene's disk are rendered once by the image
     path at ``exposure.time_d`` and ``exposure.roll_deg``, without planets,
-    then summed in the response's aperture at every half-pixel position.
+    then summed in the response's aperture at every half-pixel position. Only
+    the real nodes of each band are rendered and summed; a padded slot repeats
+    the band's first real node.
     The record keeps ``scene.local_zodi`` and the scene's sky frame (position
     and epoch), from which :func:`aperture_rates` computes the local-zodi
     radiance at the time of each read; nothing of the local zodi is fixed at
@@ -534,13 +556,22 @@ def aperture_record(
         [getattr(images, name) for name in ("star_leakage", "local_zodi", "exozodi")],
         axis=1,
     )
-    n_bands, n_nodes = nodes.shape
+    n_bands = nodes.shape[0]
     shape = maps.shape[-2:]
-    background = _lattice(
-        maps.reshape(n_bands, 3 * n_nodes, *shape),
-        response.kernels,
-        response.radius_pix,
-    ).reshape(2, n_bands, 3, n_nodes, 2 * shape[0], 2 * shape[1])
+    # Sum the real nodes of each band only; a padded slot repeats the first.
+    background = jnp.stack(
+        [
+            _lattice(
+                maps[w : w + 1, :, : _real_counts(quadrature)[w]].reshape(
+                    1, -1, *shape
+                ),
+                response.kernels[:, w : w + 1],
+                response.radius_pix[w : w + 1],
+            ).reshape(2, 3, -1, 2 * shape[0], 2 * shape[1])[:, :, slots]
+            for w, slots in enumerate(_padded_slots(quadrature))
+        ],
+        axis=1,
+    )
     star_leakage, uniform_sky, exozodi = jnp.moveaxis(background, 2, 0)
     n_pix = _lattice(
         jnp.ones((n_bands, 1, *shape)), response.kernels, response.radius_pix
