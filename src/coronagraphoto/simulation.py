@@ -520,62 +520,6 @@ def _run(
     )
 
 
-def _dotted(key_path):
-    """The dotted path of a pytree key path, as ``Exposure.reads`` names leaves."""
-    out = ""
-    for key in key_path:
-        if isinstance(key, jax.tree_util.GetAttrKey):
-            out += ("." if out else "") + key.name
-        elif isinstance(key, jax.tree_util.SequenceKey):
-            out += f"[{key.idx}]"
-        else:
-            raise TypeError(f"cannot name the pytree key {key!r}")
-    return out
-
-
-def _knot_leaves(source, path):
-    """Paths, under ``path``, of the floating leaves that set a table's knots.
-
-    A leaf is a knot leaf when moving it moves ``spectral_breaks_nm()``; the
-    probe uses only that public method, so every kind of table is covered.
-    """
-    base = np.asarray(source.spectral_breaks_nm())
-    flat, treedef = jax.tree_util.tree_flatten_with_path(source)
-    found = []
-    for i, (key_path, leaf) in enumerate(flat):
-        if not (
-            isinstance(leaf, float)
-            or (
-                isinstance(leaf, jax.Array) and jnp.issubdtype(leaf.dtype, jnp.floating)
-            )
-        ):
-            continue
-        leaves = [x for _, x in flat]
-        leaves[i] = leaf * 1.07 + 0.013
-        moved = np.asarray(
-            jax.tree_util.tree_unflatten(treedef, leaves).spectral_breaks_nm()
-        )
-        if moved.shape != base.shape or not np.array_equal(moved, base):
-            found.append(".".join(filter(None, (path, _dotted(key_path)))))
-    return tuple(found)
-
-
-def _declared_reads(scene):
-    """Paths, relative to the scene, of the knot leaves the build reads."""
-    sources = [("star", scene.star)]
-    sources += [
-        (f"planets[{i}].physical_model", planet.physical_model)
-        for i, planet in enumerate(scene.planets)
-    ]
-    sources.append(("local_zodi", scene.local_zodi))
-    return tuple(
-        path
-        for name, source in sources
-        if getattr(source, "knot_digest", None) is not None
-        for path in _knot_leaves(source, name)
-    )
-
-
 def _resolve(scene, quadrature):
     """Build the Resolution of a scene's tables on ``quadrature``, on the host.
 
@@ -678,7 +622,7 @@ def build_exposure(
         quadrature=quadrature,
         plan=plan,
         resolution=_resolve(scene, quadrature),
-        reads=_declared_reads(scene),
+        reads=scene.knot_leaves(),
     )
 
 
