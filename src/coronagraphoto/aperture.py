@@ -235,8 +235,9 @@ def _probe_index(supported_row):
 def _probe(model, instrument, rule, frame, radius, nodes_nm, supported, step):
     """Aperture fraction of one source on the +x axis at the middle node of a band.
 
-    ``supported`` is the band's ``(Q, K)`` ring table and ``step`` its separation
-    spacing; both fix the source, so the build and the check measure the same one.
+    ``nodes_nm`` are the band's real nodes, ``supported`` their ``(Q_real, K)``
+    ring table and ``step`` its separation spacing; together they fix the
+    source, so the build and the check measure the same one.
     """
     k = _probe_index(supported[len(nodes_nm) // 2])
     if k is None:
@@ -307,6 +308,7 @@ def _compare_response(instrument, quadrature, response):
     if quadrature.bands != response.quadrature.bands:
         raise ValueError("the response was built for other bands")
     models, frames, radii = _band_models(instrument, quadrature, response.rule)
+    counts = _real_counts(quadrature)
     if not np.allclose(radii, np.asarray(response.radius_pix), rtol=1e-6):
         raise ValueError(
             "the response was built for another detector pixel scale or "
@@ -322,8 +324,8 @@ def _compare_response(instrument, quadrature, response):
             response.rule,
             frame,
             float(response.radius_pix[w]),
-            nodes[w],
-            np.asarray(response.throughput_supported[w]),
+            nodes[w, : counts[w]],
+            np.asarray(response.throughput_supported[w, : counts[w]]),
             response.separation_step_arcsec,
         )
         if not np.isclose(measured, expected, rtol=1e-4, atol=1e-7, equal_nan=True):
@@ -426,8 +428,8 @@ def aperture_response(
             rule,
             frame,
             radius,
-            nodes[w],
-            ring_supported[w],
+            nodes[w, : counts[w]],
+            ring_supported[w, : counts[w]],
             separations[1],
         )
         for w, (model, frame, radius) in enumerate(

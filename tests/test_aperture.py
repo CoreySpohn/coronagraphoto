@@ -1134,12 +1134,13 @@ def test_aperture_tables_image_the_real_nodes_only(monkeypatch):
 
     Three bands split at the local zodi's knots hold different numbers of real
     nodes. Truth: the response images ``n_separations`` rings at each real
-    node plus one probe per band, and the record sums three maps (star,
-    uniform sky, disk) at each real node (both counts exact, from the static
-    layout). A band built alone has no padding, so its tables must equal the
-    joint tables' rows of that band (tolerance 1e-12 of each table's peak,
-    basis floating point on the same nodes in a different batch layout), and
-    each padded slot must repeat the band's first real node bit for bit.
+    node plus one probe per band, at the band's middle real node, and the
+    record sums three maps (star, uniform sky, disk) at each real node (counts
+    and probe wavelengths exact, from the static layout). A band built alone
+    has no padding, so its tables and probe must equal the joint ones of that
+    band (tolerance 1e-12 of each table's peak, basis floating point on the
+    same nodes in a different batch layout), and each padded slot must repeat
+    the band's first real node bit for bit.
     """
     from coronagraphoto import aperture
 
@@ -1156,7 +1157,7 @@ def test_aperture_tables_image_the_real_nodes_only(monkeypatch):
     ring_moments, lattice = aperture._ring_moments, aperture._lattice
 
     def counted_moments(model, detector, wavelengths_nm, *args):
-        imaged.append(len(wavelengths_nm))
+        imaged.append(np.asarray(wavelengths_nm))
         return ring_moments(model, detector, wavelengths_nm, *args)
 
     def counted_lattice(maps, *args):
@@ -1166,7 +1167,11 @@ def test_aperture_tables_image_the_real_nodes_only(monkeypatch):
     monkeypatch.setattr(aperture, "_ring_moments", counted_moments)
     monkeypatch.setattr(aperture, "_lattice", counted_lattice)
     response = cp.aperture_response(instrument, exposure.quadrature, **options)
-    assert sum(imaged) == options["n_separations"] * sum(counts) + len(bands)
+    assert sum(map(len, imaged)) == options["n_separations"] * sum(counts) + len(bands)
+    nodes = np.asarray(exposure.quadrature.nodes_nm)
+    probes = imaged[-len(bands) :]
+    for i, n in enumerate(counts):
+        np.testing.assert_array_equal(probes[i], nodes[i, n // 2 : n // 2 + 1])
     summed.clear()
     record = cp.aperture_record(scene, instrument, exposure, response)
     # One sum per band of the three maps, then the pixel count and support.
@@ -1183,6 +1188,7 @@ def test_aperture_tables_image_the_real_nodes_only(monkeypatch):
             (response.throughput[:, i, :n], single.throughput[:, 0]),
             (record.star_leakage[:, i, :n], single_record.star_leakage[:, 0]),
             (record.uniform_sky[:, i, :n], single_record.uniform_sky[:, 0]),
+            (response.probe[i], single.probe[0]),
         )
         for joint, truth in pairs:
             truth = np.asarray(truth)
