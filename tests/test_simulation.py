@@ -145,7 +145,11 @@ def test_streaming_jit_and_gradient():
 
 
 def test_refused_planet_psf_only_invalidates_lit_source():
-    """A refused PSF contributes zero for a dark planet and NaN for a lit one."""
+    """A refused PSF contributes zero, lit or dark, and never NaN.
+
+    A source outside the source domain has a finite zero image and is flagged
+    for that source alone.
+    """
     from dataclasses import replace
 
     import equinox as eqx
@@ -160,7 +164,7 @@ def test_refused_planet_psf_only_invalidates_lit_source():
         def _native_source_psfs(self, x_lod, y_lod):
             psfs = super()._native_source_psfs(x_lod, y_lod)
             return SourcePSFs(
-                replace(psfs.image, data=jnp.full_like(psfs.image.data, jnp.nan)),
+                replace(psfs.image, data=jnp.zeros_like(psfs.image.data)),
                 jnp.zeros_like(psfs.valid),
             )
 
@@ -174,10 +178,7 @@ def test_refused_planet_psf_only_invalidates_lit_source():
                 time_d=0.0, roll_deg=0, quadrature=Quadrature.monochromatic(550.0)
             ),
         ).planet
-        if contrast == 0.0:
-            np.testing.assert_array_equal(planet, 0.0)
-        else:
-            assert np.isnan(planet).all()
+        np.testing.assert_array_equal(planet, 0.0)
 
 
 def test_expected_integrates_declared_response_kink():
@@ -328,3 +329,63 @@ def test_disk_render_does_not_depend_on_detector_extent():
     print(f"sum ratio {small.sum() / crop.sum():.4f}")
     print(f"worst/peak {np.abs(small - crop).max() / crop.max():.3e}")
     np.testing.assert_allclose(small, crop, rtol=0, atol=1e-10 * crop.max())
+
+
+def test_pixels_beyond_the_tables_are_zero_and_unsupported():
+    """Fails if light is invented beyond the tables or support ignores a node.
+
+    A detector twice the table: 48 pixels of 0.25 lambda/D against a 24 pixel
+    table (half-width 3 lambda/D, linear products reach in by half a table
+    pixel). The table is fixed in lambda/D, so its angular footprint shrinks
+    at the blue node. Expected support is computed from primitives: a pixel
+    is supported when its far edge lies inside 2.875 lambda/D at the node's
+    own scale, at every node. Star leakage and local zodi are exactly zero
+    outside, including the pixels the red node alone reaches; inside, the
+    uniform sky and star are untouched. Basis: exact.
+    """
+    import jax.numpy as jnp
+    from conftest import make_path, make_system, with_zodi
+    from optixstuff.spectral import Band
+    from skyscapes import PrecomputedZodi
+
+    import coronagraphoto as cp
+
+    n, step = 24, 0.25
+    path = make_path(n=n, step=step, detector_n=2 * n)
+    zodi = PrecomputedZodi(jnp.array([400.0, 700.0]), jnp.full(2, 1e12))
+    scene = with_zodi(make_system(), zodi)
+    bands = (Band(500.0, 600.0),)
+    exposure = cp.build_exposure(scene, path, bands, time_d=0.0, order=2)
+    nodes = np.asarray(exposure.quadrature.nodes_nm)[0]
+    assert nodes.size >= 2
+    rates = cp.expected(scene, path, exposure)
+    photons = cp.photon_rates(scene, path, exposure)
+
+    pixel_arcsec = float(path.detector.pixel_scale_arcsec)
+    lod = np.asarray(
+        [float(path.coronagraph.grid.frame.lod_to_arcsec(w)) for w in nodes]
+    )
+    centre = (2 * n - 1) / 2
+    far_edge = (np.abs(np.arange(2 * n) - centre) + 0.5) * pixel_arcsec
+    # Table half-width 3 lambda/D shrunk by the linear reach of half a table pixel.
+    reach = (n * step / 2 - 0.5 * step) * lod[:, None]
+    per_axis = far_edge[None, :] <= reach
+    support = per_axis[:, :, None] & per_axis[:, None, :]
+    expected_support = support.all(axis=0)
+    blue_only_misses = support[-1] & ~support[0]
+    assert blue_only_misses.any(), (
+        "the band must have a pixel only the red node reaches"
+    )
+
+    for rec in (rates, photons):
+        assert rec.supported.shape == (1, 2 * n, 2 * n)
+        np.testing.assert_array_equal(rec.supported[0], expected_support)
+        for name in ("star_leakage", "local_zodi", "planet", "exozodi"):
+            outside = np.asarray(getattr(rec, name))[..., ~expected_support]
+            np.testing.assert_array_equal(outside, 0.0)
+    inside = np.asarray(rates.star_leakage)[0][expected_support]
+    assert np.all(inside > 0)
+    assert np.all(np.asarray(rates.local_zodi)[0][expected_support] > 0)
+    assert np.isfinite(np.asarray(rates.star_leakage)).all()
+    integrated = photons.integrate()
+    np.testing.assert_array_equal(integrated.supported, photons.supported)

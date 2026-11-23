@@ -29,10 +29,12 @@ def test_yip_image_absolute_photon_fraction(tmp_path, distinct_products):
 
     Gaussian omitted tails <2e-8 at this offset; float32 YIP interpolation
     adds <2e-6 relative. A pixel-area error changes the result by a factor 4.
-    Stellar and transmission maps use the even extension, so a constant
-    stellar map remains constant beyond its footprint. The distinct map's
-    smooth positive gradient also stays positive here. Bound the flux added
-    by clipping negative leakage to 64 eps of total absolute stellar flux;
+    Stellar and transmission maps end at their tabulated footprint: beyond it
+    the independent oracle is zero (``outside == "zero"``), and the reader
+    gives exactly zero with ``supported`` False for every pixel the
+    reconstruction cannot reach. The distinct map's smooth positive gradient
+    also stays positive here. Bound the flux added by clipping negative
+    leakage to 64 eps of total absolute stellar flux on the supported pixels;
     the nonnegative-rate guard must not hide finite-field ringing.
     """
     coro = open_yip(
@@ -96,11 +98,15 @@ def test_yip_image_absolute_photon_fraction(tmp_path, distinct_products):
         ),
     ):
         angular = replace(product.grid.to_arcsec(550.0), orientation=grid.orientation)
-        assert product.outside == "reflect"
+        assert product.outside == "zero"
         expected = resample(replace(product, grid=angular), grid).data * scale
+        covered = np.asarray(rates.supported[0])
+        assert covered.any()
+        np.testing.assert_array_equal(np.asarray(term)[~covered], 0.0)
+        expected = jnp.where(covered, expected, 0.0)
         negative_flux = float(jnp.maximum(-expected, 0).sum())
         print(
-            "reflected map",
+            "map",
             product.quantity,
             "minimum",
             float(expected.min()),

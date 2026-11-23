@@ -29,8 +29,10 @@ from optixstuff.grids import (
     Measure,
     PixelGrid,
     SkyOrientation,
+    coverage,
     footprint_overlap,
     integrate_footprints,
+    reconstruction_margin,
     resample,
 )
 from optixstuff.spectral import Band, Quadrature
@@ -76,7 +78,12 @@ def _node_rates(
     """Render one node; detector yield never enters this photon calculation.
 
     ``sky_radiance`` is the local-zodi radiance at this node in photons s^-1
-    m^-2 nm^-1 sr^-1, or None for no local zodi.
+    m^-2 nm^-1 sr^-1, or None for no local zodi. Returns the component images
+    and the boolean (ny, nx) of detector pixels the coronagraph data cover at
+    this node: the AND of ``coverage`` over every product the render reads,
+    each with the reach of its own reconstruction. Nothing is reflected or
+    extrapolated, so the light at an uncovered pixel is not modeled; the
+    caller zeroes it.
     """
     speckle = instrument.speckle
     products = coro.at_wavelength(wavelength_nm)
@@ -104,18 +111,28 @@ def _node_rates(
     star = system.star
     phi_star = star.photon_flux_density(wavelength_nm, time_d, dist_pc=system.dist_pc)
     diameter = star.angular_diameter_arcsec(system.dist_pc)
-    leakage = coro.stellar_map(
+    stellar = coro.stellar_map(
         wavelength_nm,
         diameter / products.stellar_grid.frame.lod_to_arcsec(wavelength_nm),
         grid=detector_pixels(products.stellar_grid),
-    ).data
+    )
+    leakage = stellar.data
+    supported = coverage(
+        products.stellar_grid,
+        detector_pixels(products.stellar_grid),
+        reconstruction_margin(stellar.reconstruction),
+    )
     if speckle is not None:
         # The field owns its native lod grid, Frame, reconstruction and
         # extension; its clock subtracts its own epoch. The excess is signed
         # (coherent interference can lower the floor); only the total
         # leakage is clipped at zero below.
-        leakage = leakage + onto_detector(
-            speckle.realize(wavelength_nm=wavelength_nm, time_d=time_d)
+        excess = speckle.realize(wavelength_nm=wavelength_nm, time_d=time_d)
+        leakage = leakage + onto_detector(excess)
+        supported = supported & coverage(
+            replace(excess.grid.to_arcsec(wavelength_nm), orientation=grid.orientation),
+            grid,
+            reconstruction_margin(excess.reconstruction),
         )
     leakage = gain * phi_star * jnp.maximum(leakage, 0.0)
 
@@ -128,16 +145,18 @@ def _node_rates(
         psfs = coro.source_psfs(
             wavelength_nm, x / lod_arcsec, y / lod_arcsec, grid=detector_pixels(native)
         )
-        # A dark source contributes zero even if its PSF is undefined.
+        # A source outside the coronagraph's source domain has a zero image
+        # and is flagged for that source alone: it contributes nothing and
+        # leaves every other planet's image as it would be without it.
         samples = jnp.where(psfs.valid[:, None, None], psfs.image.data, 0.0)
         planet = gain * jnp.einsum("k,kyx->yx", phi, samples)
-        planet = jnp.where(jnp.all(psfs.valid | (phi == 0)), planet, jnp.nan)
 
     local = jnp.zeros(grid.shape)
     if sky_radiance is not None:
-        transmission = coro.uniform_sky_map(
+        sky_map = coro.uniform_sky_map(
             wavelength_nm, grid=detector_pixels(products.sky_grid)
-        ).data
+        )
+        transmission = sky_map.data
         sky = Image(
             jnp.broadcast_to(gain * sky_radiance, grid.shape),
             grid,
@@ -146,6 +165,11 @@ def _node_rates(
             "ph s^-1 nm^-1",
         )
         local = sky.integrated().data * transmission
+        supported = supported & coverage(
+            products.sky_grid,
+            detector_pixels(products.sky_grid),
+            reconstruction_margin(sky_map.reconstruction),
+        )
 
     disk = jnp.zeros(grid.shape)
     if system.disk is not None:
@@ -165,7 +189,7 @@ def _node_rates(
         )
         rendered = coro.render_scene(scene, wavelength_nm, grid=detector_pixels(native))
         disk = gain * rendered.image.data
-        disk = jnp.where(rendered.valid, disk, jnp.nan)
+        supported = supported & coverage(native, detector_pixels(native))
     # The warm telescope radiates uniformly: no coronagraph factor, system
     # throughput, flux scale or sky transmission, only the pixel solid angle.
     thermal = (
@@ -182,7 +206,7 @@ def _node_rates(
         .data
     )
     zero = jnp.zeros(grid.shape)
-    return dict(
+    components = dict(
         planet=planet,
         star_leakage=leakage,
         local_zodi=local,
@@ -190,6 +214,7 @@ def _node_rates(
         thermal=thermal,
         stellar_companions=zero,
     )
+    return components, supported
 
 
 def _band_ids(instrument, scene, quadrature):
@@ -220,7 +245,9 @@ def _band_ids(instrument, scene, quadrature):
 
 
 def _node_function(models, scene, instrument, exposure, grid, planets, uniform_sky):
-    """Return node(w): the rates at one traced wavelength, for any model count.
+    """Return node(w): the rates and pixel support at one traced wavelength.
+
+    Works for any model count; the result is ``(components, supported)``.
 
     With ``planets`` False no planet is propagated or rendered and the planet
     term is zero. The local zodi is the scene model's radiance for the scene's
@@ -264,16 +291,48 @@ def _node_function(models, scene, instrument, exposure, grid, planets, uniform_s
         covered = jnp.stack(
             [(m.bandpass.low_nm <= w) & (w <= m.bandpass.high_nm) for m in models]
         )
-        rates = jax.lax.switch(jnp.argmax(covered), [with_model(m) for m in models], w)
+        rates, supported = jax.lax.switch(
+            jnp.argmax(covered), [with_model(m) for m in models], w
+        )
         # A node outside every declared band has no performance model.
-        return jax.tree.map(lambda x: jnp.where(jnp.any(covered), x, jnp.nan), rates)
+        return (
+            jax.tree.map(lambda x: jnp.where(jnp.any(covered), x, jnp.nan), rates),
+            supported,
+        )
 
     return node
 
 
+# Terms that read a coronagraph product. Thermal emission is uniform and reads
+# none, so it stays where the products end (and the aperture record reads one
+# pixel of it).
+_PRODUCT_TERMS = ("planet", "star_leakage", "local_zodi", "exozodi")
+
+
+def _zero_unsupported(values, supported):
+    """Set the product-read terms to zero where ``supported`` is False.
+
+    A band-integrated pixel is unsupported when any node of its band is, so the
+    zero covers every node of the band and integrating the spectral record
+    equals the streamed electrons.
+    """
+    # A NaN from a node outside every declared band is a different failure and
+    # stays NaN.
+    return {
+        name: jnp.where(supported, x, jnp.where(jnp.isnan(x), x, 0.0))
+        if name in _PRODUCT_TERMS
+        else x
+        for name, x in values.items()
+    }
+
+
 @eqx.filter_jit
 def _render(scene, instrument, exposure, *, kind, band_ids, planets, uniform_sky):
-    """Render every node of one observation as a single traced program."""
+    """Render every node of one observation as a single traced program.
+
+    Returns the component images and the (W, ny, nx) pixel support, which
+    :func:`_run` wraps in the Rates record.
+    """
     coro = instrument.coronagraph
     models = (
         tuple(coro.coronagraphs[i] for i in band_ids)
@@ -286,10 +345,11 @@ def _render(scene, instrument, exposure, *, kind, band_ids, planets, uniform_sky
         models, scene, instrument, exposure, grid, planets, uniform_sky
     )
     if kind == "photons":
-        values = jax.lax.map(node, quadrature.nodes_nm.ravel())
-        return jax.tree.map(
-            lambda x: x.reshape((*quadrature.nodes_nm.shape, *grid.shape)), values
-        )
+        values, covered = jax.lax.map(node, quadrature.nodes_nm.ravel())
+        shape = quadrature.nodes_nm.shape
+        values = jax.tree.map(lambda x: x.reshape((*shape, *grid.shape)), values)
+        supported = jnp.all(covered.reshape((*shape, *grid.shape)), axis=1)
+        return _zero_unsupported(values, supported[:, None]), supported
 
     # Stream the nodes of each band: only its accumulated rate and one node
     # image are live.
@@ -297,24 +357,29 @@ def _render(scene, instrument, exposure, *, kind, band_ids, planets, uniform_sky
         row = quadrature.band(i)
         initial = {name: jnp.zeros(grid.shape) for name in Rates.component_names()}
 
-        def step(total, node_and_weight):
+        def step(carry, node_and_weight):
+            total, supported = carry
             w, weight = node_and_weight
-            components = node(w)
+            components, covered = node(w)
             single = Quadrature(row.bands, w[None, None], weight[None, None])
             photons = Rates(
                 single, "photon", **jax.tree.map(lambda x: x[None, None], components)
             )
             electrons = instrument.detector.electrons(photons)
-            return {
-                name: a + getattr(electrons, name)[0] for name, a in total.items()
-            }, None
+            return (
+                {name: a + getattr(electrons, name)[0] for name, a in total.items()},
+                supported & covered,
+            ), None
 
         xs = (row.nodes_nm[0], row.weights("response")[0])
-        return jax.lax.scan(step, initial, xs)[0]
+        initial_support = jnp.ones(grid.shape, bool)
+        total, supported = jax.lax.scan(step, (initial, initial_support), xs)[0]
+        return _zero_unsupported(total, supported), supported
 
     rows = [render_band(i) for i in range(len(quadrature.bands))]
-    return Rates(
-        quadrature.bands, "electron", **jax.tree.map(lambda *x: jnp.stack(x), *rows)
+    return (
+        jax.tree.map(lambda *x: jnp.stack(x), *(values for values, _ in rows)),
+        jnp.stack([supported for _, supported in rows]),
     )
 
 
@@ -326,7 +391,7 @@ def _draw(detector, key, electrons, plan):
 
 def _run(scene, instrument, exposure, kind, *, planets=True, uniform_sky=False):
     """Run the shared program for one scene, instrument and exposure."""
-    return _render(
+    values, supported = _render(
         scene,
         instrument,
         exposure,
@@ -335,6 +400,10 @@ def _run(scene, instrument, exposure, kind, *, planets=True, uniform_sky=False):
         planets=planets,
         uniform_sky=uniform_sky,
     )
+    quadrature = exposure.quadrature
+    if kind == "photons":
+        return Rates(quadrature, "photon", supported=supported, **values)
+    return Rates(quadrature.bands, "electron", supported=supported, **values)
 
 
 def build_exposure(
@@ -379,9 +448,15 @@ def photon_rates(scene: Scene, instrument: Instrument, exposure: Exposure) -> Ra
     disables it); the speckle field from ``instrument.speckle`` (None adds
     none). Thermal is the warm telescope's uniform emission from
     ``instrument.warm_emission`` (zero when None); companion terms are zero.
+
+    The coronagraph renders only what its data hold. ``supported`` of shape
+    (W, ny, nx) is False at a detector pixel whose footprint, with the reach of
+    each product's reconstruction, leaves any product the render reads at any
+    node of the band; the planet, star leakage, local zodi and exozodi are zero
+    there at every node. A planet outside the coronagraph's source domain
+    contributes zero and leaves every other planet as it would be alone.
     """
-    components = _run(scene, instrument, exposure, "photons")
-    return Rates(exposure.quadrature, "photon", **components)
+    return _run(scene, instrument, exposure, "photons")
 
 
 def expected(scene: Scene, instrument: Instrument, exposure: Exposure) -> Rates:
@@ -394,6 +469,10 @@ def expected(scene: Scene, instrument: Instrument, exposure: Exposure) -> Rates:
     one photon image and its wavelength and weight to the detector, so forward
     storage is the band accumulator plus one node's images. JAX reverse-mode
     may retain residuals for differentiation.
+
+    ``supported`` of shape (W, ny, nx) is False where any node of the band
+    reads beyond a product's data (see :func:`photon_rates`); the band-integrated
+    planet, star leakage, local zodi and exozodi are zero there.
     """
     return _run(scene, instrument, exposure, "electrons")
 

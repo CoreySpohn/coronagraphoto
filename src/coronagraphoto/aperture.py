@@ -458,11 +458,11 @@ def aperture_record(
     quadrature = exposure.quadrature
     nodes = quadrature.nodes_nm
     _check_response(instrument, quadrature, response)
-    components = _run(
+    images = _run(
         scene, instrument, exposure, "photons", planets=False, uniform_sky=True
     )
     maps = jnp.stack(
-        [components[name] for name in ("star_leakage", "local_zodi", "exozodi")],
+        [getattr(images, name) for name in ("star_leakage", "local_zodi", "exozodi")],
         axis=1,
     )
     n_bands, n_nodes = nodes.shape
@@ -494,7 +494,7 @@ def aperture_record(
         uniform_sky,
         exozodi,
         n_pix,
-        components["thermal"][:, :, 0, 0],
+        images.thermal[:, :, 0, 0],
         scene.local_zodi,
         scene.sky_frame,
         reads=(

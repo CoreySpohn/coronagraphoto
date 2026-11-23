@@ -398,8 +398,11 @@ class PlateauCoronagraph(GaussianSceneCoronagraph):
         )
 
 
-def write_scene(path):
-    """Small ExoVista v2.6 FITS with a native disk and independent sky states."""
+def write_scene(path, *, a_au=1.0):
+    """Small ExoVista v2.6 FITS with a native disk and independent sky states.
+
+    The planet orbits at ``a_au`` astronomical units.
+    """
     from astropy.io import fits
     from hwoutils.constants import AU2m, G_si, yr2s
 
@@ -441,7 +444,7 @@ def write_scene(path):
             fits.ImageHDU(np.zeros((2, 0, 4))),
             fits.ImageHDU(star, header=header),
             fits.ImageHDU(
-                planet, header=fits.Header({"R": 1.0, "M": 1.0, "A": 1.0, "E": 0.0})
+                planet, header=fits.Header({"R": 1.0, "M": 1.0, "A": a_au, "E": 0.0})
             ),
         ]
     ).writeto(path)
