@@ -32,7 +32,6 @@ from optixstuff.grids import (
     coverage,
     footprint_overlap,
     integrate_footprints,
-    reconstruction_margin,
     resample,
 )
 from optixstuff.spectral import Band, Quadrature
@@ -81,7 +80,7 @@ def _node_rates(
     m^-2 nm^-1 sr^-1, or None for no local zodi. Returns the component images
     and the boolean (ny, nx) of detector pixels the coronagraph data cover at
     this node: the AND of ``coverage`` over every product the render reads,
-    each with the reach of its own reconstruction. Nothing is reflected or
+    each with the reach of the read ``resample`` performs. Nothing is reflected or
     extrapolated, so the light at an uncovered pixel is not modeled; the
     caller zeroes it.
     """
@@ -120,7 +119,8 @@ def _node_rates(
     supported = coverage(
         products.stellar_grid,
         detector_pixels(products.stellar_grid),
-        reconstruction_margin(stellar.reconstruction),
+        reconstruction=stellar.reconstruction,
+        measure=stellar.measure,
     )
     if speckle is not None:
         # The field owns its native lod grid, Frame, reconstruction and
@@ -132,7 +132,8 @@ def _node_rates(
         supported = supported & coverage(
             replace(excess.grid.to_arcsec(wavelength_nm), orientation=grid.orientation),
             grid,
-            reconstruction_margin(excess.reconstruction),
+            reconstruction=excess.reconstruction,
+            measure=excess.measure,
         )
     leakage = gain * phi_star * jnp.maximum(leakage, 0.0)
 
@@ -168,7 +169,8 @@ def _node_rates(
         supported = supported & coverage(
             products.sky_grid,
             detector_pixels(products.sky_grid),
-            reconstruction_margin(sky_map.reconstruction),
+            reconstruction=sky_map.reconstruction,
+            measure=sky_map.measure,
         )
 
     disk = jnp.zeros(grid.shape)

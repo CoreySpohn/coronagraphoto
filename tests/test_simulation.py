@@ -453,3 +453,70 @@ def test_pixels_beyond_the_tables_are_zero_and_unsupported():
     assert np.isfinite(np.asarray(rates.star_leakage)).all()
     integrated = photons.integrate()
     np.testing.assert_array_equal(integrated.supported, photons.supported)
+
+
+@pytest.mark.parametrize(("cells", "detector_n"), [(3.0, 15), (3.0, 25), (2.4, 15)])
+def test_support_follows_the_deposit_read_on_a_coarse_detector(cells, detector_n):
+    """Fails if support uses the sampling reach where a pixel exceeds the table cell.
+
+    A 24 cell table and a 48 cell table of the same smooth products, on one
+    detector whose pixel is 3 or 2.4 table cells at 550 nm (more than 2 cells
+    at the bluer nodes of the band, so they deposit). Truth is the render from
+    the wide table, which reads no edge: wherever the narrow render is
+    supported the two agree to 1e-12 relative (identical samples through the
+    same linear read and band integral; the tolerance covers summation order).
+    With the sampling margin the edge ring is called supported and differs
+    there. Odd detectors put a pixel centre on the optical axis; at these
+    sizes they are the geometries where the two margins call different pixels
+    supported (a 2.5 cell pixel on an even detector happens to agree).
+    """
+    import equinox as eqx
+    import jax.numpy as jnp
+    from conftest import make_path, make_system, with_zodi
+    from optixstuff.spectral import Band
+    from skyscapes import PrecomputedZodi
+
+    import coronagraphoto as cp
+
+    step = 0.25
+    zodi = PrecomputedZodi(jnp.array([400.0, 700.0]), jnp.full(2, 1e12))
+    scene = with_zodi(make_system(), zodi)
+    renders = {}
+    for n in (24, 48):
+        path = make_path(
+            n=n, step=step, detector_n=detector_n, detector_step=cells * step
+        )
+        exposure = cp.build_exposure(
+            scene, path, (Band(500.0, 600.0),), time_d=0.0, order=2
+        )
+        renders[n] = (exposure, eqx.filter_jit(cp.expected)(scene, path, exposure))
+    nodes = np.asarray(renders[24][0].quadrature.nodes_nm)
+    np.testing.assert_array_equal(nodes, np.asarray(renders[48][0].quadrature.nodes_nm))
+    assert nodes.size >= 2
+    narrow, wide = renders[24][1], renders[48][1]
+    supported = np.asarray(narrow.supported)[0]
+    assert supported.any() and not supported.all()
+    assert np.asarray(wide.supported)[0][supported].all()
+    for name in ("star_leakage", "local_zodi"):
+        actual = np.asarray(getattr(narrow, name))[0][supported]
+        truth = np.asarray(getattr(wide, name))[0][supported]
+        assert np.all(truth > 0)
+        np.testing.assert_allclose(actual, truth, rtol=1e-12, atol=0)
+
+
+def test_returned_products_carry_the_measure_of_the_read():
+    """Fails if a coronagraph returns an image whose measure differs from its read.
+
+    Support takes the measure from the image the coronagraph returns on the
+    detector grid, so a table coronagraph must return the measure it resampled
+    with: cell integrals for the stellar map, intensive for the sky map.
+    """
+    from conftest import make_path
+    from optixstuff.grids import Measure
+
+    path = make_path(n=24, step=0.25, detector_n=15, detector_step=0.75)
+    coro = path.coronagraph
+    stellar = coro.stellar_map(550.0, 0.0, grid=path.detector.grid)
+    sky = coro.uniform_sky_map(550.0, grid=path.detector.grid)
+    assert stellar.measure == Measure.integral()
+    assert sky.measure == Measure.intensive()
