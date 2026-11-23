@@ -991,3 +991,70 @@ def test_planet_beyond_the_hull_reads_zero_and_unsupported(tmp_path):
     assert not np.any(outer.supported)
     for name in ("planet", "star_leakage", "local_zodi", "n_pix"):
         np.testing.assert_array_equal(getattr(outer, name), 0.0)
+
+
+@pytest.mark.medium(reason="one 21-ring response on a 48 pixel detector, 6 s cold")
+@vv.case("aperture-photon-budget", "code-verification")
+def test_curves_and_record_routes_agree_on_the_flag_across_the_stamp_edge():
+    """Fails if the curves route and the record route disagree on what is supported.
+
+    Seam anchor, ``jaxedith.rates`` against ``cp.aperture_rates`` on the same
+    instrument: a detector twice the table (table half-width 3 lambda/D) and a
+    2 nm band, so the band-centre read of the curves and the blue node of the
+    record share one footprint. On the +x axis the five separations 0.5, 1.5,
+    2.0, 2.6 and 3.5 lambda/D give the same ``supported`` on both routes, and
+    both zero every field where it is False. The routes differ by design in
+    two places, asserted as such. The curves are supported while separation
+    plus the rule's radius is within the table's half-width, a disk; the
+    record's footprint is the square stamp shrunk by the half source pixel the
+    linear products need, so at 2.25 lambda/D on the axis the
+    curves are True and the record is False. On the diagonal the square reaches
+    farther than the disk: at (2.0, 2.0) lambda/D (separation 2.83) the record
+    is True and the curves are False. The values are not compared (the curves
+    read an azimuthal leakage mean, the record the value at the planet).
+    Basis: exact.
+    """
+    from jaxedith import rates as curve_rates
+
+    instrument = _instrument(GaussianCoronagraph(24, 0.25))
+    scale = float(instrument.coronagraph.grid.frame.lod_to_arcsec(550.0))
+    instrument = eqx.tree_at(
+        lambda p: p.detector,
+        instrument,
+        Detector(pixel_scale_arcsec=0.25 * scale, shape=(48, 48), qe=1.0),
+    )
+    scene = make_system(separation_arcsec=1.0 * scale)
+    exposure = cp.build_exposure(scene, instrument, (Band(549.0, 551.0),), time_d=0.0)
+    response = cp.aperture_response(
+        instrument, exposure.quadrature, n_separations=21, n_angles=8
+    )
+    record = cp.aperture_record(scene, instrument, exposure, response)
+    curves = instrument.coronagraph.curves()
+
+    def flags(east_lod, north_lod):
+        east, north = east_lod * scale, north_lod * scale
+        image = cp.aperture_rates(record, east, north, 1e-10, time_d=0.0)
+        analytic = curve_rates(
+            curves,
+            scene,
+            instrument,
+            exposure.quadrature,
+            east,
+            north,
+            1e-10,
+            time_d=0.0,
+            uniform_sky=None,
+        )
+        for rates in (image, analytic):
+            if not np.any(rates.supported):
+                for name in ("planet", "star_leakage", "n_pix"):
+                    np.testing.assert_array_equal(getattr(rates, name), 0.0)
+        return bool(image.supported.all()), bool(analytic.supported.all())
+
+    for separation, expected in zip(
+        (0.5, 1.5, 2.0, 2.6, 3.5), (True, True, True, False, False), strict=True
+    ):
+        assert flags(separation, 0.0) == (expected, expected), separation
+    assert flags(2.25, 0.0) == (False, True)
+    assert flags(2.0, 2.0) == (True, False)
+    assert flags(3.0, 3.0) == (False, False)
