@@ -56,17 +56,28 @@ def _instrument(*, chromatic=False):
     return eqx.tree_at(lambda p: p.attenuating_elements, path, (CubicThroughput(),))
 
 
-def _star():
+def _star(tilt=0.0):
     wave = np.arange(490.0, 566.0)
+    slope = 1.0 + tilt * (wave - _CENTER) / _HALF
     return Star(
         wavelengths_nm=jnp.asarray(wave),
         times_d=jnp.array([0.0]),
-        flux_density_jy=jnp.asarray(3631.0 * _lines(wave.size, 1))[:, None],
+        flux_density_jy=jnp.asarray(3631.0 * slope * _lines(wave.size, 1))[:, None],
         interpolation_method="linear",
     )
 
 
-def _rough_scene(zodi=None):
+def _flat_star():
+    wave = np.arange(490.0, 566.0)
+    return Star(
+        wavelengths_nm=jnp.asarray(wave),
+        times_d=jnp.array([0.0]),
+        flux_density_jy=jnp.full((wave.size, 1), 3631.0),
+        interpolation_method="linear",
+    )
+
+
+def _rough_scene(zodi=None, tilt=0.0):
     """A line-rich star, an absorption-banded planet and, optionally, a zodi."""
     wave = np.arange(490.0, 566.0, 3.0)
     contrast = 1e-10 * _lines(wave.size, 2, depth=0.9)[None, :, None]
@@ -76,7 +87,7 @@ def _rough_scene(zodi=None):
         jnp.asarray(np.broadcast_to(contrast, (1, wave.size, 3))),
     )
     scene = make_system(
-        star=_star(),
+        star=_star(tilt),
         separation_arcsec=0.03,
         planet_groups=(Planet(jnp.ones(1), model),),
     )
@@ -111,9 +122,11 @@ def test_image_path_star_and_planet_match_the_fine_rule():
     images to 1e-3 of the peak pixel. Basis: with flat tables the same four-node
     and fine renders already differ by 3e-4 of the peak in the planet image
     (the response is a sampled pattern, not a polynomial), so the floor is the
-    response and not the table operator; the frozen 1e-4 does not hold on this
-    response. A mutant that point-samples the star at the four nodes misses the
-    leakage by more than 1e-2 on this table.
+    response and not the table operator. The floor comes from building the rule
+    with the default field radius of zero (no field-dependent node refinement);
+    a build that sets ``field_lod`` to the detector field gives the response
+    more nodes, and the tolerance returns to 1e-4 of the peak when the default
+    field radius is no longer zero.
     """
     scene, instrument = _rough_scene(), _instrument(chromatic=True)
     coarse = cp.build_exposure(scene, instrument, (_BAND,), time_d=0.0)
@@ -207,3 +220,35 @@ def test_field_lod_reaches_the_build_and_the_default_keeps_the_layout():
         assert exposure.quadrature.nodes_nm.shape == (1, order)
     wide = cp.build_exposure(scene, instrument, (_BAND,), time_d=0.0, field_lod=10.0)
     assert wide.quadrature.nodes_nm.shape[1] > 4
+
+
+def test_each_node_carries_its_own_star_value():
+    """Fails if the node-effective star values are paired with the wrong nodes.
+
+    Truth: the per-node ratio of the star leakage of a tilted, line-rich star to
+    that of a flat star, rendered on the same four nodes, equals the ratio of the
+    scene's node-effective star values (the instrument and coronagraph factors
+    cancel node by node). Tolerance 1e-10 relative, basis floating point on a
+    product of two reads. The tilt makes the four values differ by more than a
+    factor of 3, and reversing the node rows changes the ratios by order one
+    (the band-summed leakage is nearly blind to the pairing, so the test reads
+    the node-resolved record).
+    """
+    instrument = _instrument(chromatic=True)
+    tilted, flat = _rough_scene(tilt=0.9), _rough_scene()
+    flat = eqx.tree_at(lambda sc: sc.star, flat, _flat_star())
+    leak = {}
+    for name, scene in (("tilted", tilted), ("flat", flat)):
+        exposure = cp.build_exposure(scene, instrument, (_BAND,), time_d=0.0)
+        node = np.asarray(cp.photon_rates(scene, instrument, exposure).star_leakage)
+        leak[name] = node.reshape((*node.shape[:2], -1)).sum(-1)[0]
+        values = scene.sources(
+            exposure.quadrature, exposure.resolution, np.array([0.0])
+        )
+        leak[name + "_star"] = np.asarray(values.star).reshape(-1)
+    assert leak["tilted_star"].max() / leak["tilted_star"].min() > 3
+    np.testing.assert_allclose(
+        leak["tilted"] / leak["flat"],
+        leak["tilted_star"] / leak["flat_star"],
+        rtol=1e-10,
+    )
