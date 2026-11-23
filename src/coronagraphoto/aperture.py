@@ -21,6 +21,13 @@ The aperture is a circle fixed in angle within a band: its radius is
 ``rule.radius_lod`` at the band centre for every node of that band. Sums use
 exact fractional pixel coverage ``w``; the second moment of each table uses
 ``w**2`` and carries the Poisson variance of the weighted sum.
+
+A read holds only what the coronagraph data hold. It is supported when the
+aperture lies on the detector, every pixel under it is supported on the image
+path (:func:`coronagraphoto.expected`), and the separation lies in the planet
+table at positions the coronagraph tabulates. An unsupported read is zero in
+every field with ``Rates.supported`` False, never NaN, so a sum or a gradient
+through it stays finite.
 """
 
 from dataclasses import replace
@@ -60,8 +67,10 @@ class ApertureResponse(eqx.Module):
             at zero.
         throughput: Fraction of a point source's light summed in an aperture
             centred on it, shape (2, W, Q, K): weights ``w`` then ``w**2``,
-            each the mean over a ring of sources at that separation. NaN where
-            the coronagraph has no response model.
+            each the mean over a ring of sources at that separation. Zero
+            where the ring is not supported.
+        throughput_supported: Whether each ring lies in the coronagraph's
+            source domain at that node, shape (W, Q, K).
         throughput_ring_std: Standard deviation of the first moment around
             each ring, shape (W, Q, K): how much azimuth and pixel phase the
             ring mean hides.
@@ -72,7 +81,8 @@ class ApertureResponse(eqx.Module):
             middle node of the band, a source on the +x axis at the middle
             separation that has a response. :func:`aperture_record` repeats
             the measurement to refuse a response built for another
-            instrument. NaN for a band with no response anywhere.
+            instrument. NaN for a band with no supported ring anywhere (a
+            build check, not a rate).
     """
 
     rule: Circular = eqx.field(static=True)
@@ -81,6 +91,7 @@ class ApertureResponse(eqx.Module):
     separation_step_arcsec: Array
     throughput: Array
     throughput_ring_std: Array
+    throughput_supported: Array
     kernels: Array
     probe: Array
 
@@ -107,14 +118,21 @@ class ApertureRecord(eqx.Module):
         star_leakage: Star leakage summed in an aperture centred on each
             lattice position, shape (2, W, Q, 2 ny, 2 nx): moment, band,
             node, then the lattice. Lattice index (2 i + a, 2 j + b) is
-            detector pixel position (i + a / 2, j + b / 2). NaN where the
+            detector pixel position (i + a / 2, j + b / 2). Zero where the
             aperture leaves the detector.
         uniform_sky: The same sums for a uniform sky of 1 photon/s/m^2/nm/sr,
             the local zodi per unit radiance; zero when the record has no
             local zodi.
         exozodi: The same sums for the scene's disk.
         n_pix: Sum of the aperture weights at each lattice position, shape
-            (2, W, 2 ny, 2 nx).
+            (2, W, 2 ny, 2 nx); zero where the aperture leaves the detector.
+        unsupported: One where the aperture at a lattice position leaves the
+            detector or covers a pixel :func:`coronagraphoto.expected` does not
+            support at some node of the band, else zero, shape (W, 2 ny, 2 nx).
+            A float, so a bilinear read of it is positive exactly when a
+            neighbour the read weights is unsupported.
+        planet_unsupported: One where the planet table's ring is not in the
+            coronagraph's source domain, else zero, shape (W, Q, K).
         thermal: The warm telescope's emission per detector pixel at each
             node, shape (W, Q); zero without ``warm_emission``. The emission
             is uniform, so a read is this times the aperture's ``n_pix``.
@@ -137,6 +155,8 @@ class ApertureRecord(eqx.Module):
     uniform_sky: Array
     exozodi: Array
     n_pix: Array
+    unsupported: Array
+    planet_unsupported: Array
     thermal: Array
     local_zodi: AbstractLocalZodi | None
     sky_frame: SkyFrame
@@ -153,7 +173,11 @@ def _weights(rule, frame, shape, radius_pix, dx_pix, dy_pix):
 
 @eqx.filter_jit
 def _ring_moments(model, detector, wavelengths_nm, x_arcsec, y_arcsec, weights):
-    """Aperture fractions (Q, 2, A) of A sources at each node of one band."""
+    """Aperture fractions (Q, 2, A) of A sources at each node of one band.
+
+    Also returns the (Q, A) flags of sources inside the source domain. A source
+    outside it has a zero image and so a zero fraction.
+    """
     grid = detector.grid
 
     def node(wavelength_nm):
@@ -171,7 +195,7 @@ def _ring_moments(model, detector, wavelengths_nm, x_arcsec, y_arcsec, weights):
                 for power in (1, 2)
             ]
         )
-        return jnp.where(psfs.valid, moments, jnp.nan)
+        return jnp.where(psfs.valid, moments, 0.0), psfs.valid
 
     return jax.lax.map(node, wavelengths_nm)
 
@@ -198,19 +222,19 @@ def _band_models(instrument, quadrature, rule):
     return models, frames, radii
 
 
-def _probe_index(throughput_row):
-    """Index of the middle separation that has a response, or None."""
-    finite = np.flatnonzero(np.isfinite(np.asarray(throughput_row)))
-    return None if finite.size == 0 else int(finite[finite.size // 2])
+def _probe_index(supported_row):
+    """Index of the middle supported separation, or None."""
+    inside = np.flatnonzero(np.asarray(supported_row))
+    return None if inside.size == 0 else int(inside[inside.size // 2])
 
 
-def _probe(model, instrument, rule, frame, radius, nodes_nm, throughput, step):
+def _probe(model, instrument, rule, frame, radius, nodes_nm, supported, step):
     """Aperture fraction of one source on the +x axis at the middle node of a band.
 
-    ``throughput`` is the band's ``(2, Q, K)`` table and ``step`` its separation
+    ``supported`` is the band's ``(Q, K)`` ring table and ``step`` its separation
     spacing; both fix the source, so the build and the check measure the same one.
     """
-    k = _probe_index(throughput[0, len(nodes_nm) // 2])
+    k = _probe_index(supported[len(nodes_nm) // 2])
     if k is None:
         return np.nan
     detector = instrument.detector
@@ -223,7 +247,7 @@ def _probe(model, instrument, rule, frame, radius, nodes_nm, throughput, step):
         separation / float(detector.pixel_scale_arcsec),
         0.0,
     )
-    moments = _ring_moments(
+    moments, _ = _ring_moments(
         model,
         detector,
         nodes_nm[len(nodes_nm) // 2 :][:1],
@@ -282,7 +306,7 @@ def _compare_response(instrument, quadrature, response):
             frame,
             float(response.radius_pix[w]),
             nodes[w],
-            np.asarray(response.throughput[:, w]),
+            np.asarray(response.throughput_supported[w]),
             response.separation_step_arcsec,
         )
         if not np.isclose(measured, expected, rtol=1e-4, atol=1e-7, equal_nan=True):
@@ -335,6 +359,7 @@ def aperture_response(
     nodes = quadrature.nodes_nm
     throughput = np.empty((2, *nodes.shape, n_separations))
     ring_std = np.empty((*nodes.shape, n_separations))
+    ring_supported = np.empty((*nodes.shape, n_separations), bool)
     size = 2 * int(np.ceil(max(radii) + 1)) + 1
     kernels = np.empty((2, len(models), 2, 2, size, size))
     for w, (model, frame, radius) in enumerate(zip(models, frames, radii, strict=True)):
@@ -350,11 +375,11 @@ def aperture_response(
                     for dx, dy in zip(x / scale, y / scale, strict=True)
                 ]
             )
-            moments = np.asarray(
-                _ring_moments(model, detector, nodes[w], x, y, weights)
-            )
+            moments, inside = _ring_moments(model, detector, nodes[w], x, y, weights)
+            moments = np.asarray(moments)
             throughput[:, w, :, k] = moments.mean(axis=-1).T
             ring_std[w, :, k] = moments[:, 0].std(axis=-1)
+            ring_supported[w, :, k] = np.asarray(inside).all(axis=-1)
     probe = [
         _probe(
             model,
@@ -363,7 +388,7 @@ def aperture_response(
             frame,
             radius,
             nodes[w],
-            throughput[:, w],
+            ring_supported[w],
             separations[1],
         )
         for w, (model, frame, radius) in enumerate(
@@ -377,13 +402,31 @@ def aperture_response(
         jnp.asarray(separations[1]),
         jnp.asarray(throughput),
         jnp.asarray(ring_std),
+        jnp.asarray(ring_supported),
         jnp.asarray(kernels),
         jnp.asarray(probe),
     )
 
 
+def _on_detector(radius_pix, ny, nx):
+    """Whether the aperture at each lattice position is whole on the detector.
+
+    Shape (W, 2 ny, 2 nx): a band's aperture of ``radius_pix`` pixels at
+    detector position (i / 2, j / 2) lies inside the pixel edges.
+    """
+    inside = [
+        (jnp.arange(2 * n) / 2 - radius_pix[:, None] >= -0.5)
+        & (jnp.arange(2 * n) / 2 + radius_pix[:, None] <= n - 0.5)
+        for n in (ny, nx)
+    ]
+    return inside[0][:, :, None] & inside[1][:, None, :]
+
+
 def _lattice(maps, kernels, radius_pix):
-    """Sum per-pixel maps (W, B, ny, nx) in apertures, to (2, W, B, 2 ny, 2 nx)."""
+    """Sum per-pixel maps (W, B, ny, nx) in apertures, to (2, W, B, 2 ny, 2 nx).
+
+    An aperture cut by the detector edge has no complete sum and reads zero.
+    """
     n_bands, n_maps, ny, nx = maps.shape
     size = kernels.shape[-1]
     bands = []
@@ -397,13 +440,8 @@ def _lattice(maps, kernels, radius_pix):
             padding="SAME",
         ).reshape(n_maps, 2, 2, 2, ny, nx)
         sums = sums.transpose(1, 0, 4, 2, 5, 3).reshape(2, n_maps, 2 * ny, 2 * nx)
-        # An aperture cut by the detector edge has no complete sum.
-        inside = [
-            (jnp.arange(2 * n) / 2 - radius_pix[w] >= -0.5)
-            & (jnp.arange(2 * n) / 2 + radius_pix[w] <= n - 0.5)
-            for n in (ny, nx)
-        ]
-        bands.append(jnp.where(inside[0][:, None] & inside[1], sums, jnp.nan))
+        inside = _on_detector(radius_pix[w : w + 1], ny, nx)[0]
+        bands.append(jnp.where(inside, sums, 0.0))
     return jnp.stack(bands, axis=1)
 
 
@@ -476,6 +514,14 @@ def aperture_record(
     n_pix = _lattice(
         jnp.ones((n_bands, 1, *shape)), response.kernels, response.radius_pix
     )[:, :, 0]
+    # An aperture is unsupported when it leaves the detector or any pixel under
+    # it is: the weighted count of unsupported pixels is positive.
+    bad = _lattice(
+        (~images.supported).astype(float)[:, None],
+        response.kernels,
+        response.radius_pix,
+    )[0, :, 0]
+    unsupported = ~_on_detector(response.radius_pix, *shape) | (bad > 0)
 
     def per_contrast(wavelength_nm):
         gain = instrument.effective_area_m2(wavelength_nm)
@@ -494,6 +540,8 @@ def aperture_record(
         uniform_sky,
         exozodi,
         n_pix,
+        unsupported.astype(float),
+        (~response.throughput_supported).astype(float),
         images.thermal[:, :, 0, 0],
         scene.local_zodi,
         scene.sky_frame,
@@ -511,25 +559,36 @@ def aperture_record(
 
 
 def _linear(table, position):
-    """Read the last axis of a table at a fractional index; NaN outside it."""
+    """Read the last axis of a table at a fractional index.
+
+    Returns the value and whether the position lies inside the table. The
+    read clamps to the table, so the value is finite and its gradient exact
+    everywhere; outside the table it is the edge's linear continuation and the
+    caller replaces it.
+    """
     last = table.shape[-1] - 1
     k = jnp.clip(jnp.floor(position), 0, last - 1).astype(int)
     pair = jax.lax.dynamic_slice_in_dim(table, k, 2, axis=-1)
     value = pair[..., 0] + (position - k) * (pair[..., 1] - pair[..., 0])
-    return jnp.where((position >= 0) & (position <= last), value, jnp.nan)
+    return value, (position >= 0) & (position <= last)
 
 
 def _bilinear(table, row, column):
-    """Read the last two axes of a table at a fractional index; NaN outside."""
+    """Read the last two axes of a table at a fractional index.
+
+    Returns the value and whether the position lies inside the table, as
+    :func:`_linear` does.
+    """
     lead = table.shape[:-2]
     last_row, last_column = table.shape[-2] - 1, table.shape[-1] - 1
     i = jnp.clip(jnp.floor(row), 0, last_row - 1).astype(int)
     j = jnp.clip(jnp.floor(column), 0, last_column - 1).astype(int)
     # One slice of the four neighbours, so a read never touches a full map.
     corners = jax.lax.dynamic_slice(table, (*(0,) * len(lead), i, j), (*lead, 2, 2))
-    value = _linear(_linear(corners, column - j), row - i)
+    value, _ = _linear(corners, column - j)
+    value, _ = _linear(value, row - i)
     inside = (row >= 0) & (row <= last_row) & (column >= 0) & (column <= last_column)
-    return jnp.where(inside, value, jnp.nan)
+    return value, inside
 
 
 def aperture_rates(
@@ -568,9 +627,12 @@ def aperture_rates(
     :func:`optixstuff.snr` or :func:`optixstuff.exposure_time`, or to
     ``detector.electrons``. Planet rates are linear in separation between the
     response's rings; backgrounds are bilinear between half-pixel
-    positions. Everything is NaN where the aperture leaves the detector or the
-    separation leaves the planet table. Thermal is the per-pixel rate of the
-    record times ``n_pix``; companion terms are zero.
+    positions. A read is supported when the aperture is on the detector, every
+    pixel under it is supported on the image path and the separation lies in the
+    planet table at positions the coronagraph tabulates, at every node of the
+    band. Otherwise every field is zero and ``supported`` (shape (W,)) is False.
+    Thermal is the per-pixel rate of the record times ``n_pix``; companion
+    terms are zero.
 
     All arguments are scalars apart from ``contrast``. Batch with
     ``jax.vmap``; a ``time_d`` shared by a batch of planets (``in_axes`` None,
@@ -589,29 +651,46 @@ def aperture_rates(
 
     fixed = lattice_index(record.roll_deg)
     here = fixed if roll_deg is None else lattice_index(roll_deg)
-    star_leakage = _bilinear(record.star_leakage, *here)
-    local_zodi = _bilinear(record.uniform_sky, *here)
-    exozodi = _bilinear(record.exozodi, *fixed)
-    n_pix = _bilinear(record.n_pix, *here)
+    star_leakage, inside_here = _bilinear(record.star_leakage, *here)
+    local_zodi, _ = _bilinear(record.uniform_sky, *here)
+    exozodi, inside_fixed = _bilinear(record.exozodi, *fixed)
+    n_pix, _ = _bilinear(record.n_pix, *here)
+    bad_here, _ = _bilinear(record.unsupported, *here)
+    bad_fixed, _ = _bilinear(record.unsupported, *fixed)
     if record.local_zodi is not None:
         local_zodi = local_zodi * record.local_zodi.photon_radiance(
             record.quadrature.nodes_nm, record.sky_frame, time_d
         )
-    planet = contrast * _linear(
-        record.planet_per_contrast, separation / record.separation_step_arcsec
+    position = separation / record.separation_step_arcsec
+    planet_per_contrast, in_table = _linear(record.planet_per_contrast, position)
+    planet = contrast * planet_per_contrast
+    bad_ring, _ = _linear(record.planet_unsupported, position)
+    supported = (
+        inside_here
+        & inside_fixed
+        & in_table
+        & (bad_here == 0)
+        & (bad_fixed == 0)
+        & jnp.all(bad_ring == 0, axis=-1)
     )
+
+    def zero(x):
+        return jnp.where(
+            supported.reshape(supported.shape + (1,) * (x.ndim - 1)), x, 0.0
+        )
 
     def rates(moment, variance=None):
         return Rates(
             record.quadrature,
             "photon",
-            planet=planet[moment],
-            star_leakage=star_leakage[moment],
-            local_zodi=local_zodi[moment],
-            exozodi=exozodi[moment],
-            thermal=record.thermal * n_pix[moment][:, None],
-            n_pix=n_pix[moment],
+            planet=zero(planet[moment]),
+            star_leakage=zero(star_leakage[moment]),
+            local_zodi=zero(local_zodi[moment]),
+            exozodi=zero(exozodi[moment]),
+            thermal=zero(record.thermal * n_pix[moment][:, None]),
+            n_pix=zero(n_pix[moment]),
             variance=variance,
+            supported=supported,
         )
 
     return rates(0, rates(1))
@@ -640,6 +719,8 @@ def scene_aperture_rates(
     to :func:`optixstuff.snr` or :func:`optixstuff.exposure_time`, which return
     one value per band, planet and time. A planet with ``scene.valid`` False
     reads zero in every field, so its exposure time is invalid, not a number.
+    ``supported`` has shape ``(W, K, T)``: False where the read is outside what
+    the coronagraph data hold (see :func:`aperture_rates`), with zero fields.
     A scene with a batch of systems is not read; map this function over them.
     """
     time_d = jnp.asarray(time_d)
@@ -661,6 +742,7 @@ def scene_aperture_rates(
             (
                 *(getattr(r, name) for name in _READ_FIELDS),
                 r.n_pix,
+                r.supported,
             )
             for r in (rates, rates.variance)
         )
@@ -671,13 +753,15 @@ def scene_aperture_rates(
     )
 
     def rates(values, variance=None):
-        *fields, n_pix = (jnp.where(scene.valid[:, None], v, 0.0) for v in values)
+        *fields, n_pix, supported = values
+        fields = [jnp.where(scene.valid[:, None], v, 0.0) for v in fields]
         return Rates(
             record.quadrature,
             "photon",
             **dict(zip(_READ_FIELDS, fields, strict=True)),
-            n_pix=n_pix,
+            n_pix=jnp.where(scene.valid[:, None], n_pix, 0.0),
             variance=variance,
+            supported=supported,
         )
 
     return rates(mean, rates(variance))

@@ -403,21 +403,25 @@ def test_read_under_jax_transformations(sloped):
 
 @vv.case("aperture-photon-budget", "code-verification")
 def test_reads_outside_the_tables_and_unsupported_builds(sloped):
-    """Fails if a read outside the tables returns a number or a bad build passes.
+    """Fails if a read outside the tables returns light or a bad build passes.
 
-    Basis: exact. NaN marks every field, clears ``valid`` downstream, and a
-    rule or quadrature the tables cannot represent raises at build time.
+    Basis: exact. An unsupported read is zero in every field with ``supported``
+    False, so ``snr`` is NaN and ``valid`` clears downstream, and a rule or
+    quadrature the tables cannot represent raises at build time.
     """
     scene, instrument, exposure, response, record = sloped
     detector = instrument.detector
     last = float(response.separation_step_arcsec) * 8
     inside = cp.aperture_rates(record, *_offsets(0.5 * last, 0.0), 1e-10, time_d=0.0)
     assert np.all(np.isfinite(inside.planet)) and np.all(np.isfinite(inside.n_pix))
+    assert np.all(inside.supported) and np.all(inside.planet > 0)
     for separation in (1.01 * last, np.nan):
         outside = cp.aperture_rates(
             record, *_offsets(separation, 0.0), 1e-10, time_d=0.0
         )
-        assert np.all(np.isnan(outside.planet))
+        assert not np.any(outside.supported)
+        for field in (outside.planet, outside.star_leakage, outside.n_pix):
+            assert np.all(np.asarray(field) == 0.0)
         assert np.isnan(
             ox.snr(
                 outside,
@@ -434,7 +438,9 @@ def test_reads_outside_the_tables_and_unsupported_builds(sloped):
     # The aperture leaves the detector before the pixel centre does.
     half = 24 * float(detector.pixel_scale_arcsec)
     edge = cp.aperture_rates(record, *_offsets(half * 0.99, 90.0), 1e-10, time_d=0.0)
-    assert np.all(np.isnan(edge.star_leakage)) and np.all(np.isnan(edge.n_pix))
+    assert not np.any(edge.supported)
+    assert np.all(np.asarray(edge.star_leakage) == 0.0)
+    assert np.all(np.asarray(edge.n_pix) == 0.0)
 
     for rule in (HalfMaximum(), Circular(0.7, centre="peak")):
         with pytest.raises(NotImplementedError, match="Circular"):
@@ -677,7 +683,8 @@ def test_thermal_record_and_scene_read(plateau):
     assert np.all(np.asarray(rates.thermal[..., 1, :]) == 0.0)
     assert np.all(np.asarray(rates.thermal[..., 0, :]) > 0.0)
     off = cp.aperture_rates(record, 1.0, 1.0, 1e-10, time_d=0.0)
-    assert np.all(np.isnan(np.asarray(off.thermal)))
+    assert not np.any(off.supported)
+    np.testing.assert_array_equal(off.thermal, 0.0)
     cold_record = cp.aperture_record(scene, cold, exposure, response)
     np.testing.assert_array_equal(cold_record.thermal, 0.0)
     cold_rates = cp.scene_aperture_rates(cold_record, scene, times)
@@ -881,3 +888,106 @@ def test_response_throughput_matches_stored_curve(tmp_path):
     expected = np.asarray(coro.curves().evaluate("throughput", sep_lod))
     got = np.asarray(response.throughput)[0, 0].mean(axis=0)
     np.testing.assert_allclose(got, expected, rtol=2e-2, atol=7e-3)
+
+
+@vv.case("aperture-photon-budget", "code-verification")
+def test_reads_beyond_the_stamp_are_zero_and_unsupported():
+    """Fails if an aperture on unmodeled pixels reads light or is not flagged.
+
+    Detector twice the table (48 pixels of 0.25 lambda/D, table half-width
+    3 lambda/D). An aperture of radius 0.7 lambda/D centred inside the stamp
+    reads positive star leakage with ``supported`` True; centred at 4.5
+    lambda/D, wholly beyond the stamp but on the detector, every field is
+    exactly zero with ``supported`` False. A grid of centres across the stamp
+    edge is supported exactly when its aperture lies within the 2.875
+    lambda/D the linear products cover. Basis: exact.
+    """
+    from conftest import GaussianCoronagraph
+
+    instrument = _instrument(GaussianCoronagraph(24, 0.25))
+    instrument = eqx.tree_at(
+        lambda p: p.detector,
+        instrument,
+        Detector(
+            pixel_scale_arcsec=0.25
+            * float(instrument.coronagraph.grid.frame.lod_to_arcsec(550.0)),
+            shape=(48, 48),
+            qe=1.0,
+        ),
+    )
+    scale = float(instrument.coronagraph.grid.frame.lod_to_arcsec(550.0))
+    scene = make_system(separation_arcsec=1.0 * scale)
+    exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0)
+    response = cp.aperture_response(
+        instrument, exposure.quadrature, n_separations=21, n_angles=8
+    )
+    record = cp.aperture_record(scene, instrument, exposure, response)
+
+    def read(separation_lod):
+        return cp.aperture_rates(record, separation_lod * scale, 0.0, 1e-10, time_d=0.0)
+
+    near = read(1.0)
+    assert bool(near.supported.all()) and np.all(np.asarray(near.star_leakage) > 0)
+    far = read(4.5)
+    assert not np.any(far.supported)
+    for name in ("planet", "star_leakage", "local_zodi", "exozodi", "thermal", "n_pix"):
+        np.testing.assert_array_equal(getattr(far, name), 0.0)
+        np.testing.assert_array_equal(getattr(far.variance, name), 0.0)
+    # The aperture is inside the support while centre + 0.7 <= 2.875, at every
+    # node (the footprint at the blue node of the band is the binding one).
+    blue = float(
+        instrument.coronagraph.grid.frame.lod_to_arcsec(
+            exposure.quadrature.nodes_nm.min()
+        )
+    )
+    limit = (2.875 * blue / scale) - 0.7
+    centres = np.linspace(0.5, 3.8, 12)
+    flags = np.array([bool(read(c).supported.all()) for c in centres])
+    np.testing.assert_array_equal(flags, centres <= limit + 1e-9)
+    assert flags.any() and not flags.all()
+
+
+@pytest.mark.medium(reason="YIP load and a 12-ring response, 6 s cold")
+@vv.case("aperture-photon-budget", "code-verification")
+def test_planet_beyond_the_hull_reads_zero_and_unsupported(tmp_path):
+    """Fails if a planet beyond the coronagraph's source nodes reads light.
+
+    A synthetic YIP whose source nodes fill a square of half-width 3 lambda/D
+    (its corner is 4.2) on a detector that holds an aperture at 5 lambda/D,
+    still inside the 6 lambda/D stamp the pixels cover. Before, the record
+    route read the planet's tabulated ring as zero without a flag; the planet
+    is now unsupported there alone: its ring is flagged, every field is zero,
+    and a planet at 2.6 lambda/D on the same record reads positive and
+    supported. A ring is supported when every azimuth of it is inside the
+    nodes, so the table flags rings by the hull's inscribed radius. Basis:
+    exact.
+    """
+    coro = open_yip(write_yip(tmp_path / "yip")).prepare(rules=(_RULE,))
+    scale = float(coro.frame.lod_to_arcsec(550.0))
+    instrument = Instrument(
+        primary=SimplePrimary(
+            circumscribed_diameter_m=coro.frame.diameter_m, collecting_area_m2=10.0
+        ),
+        attenuating_elements=(ConstantThroughput(throughput=1.0),),
+        coronagraph=coro,
+        detector=Detector(pixel_scale_arcsec=0.1 * scale, shape=(128, 128), qe=1.0),
+    )
+    scene = make_system(separation_arcsec=2.6 * scale)
+    exposure = cp.build_exposure(scene, instrument, (Band(549.0, 551.0),), time_d=0.0)
+    response = cp.aperture_response(
+        instrument,
+        exposure.quadrature,
+        n_separations=12,
+        n_angles=8,
+        max_separation_arcsec=5.5 * scale,
+    )
+    rings = np.asarray(response.throughput_supported)[0, 0]
+    step_lod = float(response.separation_step_arcsec) / scale
+    np.testing.assert_array_equal(rings, np.arange(12) * step_lod <= 3.0)
+    record = cp.aperture_record(scene, instrument, exposure, response)
+    inner = cp.aperture_rates(record, 2.6 * scale, 0.0, 1e-10, time_d=0.0)
+    outer = cp.aperture_rates(record, 5.0 * scale, 0.0, 1e-10, time_d=0.0)
+    assert bool(inner.supported.all()) and np.all(np.asarray(inner.planet) > 0)
+    assert not np.any(outer.supported)
+    for name in ("planet", "star_leakage", "local_zodi", "n_pix"):
+        np.testing.assert_array_equal(getattr(outer, name), 0.0)

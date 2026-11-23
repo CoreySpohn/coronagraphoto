@@ -103,7 +103,10 @@ def test_record_meets_the_planner_budget(tmp_path):
 
     rng = np.random.default_rng(0)
     shape = (4000, 10)
-    last = float(response.separation_step_arcsec) * 32
+    # The synthetic table has 33 rings but its source nodes end inside the
+    # last ones: draw within the rings the coronagraph supports.
+    rings = np.flatnonzero(np.asarray(response.throughput_supported).all(axis=(0, 1)))
+    last = float(response.separation_step_arcsec) * int(rings.max())
     separations = jnp.asarray(rng.uniform(0.05 * last, 0.95 * last, shape))
     angles = jnp.deg2rad(jnp.asarray(rng.uniform(0.0, 360.0, shape)))
     easts, norths = separations * jnp.sin(angles), separations * jnp.cos(angles)
@@ -128,8 +131,8 @@ def test_record_meets_the_planner_budget(tmp_path):
         f"per read, build {build_s:.3f} s (first {first_build_s:.2f} s), "
         f"one exposure {exposure_s:.2e} s, response {response_s:.1f} s"
     )
-    # The timed reads are real: every draw lies inside the tables, and the
-    # local zodi they scale is neither absent nor the same at every time.
+    # The timed reads are real: every draw lies inside the supported tables, and
+    # the local zodi they scale is neither absent nor the same at every time.
     assert np.all(np.isfinite(batched(*planets, 200.0)[0]))
     assert np.all(np.isfinite(each(*planets, every)[0]))
     zodi = jax.vmap(
