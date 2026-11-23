@@ -1034,6 +1034,7 @@ def test_curves_and_record_routes_agree_on_the_flag_across_the_stamp_edge():
     )
     record = cp.aperture_record(scene, instrument, exposure, response)
     curves = instrument.coronagraph.curves()
+    sources = scene.sources(exposure.quadrature, exposure.resolution, 0.0)
 
     def flags(east_lod, north_lod):
         east, north = east_lod * scale, north_lod * scale
@@ -1047,6 +1048,7 @@ def test_curves_and_record_routes_agree_on_the_flag_across_the_stamp_edge():
             north,
             1e-10,
             time_d=0.0,
+            sources=sources,
             uniform_sky=None,
         )
         for rates in (image, analytic):

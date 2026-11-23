@@ -165,6 +165,9 @@ class Case:
         )
         self.record = cp.aperture_record(system, self.path, self.exposure, response)
         self.curves = coro.curves(RULE)
+        self.sources = system.sources(
+            self.exposure.quadrature, self.exposure.resolution, 0.0
+        )
 
     @property
     def quadrature(self):
@@ -190,6 +193,7 @@ class Case:
             north,
             CONTRAST,
             time_d=0.0,
+            sources=self.sources,
             uniform_sky=self.coro.uniform_sky_profile,
         )
         return analytic, image
