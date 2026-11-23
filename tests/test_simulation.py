@@ -331,6 +331,70 @@ def test_disk_render_does_not_depend_on_detector_extent():
     np.testing.assert_allclose(small, crop, rtol=0, atol=1e-10 * crop.max())
 
 
+def test_disk_reaches_the_operator_on_its_scene_grid():
+    """Fails if disk cells beyond the stored PSF grid never reach the operator.
+
+    A coronagraph whose ``scene_grid`` pads its 24-pixel PSF grid by 8 cells
+    a side (its source domain reaches past the stamp). The disk handed to
+    ``render_scene`` must be on that grid, carry light in the pad, and equal
+    the stamp-grid disk cell for cell inside the stamp. Before the disk was
+    built on the stored PSF grid, so the pad was structurally empty. Basis:
+    the interior cells integrate the same float64 radiance samples, so they
+    agree to rounding (1e-12 relative); the pad holds 9.1 % of this disk's
+    light (spike), bounded below at 5 %.
+    """
+    from dataclasses import replace
+
+    import equinox as eqx
+    import jax
+    from conftest import GaussianSceneCoronagraph, make_path, make_system
+    from optixstuff.spectral import Band
+    from skyscapes.disk import AYOExozodi
+
+    import coronagraphoto as cp
+
+    n, pad = 24, 8
+    seen = {}
+
+    class Wide(GaussianSceneCoronagraph):
+        @property
+        def scene_grid(self):
+            g = self.grid
+            return replace(
+                g,
+                shape=(n + 2 * pad,) * 2,
+                center_x=g.center_x + pad,
+                center_y=g.center_y + pad,
+            )
+
+        def render_scene(self, scene, wavelength_nm, *, grid):
+            seen.setdefault(type(self).__name__, scene)
+            return super().render_scene(scene, wavelength_nm, grid=grid)
+
+    class Stamp(GaussianSceneCoronagraph):
+        def render_scene(self, scene, wavelength_nm, *, grid):
+            seen.setdefault(type(self).__name__, scene)
+            return super().render_scene(scene, wavelength_nm, grid=grid)
+
+    scene = make_system(disk=AYOExozodi(level_zodis=3.0))
+    bands = (Band(500.0, 600.0),)
+    base = make_path(n=n, cube=True)
+    for model in (Wide, Stamp):
+        path = eqx.tree_at(lambda p: p.coronagraph, base, model(n, 0.25))
+        with jax.disable_jit():
+            exposure = cp.build_exposure(scene, path, bands, time_d=0.0, order=1)
+            cp.photon_rates(scene, path, exposure)
+
+    wide, stamp = seen["Wide"], seen["Stamp"]
+    assert wide.grid.shape == (n + 2 * pad,) * 2 and stamp.grid.shape == (n, n)
+    data = np.asarray(wide.data)
+    interior = data[pad:-pad, pad:-pad]
+    outside = data.sum() - interior.sum()
+    print(f"pad share of the disk {outside / data.sum():.3f}")
+    assert outside > 0.05 * data.sum()
+    np.testing.assert_allclose(interior, np.asarray(stamp.data), rtol=1e-12, atol=0)
+
+
 def test_pixels_beyond_the_tables_are_zero_and_unsupported():
     """Fails if light is invented beyond the tables or support ignores a node.
 

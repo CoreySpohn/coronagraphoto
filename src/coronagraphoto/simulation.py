@@ -175,17 +175,19 @@ def _node_rates(
     if system.disk is not None:
         # The scene operator places each source cell's flux at the cell centre,
         # so it needs the cell integral of the disk, not a midpoint sample.
-        # Evaluated on the coronagraph's source grid, refined by an integer
-        # factor and summed back to source cells, so sky just off the detector
-        # still scatters onto it.
-        fine = _refined(native, _DISK_SUBSAMPLE)
+        # Evaluated on the operator's own source grid (which reaches the edge
+        # of its source domain, beyond the stored PSF grid), refined by an
+        # integer factor and summed back to source cells, so sky off the
+        # detector still scatters onto it.
+        sources = coro.scene_grid
+        fine = _refined(sources, _DISK_SUBSAMPLE)
         radiance = system.photon_radiance(
             wavelength_nm,
             time_d,
             grid=replace(fine.to_arcsec(wavelength_nm), orientation=grid.orientation),
         )
         scene = integrate_footprints(
-            replace(radiance.integrated(), grid=fine), footprint_overlap(fine, native)
+            replace(radiance.integrated(), grid=fine), footprint_overlap(fine, sources)
         )
         rendered = coro.render_scene(scene, wavelength_nm, grid=detector_pixels(native))
         disk = gain * rendered.image.data

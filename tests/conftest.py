@@ -246,6 +246,11 @@ class GaussianSceneCoronagraph(GaussianCoronagraph, AbstractSceneCoronagraph):
             psfs.image.data.reshape(n, n, n, n), psfs.valid.reshape(n, n)
         )
 
+    @property
+    def scene_grid(self):
+        """The dense operator reads the stored PSF grid."""
+        return self.grid
+
     def render_scene(self, scene, wavelength_nm, *, grid):
         """Apply the dense operator to per-pixel incident flux."""
         flux = resample(scene, self.grid).data
