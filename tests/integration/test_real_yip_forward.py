@@ -4,8 +4,8 @@ import equinox as eqx
 import jax
 import numpy as np
 import pytest
-from conftest import make_path, write_scene, write_yip
-from optixstuff import Exposure, FramePlan
+from conftest import exposure_for, make_path, write_scene, write_yip
+from optixstuff import FramePlan
 from optixstuff.spectral import Band, Quadrature
 from skyscapes import from_exovista
 from yippy import open_yip
@@ -30,7 +30,7 @@ def test_fits_scene_yip_observation(tmp_path):
     path = eqx.tree_at(lambda p: p.coronagraph, make_path(n=24, step=0.5), coro)
     q = Quadrature.build((Band(545.0, 555.0),), scene, path, order=1)
     plan = FramePlan(10.0, 1.0)
-    exposure = Exposure(time_d=0.0, roll_deg=0, quadrature=q, plan=plan)
+    exposure = exposure_for(scene, q, plan=plan)
     rates = expected(scene, path, exposure)
     assert float(rates.planet.sum()) > 0
     assert float(rates.local_zodi.sum()) > 0
@@ -55,8 +55,9 @@ def _yip_setup(tmp_path):
     """A synthetic YIP (source nodes to 3 lambda/D) on a detector inside its stamp."""
     coro = open_yip(write_yip(tmp_path / "yip")).prepare()
     path = eqx.tree_at(lambda p: p.coronagraph, make_path(n=24, step=0.5), coro)
-    quadrature = Quadrature.build((Band(549.5, 550.5),), scene_for(0.5), path, order=1)
-    return coro, path, Exposure(time_d=0.0, roll_deg=0, quadrature=quadrature)
+    scene = scene_for(0.5)
+    quadrature = Quadrature.build((Band(549.5, 550.5),), scene, path, order=1)
+    return coro, path, exposure_for(scene, quadrature)
 
 
 @pytest.mark.medium(reason="synthetic YIP load and two programs for 1 and 2 planets")

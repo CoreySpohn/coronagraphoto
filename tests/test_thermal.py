@@ -40,7 +40,9 @@ def test_thermal_image_is_the_uniform_closed_form():
     (the path has throughput 0.4), and add to the electron rates and the
     drawn frame. Without warm emission every field is an exact zero.
     """
-    scene = make_system()
+    # The planet table covers the 1400 to 1500 nm band; a band that leaves a
+    # table is refused when the exposure is built.
+    scene = make_system(wavelengths_nm=(400.0, 700.0, 1400.0, 1500.0, 1600.0))
     cold = make_path(detector_n=16, detector_step=0.3)
     instrument = _warm(cold, 290.0, 0.5)
     exposure = cp.build_exposure(

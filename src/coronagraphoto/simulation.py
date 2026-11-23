@@ -34,7 +34,7 @@ from optixstuff.grids import (
     integrate_footprints,
     resample,
 )
-from optixstuff.spectral import Band, Quadrature
+from optixstuff.spectral import Band, Quadrature, Resolution
 from skyscapes import Scene
 
 
@@ -70,19 +70,21 @@ def _node_rates(
     instrument,
     time_d,
     grid,
-    ephemeris,
     positions,
-    sky_radiance,
+    node,
 ):
     """Render one node; detector yield never enters this photon calculation.
 
-    ``sky_radiance`` is the local-zodi radiance at this node in photons s^-1
-    m^-2 nm^-1 sr^-1, or None for no local zodi. Returns the component images
-    and the boolean (ny, nx) of detector pixels the coronagraph data cover at
-    this node: the AND of ``coverage`` over every product the render reads,
-    each with the reach of the read ``resample`` performs. Nothing is reflected or
-    extrapolated, so the light at an uncovered pixel is not modeled; the
-    caller zeroes it.
+    ``node`` holds this node's row of ``Scene.sources``: ``star`` (the
+    node-effective stellar photon flux density, with its scale), ``planets``
+    (one node-effective photon flux density per planet), ``sky_radiance`` (the
+    local-zodi radiance in photons s^-1 m^-2 nm^-1 sr^-1, or None for no local
+    zodi) and ``node_star``, the star the disk is rendered against. Returns the
+    component images and the boolean (ny, nx) of detector pixels the coronagraph
+    data cover at this node: the AND of ``coverage`` over every product the render
+    reads, each with the reach of the read ``resample`` performs. Nothing is
+    reflected or extrapolated, so the light at an uncovered pixel is not
+    modeled; the caller zeroes it.
     """
     speckle = instrument.speckle
     products = coro.at_wavelength(wavelength_nm)
@@ -107,9 +109,8 @@ def _node_rates(
         )
         return resample(replace(image, grid=product_grid), grid).data
 
-    star = system.star
-    phi_star = star.photon_flux_density(wavelength_nm, time_d, dist_pc=system.dist_pc)
-    diameter = star.angular_diameter_arcsec(system.dist_pc)
+    phi_star = node["star"]
+    diameter = system.star.angular_diameter_arcsec(system.dist_pc)
     stellar = coro.stellar_map(
         wavelength_nm,
         diameter / products.stellar_grid.frame.lod_to_arcsec(wavelength_nm),
@@ -140,9 +141,7 @@ def _node_rates(
     planet = jnp.zeros(grid.shape)
     if positions is not None:
         x, y = grid.orientation.sky_to_detector(positions[0], positions[1])
-        phi = system.planet_flux_densities(
-            wavelength_nm, jnp.atleast_1d(time_d), ephemeris=ephemeris
-        )[:, 0]
+        phi = node["planets"]
         psfs = coro.source_psfs(
             wavelength_nm, x / lod_arcsec, y / lod_arcsec, grid=detector_pixels(native)
         )
@@ -153,6 +152,7 @@ def _node_rates(
         planet = gain * jnp.einsum("k,kyx->yx", phi, samples)
 
     local = jnp.zeros(grid.shape)
+    sky_radiance = node["sky_radiance"]
     if sky_radiance is not None:
         sky_map = coro.uniform_sky_map(
             wavelength_nm, grid=detector_pixels(products.sky_grid)
@@ -187,6 +187,7 @@ def _node_rates(
             wavelength_nm,
             time_d,
             grid=replace(fine.to_arcsec(wavelength_nm), orientation=grid.orientation),
+            star=node["node_star"],
         )
         scene = integrate_footprints(
             replace(radiance.integrated(), grid=fine), footprint_overlap(fine, sources)
@@ -249,54 +250,74 @@ def _band_ids(instrument, scene, quadrature):
 
 
 def _node_function(models, scene, instrument, exposure, grid, planets, uniform_sky):
-    """Return node(w): the rates and pixel support at one traced wavelength.
+    """Return node(w, i, j): the rates and pixel support at one node.
 
-    Works for any model count; the result is ``(components, supported)``.
+    ``w`` is the traced node wavelength and ``(i, j)`` its band and node index
+    in the exposure's quadrature. The sources are read once, on the exposure's
+    quadrature and resolution, and each node takes its row. Works for any model
+    count; the result is ``(components, supported)``.
 
     With ``planets`` False no planet is propagated or rendered and the planet
-    term is zero. The local zodi is the scene model's radiance for the scene's
-    sky frame at the observation time; with ``uniform_sky`` it is one photon
-    s^-1 m^-2 nm^-1 sr^-1 at every wavelength (still absent when the scene has
-    no local zodi).
+    term is zero. The local zodi is the scene model's node-effective radiance
+    for the scene's sky frame at the observation time; with ``uniform_sky`` it
+    is one photon s^-1 m^-2 nm^-1 sr^-1 at every wavelength (still absent when
+    the scene has no local zodi).
     """
     system, zodi = scene, scene.local_zodi
     time_d = jnp.asarray(exposure.time_d)
-
-    def sky_radiance(w):
-        if zodi is None:
-            return None
-        if uniform_sky:
-            return jnp.ones_like(w)
-        return zodi.photon_radiance(w, system.sky_frame, time_d)
 
     ephemeris, positions = None, None
     if planets and system.planets:
         times = jnp.atleast_1d(time_d)
         ephemeris = system.ephemeris(times)
         positions = system.positions(times, ephemeris=ephemeris)[:, :, 0]
+    # A uniform sky reads no zodi, so a model that needs a sightline is not
+    # asked for one.
+    read = (
+        eqx.tree_at(lambda s: s.local_zodi, system, None, is_leaf=lambda x: x is None)
+        if uniform_sky
+        else system
+    )
+    sources = read.sources(
+        exposure.quadrature,
+        exposure.resolution,
+        jnp.atleast_1d(time_d),
+        ephemeris=ephemeris,
+    )
+    star_nodes, planet_nodes, zodi_nodes = (
+        sources.star[..., 0],
+        sources.planets[..., 0],
+        None if zodi is None or uniform_sky else sources.local_zodi[..., 0],
+    )
+
+    def row(w, i, j):
+        if zodi is None:
+            sky = None
+        elif uniform_sky:
+            sky = jnp.ones_like(w)
+        else:
+            sky = zodi_nodes[i, j]
+        return dict(
+            star=star_nodes[i, j],
+            planets=planet_nodes[i, j],
+            sky_radiance=sky,
+            node_star=sources.node_star(i, j),
+        )
 
     def with_model(model):
-        return lambda w: _node_rates(
-            w,
-            model,
-            system,
-            instrument,
-            time_d,
-            grid,
-            ephemeris,
-            positions,
-            sky_radiance(w),
+        return lambda w, i, j: _node_rates(
+            w, model, system, instrument, time_d, grid, positions, row(w, i, j)
         )
 
     if len(models) == 1:
         return with_model(models[0])
 
-    def node(w):
+    def node(w, i, j):
         covered = jnp.stack(
             [(m.bandpass.low_nm <= w) & (w <= m.bandpass.high_nm) for m in models]
         )
         rates, supported = jax.lax.switch(
-            jnp.argmax(covered), [with_model(m) for m in models], w
+            jnp.argmax(covered), [with_model(m) for m in models], w, i, j
         )
         # A node outside every declared band has no performance model.
         return (
@@ -349,8 +370,12 @@ def _render(scene, instrument, exposure, *, kind, band_ids, planets, uniform_sky
         models, scene, instrument, exposure, grid, planets, uniform_sky
     )
     if kind == "photons":
-        values, covered = jax.lax.map(node, quadrature.nodes_nm.ravel())
         shape = quadrature.nodes_nm.shape
+        bands, nodes = jnp.indices(shape)
+        values, covered = jax.lax.map(
+            lambda x: node(*x),
+            (quadrature.nodes_nm.ravel(), bands.ravel(), nodes.ravel()),
+        )
         values = jax.tree.map(lambda x: x.reshape((*shape, *grid.shape)), values)
         supported = jnp.all(covered.reshape((*shape, *grid.shape)), axis=1)
         return _zero_unsupported(values, supported[:, None]), supported
@@ -363,8 +388,8 @@ def _render(scene, instrument, exposure, *, kind, band_ids, planets, uniform_sky
 
         def step(carry, node_and_weight):
             total, supported = carry
-            w, weight = node_and_weight
-            components, covered = node(w)
+            w, weight, j = node_and_weight
+            components, covered = node(w, i, j)
             single = Quadrature(row.bands, w[None, None], weight[None, None])
             photons = Rates(
                 single, "photon", **jax.tree.map(lambda x: x[None, None], components)
@@ -375,7 +400,7 @@ def _render(scene, instrument, exposure, *, kind, band_ids, planets, uniform_sky
                 supported & covered,
             ), None
 
-        xs = (row.nodes_nm[0], row.weights("response")[0])
+        xs = (row.nodes_nm[0], row.weights()[0], jnp.arange(row.nodes_nm.shape[1]))
         initial_support = jnp.ones(grid.shape, bool)
         total, supported = jax.lax.scan(step, (initial, initial_support), xs)[0]
         return _zero_unsupported(total, supported), supported
@@ -410,6 +435,91 @@ def _run(scene, instrument, exposure, kind, *, planets=True, uniform_sky=False):
     return Rates(quadrature.bands, "electron", supported=supported, **values)
 
 
+def _dotted(key_path):
+    """The dotted path of a pytree key path, as ``Exposure.reads`` names leaves."""
+    out = ""
+    for key in key_path:
+        if isinstance(key, jax.tree_util.GetAttrKey):
+            out += ("." if out else "") + key.name
+        elif isinstance(key, jax.tree_util.SequenceKey):
+            out += f"[{key.idx}]"
+        else:
+            raise TypeError(f"cannot name the pytree key {key!r}")
+    return out
+
+
+def _knot_leaves(source, path):
+    """Paths, under ``path``, of the floating leaves that set a table's knots.
+
+    A leaf is a knot leaf when moving it moves ``spectral_breaks_nm()``; the
+    probe uses only that public method, so every kind of table is covered.
+    """
+    base = np.asarray(source.spectral_breaks_nm())
+    flat, treedef = jax.tree_util.tree_flatten_with_path(source)
+    found = []
+    for i, (key_path, leaf) in enumerate(flat):
+        if not (
+            isinstance(leaf, float)
+            or (
+                isinstance(leaf, jax.Array) and jnp.issubdtype(leaf.dtype, jnp.floating)
+            )
+        ):
+            continue
+        leaves = [x for _, x in flat]
+        leaves[i] = leaf * 1.07 + 0.013
+        moved = np.asarray(
+            jax.tree_util.tree_unflatten(treedef, leaves).spectral_breaks_nm()
+        )
+        if moved.shape != base.shape or not np.array_equal(moved, base):
+            found.append(".".join(filter(None, (path, _dotted(key_path)))))
+    return tuple(found)
+
+
+def _declared_reads(scene):
+    """Paths, relative to the scene, of the knot leaves the build reads."""
+    sources = [("star", scene.star)]
+    sources += [
+        (f"planets[{i}].physical_model", planet.physical_model)
+        for i, planet in enumerate(scene.planets)
+    ]
+    sources.append(("local_zodi", scene.local_zodi))
+    return tuple(
+        path
+        for name, source in sources
+        if getattr(source, "knot_digest", None) is not None
+        for path in _knot_leaves(source, name)
+    )
+
+
+def _resolve(scene, quadrature):
+    """Build the Resolution of a scene's tables on ``quadrature``, on the host.
+
+    The tables are resolved on the exposure's own quadrature. A disk calibrated
+    under the bolometric luminosity rule averages the star over a band, so each
+    such band gets a quadrature of its own, resolved for the star's table only:
+    the other tables need no rule on a band they do not cover.
+    """
+    tables = scene.spectral_tables()
+    resolution = Resolution.build(quadrature, *tables)
+    star = scene.star
+    if not any(table is star for table in tables):
+        return resolution
+    quadratures, keys, rules = (
+        list(resolution.quadratures),
+        list(resolution.keys),
+        list(resolution.rules),
+    )
+    for band in scene.calibration_bands():
+        extra = Quadrature.build((band,))
+        added = Resolution.build(extra, star)
+        quadratures.append(extra)
+        for key, rule in zip(added.keys, added.rules, strict=True):
+            if key not in keys:
+                keys.append(key)
+                rules.append(rule)
+    return Resolution(tuple(quadratures), tuple(keys), tuple(rules))
+
+
 def build_exposure(
     scene: Scene,
     instrument: Instrument,
@@ -419,39 +529,53 @@ def build_exposure(
     roll_deg=0.0,
     plan: FramePlan | None = None,
     order: int = 4,
+    field_lod=0.0,
 ) -> Exposure:
     """Build the host-side Exposure for one observation of a scene.
 
     Each band is split at the breaks the instrument and the scene's local zodi
-    declare, and an ``order``-point rule is applied to every piece (four nodes
-    per band when no break falls inside it). The star is left out of the
-    breaks. ``roll_deg`` is the position angle of detector +y, north through
-    east. ``plan`` is only needed by
+    declare, and a Gauss-Legendre rule of ``order`` nodes is applied to every
+    piece (four nodes per band when no break falls inside it). The star, the
+    planets and a tabulated local zodi are not breaks: the exposure also holds
+    the ``Resolution`` that reduces each tabulated spectrum of the scene on the
+    nodes, so a band integral of a rough stellar spectrum is exact in the
+    spectrum however few nodes the band has. ``roll_deg`` is the position angle
+    of detector +y, north through east. ``plan`` is only needed by
     :func:`observe`. The local zodi is evaluated at render time for the scene's
     sky frame and ``time_d``.
 
-    The build uses the scene only for the spectral breaks of its local zodi, a
-    constant of the zodi model, so no scene value is cached in the result and it
-    declares no read.
+    The build reads the knot grids of the scene's tables, and ``Exposure.reads``
+    names those leaves: a fit refuses to free one, and moving one after the
+    build is refused by the next build. No other scene value is cached in the
+    result. A band that leaves a table is refused here, naming the table and
+    its end; end the band at the table.
 
     Args:
-        scene: The scene, used only for the breaks of its local zodi.
+        scene: The scene, whose tabulated sources are resolved on the nodes.
         instrument: The instrument, which declares its own spectral breaks.
         bands: The bands to observe, each split and integrated separately.
         time_d: Observation time in days from the scene's epoch.
         roll_deg: Position angle of detector +y, in degrees.
         plan: The frame plan, needed only by :func:`observe`. None for none.
         order: Number of quadrature nodes in each piece of a band.
+        field_lod: Largest separation, in lambda/D at the band center, at which
+            the response is read; pieces the diffraction pattern slides across
+            get more nodes. Zero, the default, gives every piece ``order``
+            nodes.
 
     Returns:
-        The exposure holding the time, roll, wavelength quadrature and plan.
+        The exposure holding the time, roll, wavelength quadrature, its
+        resolution and the plan.
     """
     models = [m for m in (instrument, scene.local_zodi) if m is not None]
+    quadrature = Quadrature.build(bands, *models, order=order, field_lod=field_lod)
     return Exposure(
         time_d=time_d,
         roll_deg=roll_deg,
-        quadrature=Quadrature.build(bands, *models, order=order),
+        quadrature=quadrature,
         plan=plan,
+        resolution=_resolve(scene, quadrature),
+        reads=_declared_reads(scene),
     )
 
 

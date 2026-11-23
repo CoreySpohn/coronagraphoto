@@ -5,8 +5,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import make_path, make_system
-from optixstuff import Exposure, FramePlan
+from conftest import exposure_for, make_path, make_system
+from optixstuff import FramePlan
 from optixstuff.grids import Measure, SkyOrientation
 from optixstuff.spectral import Band, Quadrature
 
@@ -36,7 +36,7 @@ def test_draw_mean_and_reproducibility():
     q = Quadrature.build((Band(549.5, 550.5),), system, path, order=1)
     plan = FramePlan(10.0, 6.0)
     scene = system
-    exposure = Exposure(time_d=0.0, roll_deg=0, quadrature=q, plan=plan)
+    exposure = exposure_for(scene, q, plan=plan)
     electrons = expected(scene, path, exposure)
     mean, var = detector.mean_and_variance(electrons, plan)
     draw = eqx.filter_jit(lambda key: observe(key, scene, path, exposure))

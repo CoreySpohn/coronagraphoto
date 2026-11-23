@@ -78,7 +78,7 @@ import numpy as np
 import zodi
 from hwoutils.constants import Mearth2kg, Msun2kg
 from hwoutils.epoch import Epoch
-from optixstuff import ConstantThroughput, Detector, Instrument, SimplePrimary
+from optixstuff import ConstantThroughput, Detector, Exposure, Instrument, SimplePrimary
 from optixstuff.apertures import Circular
 from optixstuff.coronagraph import (
     AbstractSceneCoronagraph,
@@ -88,9 +88,9 @@ from optixstuff.coronagraph import (
 )
 from optixstuff.grids import Frame, Image, Measure, PixelGrid, resample
 from optixstuff.performance import PerformanceCurves, SampledProfile
-from optixstuff.spectral import Band
+from optixstuff.spectral import Band, Resolution
 from orbix.observatory import ecliptic_pointing
-from skyscapes.physical_model import GridPhysicalModel
+from skyscapes.physical_model import AbstractPhysicalModel, GridPhysicalModel
 from skyscapes.scene import FlatStar, Planet, Scene, Star
 
 _RULE = Circular(0.7)
@@ -267,6 +267,37 @@ class GaussianSceneCoronagraph(GaussianCoronagraph, AbstractSceneCoronagraph):
         return SceneRender(resample(native, grid), valid)
 
 
+class FlatContrast(AbstractPhysicalModel):
+    """A planet with one contrast at every wavelength and no knots.
+
+    A knotless model needs no resolution, so a hand-made quadrature (nodes that
+    are traced leaves, or a rule written by hand) can render it.
+    """
+
+    value: jnp.ndarray
+
+    def contrast(
+        self, phase_angle_rad, star_planet_distance_AU, wavelength_nm, Rp_Rearth
+    ):
+        """The same contrast for every planet, time and wavelength."""
+        return jnp.broadcast_to(self.value, phase_angle_rad.shape)
+
+
+def exposure_for(scene, quadrature, *, time_d=0.0, roll_deg=0.0, plan=None):
+    """An exposure on a hand-built quadrature, with the scene's resolution.
+
+    The quadrature must come from ``Quadrature.build`` when the scene has a
+    tabulated source.
+    """
+    return Exposure(
+        time_d=time_d,
+        roll_deg=roll_deg,
+        quadrature=quadrature,
+        plan=plan,
+        resolution=Resolution.build(quadrature, *scene.spectral_tables()),
+    )
+
+
 def make_system(
     *,
     star=None,
@@ -277,17 +308,26 @@ def make_system(
     epoch=None,
     epoch_d=0.0,
     planet_groups=None,
+    smooth_planet=False,
+    wavelengths_nm=(400.0, 500.0, 600.0, 700.0),
 ):
-    """Real static-spectrum photometry with a circular orbit at its node."""
+    """Real static-spectrum photometry with a circular orbit at its node.
+
+    The planet's contrast is tabulated on ``wavelengths_nm`` unless
+    ``smooth_planet``, which uses a model with no knots.
+    """
     star = FlatStar(flux_phot_per_nm_m2=1e6) if star is None else star
-    wavelengths = jnp.array([400.0, 500.0, 600.0, 700.0])
+    wavelengths = jnp.asarray(wavelengths_nm)
     contrast = jnp.asarray(contrast)
-    values = jnp.broadcast_to(contrast, (4,))
-    model = GridPhysicalModel(
-        wavelengths,
-        jnp.array([0.0, 90.0, 180.0]),
-        jnp.broadcast_to(values[None, :, None], (1, 4, 3)),
-    )
+    values = jnp.broadcast_to(contrast, (wavelengths.size,))
+    if smooth_planet:
+        model = FlatContrast(contrast)
+    else:
+        model = GridPhysicalModel(
+            wavelengths,
+            jnp.array([0.0, 90.0, 180.0]),
+            jnp.broadcast_to(values[None, :, None], (1, wavelengths.size, 3)),
+        )
     planet = Planet(jnp.ones(1), model)
     return Scene.from_classical(
         star,

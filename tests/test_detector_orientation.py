@@ -6,8 +6,8 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import GaussianCoronagraph, centroid, make_path, make_system
-from optixstuff import Exposure, MultiBandCoronagraph
+from conftest import GaussianCoronagraph, centroid, exposure_for, make_path, make_system
+from optixstuff import MultiBandCoronagraph
 from optixstuff.grids import Frame, PixelGrid, SkyOrientation
 from optixstuff.spectral import Band, Quadrature
 from skyscapes.disk import ExovistaDisk
@@ -19,8 +19,7 @@ from coronagraphoto import photon_rates
 
 def rates_at(system, path, quadrature, roll=0):
     """Photon rates of a zodi-free scene at day 0 and a roll in degrees."""
-    exposure = Exposure(time_d=0.0, roll_deg=roll, quadrature=quadrature)
-    return photon_rates(system, path, exposure)
+    return photon_rates(system, path, exposure_for(system, quadrature, roll_deg=roll))
 
 
 @pytest.mark.parametrize(
@@ -217,4 +216,4 @@ def test_imaging_capability_required():
     """A throughput-only path cannot produce detector pixels."""
     path = eqx.tree_at(lambda p: p.coronagraph, make_path(n=8), None)
     with pytest.raises(TypeError, match="AbstractImagingCoronagraph"):
-        rates_at(make_system(), path, Quadrature.monochromatic(550.0))
+        rates_at(make_system(smooth_planet=True), path, Quadrature.monochromatic(550.0))

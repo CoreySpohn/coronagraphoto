@@ -1,9 +1,15 @@
 """The local-zodi sightline is derived from the star's sky position and the time."""
 
 import numpy as np
-from conftest import leinert_radiance, make_path, make_system, sightline, with_zodi
+from conftest import (
+    exposure_for,
+    leinert_radiance,
+    make_path,
+    make_system,
+    sightline,
+    with_zodi,
+)
 from hwoutils.constants import arcsec2rad
-from optixstuff import Exposure
 from optixstuff.spectral import Band, Quadrature
 from skyscapes import LeinertZodi
 
@@ -32,13 +38,10 @@ def test_derived_sightline_reaches_pixels():
     for day in (0.0, 60.0, 150.0):
         lat, _ = sightline(system, day)
         np.testing.assert_allclose(float(lat), beta, atol=1e-4)
-        exposure = Exposure(
-            time_d=day,
-            roll_deg=0,
-            quadrature=Quadrature.build(
-                (Band(549.5, 550.5),), system, path, zodi, order=1
-            ),
+        quadrature = Quadrature.build(
+            (Band(549.5, 550.5),), system, path, zodi, order=1
         )
+        exposure = exposure_for(system, quadrature, time_d=day)
         rate = photon_rates(system, path, exposure).local_zodi[0, 0, 4, 4]
         radiance = leinert_radiance(system, 550.0, day)
         expected = (

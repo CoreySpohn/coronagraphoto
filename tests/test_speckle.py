@@ -4,9 +4,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from conftest import centroid, make_path, make_system
+from conftest import centroid, exposure_for, make_path, make_system
 from hwoutils.epoch import Epoch
-from optixstuff import AbstractSpeckleField, Exposure
+from optixstuff import AbstractSpeckleField
 from optixstuff.grids import Frame, Image, Measure, PixelGrid
 from optixstuff.spectral import Band, Quadrature
 from skyscapes.scene import Star
@@ -72,8 +72,14 @@ def test_speckle_leakage_day_clock():
                 lambda p: p.speckle, path, speckle, is_leaf=lambda v: v is None
             )
         return photon_rates(
-            scene, path, Exposure(time_d=time_d, roll_deg=roll_deg, quadrature=q)
+            scene, path, exposure_for(scene, q, time_d=time_d, roll_deg=roll_deg)
         )
+
+    def band_mean(star, time):
+        """The star's mean over the one nm band: eight Gauss points of its own read."""
+        x, w = np.polynomial.legendre.leggauss(8)
+        values = star.photon_flux_density(550.0 + 0.5 * x, time, dist_pc=10.0)
+        return float(jnp.sum(w / 2 * values))
 
     def excess(a, b):
         """The rate of ``a`` minus ``b`` on the pixels ``a`` supports."""
@@ -95,7 +101,7 @@ def test_speckle_leakage_day_clock():
                 rtol=0,
                 atol=1e-10,  # Exact 2:1 sampling, floating-point subtraction.
             )
-        phi = system.star.photon_flux_density(550.0, time, dist_pc=10.0)
+        phi = band_mean(system.star, time)
         expected = 40 * 0.4 * phi * 64 * 1e-10 * factor
         np.testing.assert_allclose(
             excess(first, base).sum(),
@@ -126,7 +132,7 @@ def test_speckle_leakage_day_clock():
     # cancels against a floor ~250 times larger: 1e-10 relative.
     base = rates(scene, path, 3.0)
     dimmed = rates(scene, path, 3.0, speckle=Halo(level=-1.01))
-    phi = system.star.photon_flux_density(550.0, 3.0, dist_pc=10.0)
+    phi = band_mean(system.star, 3.0)
     np.testing.assert_allclose(
         excess(dimmed, base).sum(),
         40 * 0.4 * phi * 64e-10 * -0.01,

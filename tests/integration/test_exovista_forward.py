@@ -1,9 +1,8 @@
 """Synthetic FITS scene loading through photon imaging."""
 
 import numpy as np
-from conftest import make_path, write_scene
+from conftest import exposure_for, make_path, write_scene
 from hwoutils.constants import arcsec2rad
-from optixstuff import Exposure
 from optixstuff.grids import SkyOrientation
 from optixstuff.spectral import Band, Quadrature
 from skyscapes import from_exovista
@@ -29,9 +28,7 @@ def test_exovista_native_disk_and_position_angle(tmp_path):
     np.testing.assert_allclose(radiance, expected, rtol=32 * np.finfo(float).eps)
     path = make_path(n=20, step=0.3, cube=True)
     quadrature = Quadrature.build((Band(549.5, 550.5),), scene, path, order=1)
-    rates = photon_rates(
-        scene, path, Exposure(time_d=0.0, roll_deg=30, quadrature=quadrature)
-    )
+    rates = photon_rates(scene, path, exposure_for(scene, quadrature, roll_deg=30))
     # Absolute incoming local-zodi normalization, on an interior pixel.
     lz = scene.local_zodi.photon_radiance(550.0, scene.sky_frame, 0.0)
     expected_z = (

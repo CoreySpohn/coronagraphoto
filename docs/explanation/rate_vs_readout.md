@@ -1,10 +1,13 @@
 # Photon rates, electron rates and observations
 
 `build_exposure(scene, instrument, bands, *, time_d, roll_deg=0.0, plan=None,
-order=4)` builds the `Exposure` record: observation time, roll, wavelength
-quadrature and optional frame plan. The local-zodi radiance is not stored:
-the image path asks `scene.local_zodi` for its radiance at each node, given the
-scene's sky frame and `time_d`.
+order=4, field_lod=0.0)` builds the `Exposure` record: observation time, roll,
+wavelength quadrature, the `Resolution` that reduces each tabulated spectrum of
+the scene to the nodes, the knot leaves the build read (`reads`) and the optional
+frame plan. The star, planet and local-zodi values are not stored: the image path
+asks `scene.sources` for them at each node, given the scene's sky frame and
+`time_d`. `field_lod` is the field of view in lambda/D at the band centre; with
+the default 0 each piece holds exactly `order` nodes.
 
 `photon_rates(scene, instrument, exposure)` returns photon `Rates`. Each source field holds photons/s/nm/pixel with shape
 `(W,Q,ny,nx)`. Call `rates.integrate()` for band-integrated photons/s/pixel
@@ -46,8 +49,9 @@ Stored disks keep their native sky geometry. Parametric disks use
 ## Spectral and spatial sampling
 
 `build_exposure` builds the quadrature on the host from the instrument and the
-scene's local zodi, which declare their spectral breaks (the instrument includes an
-attached speckle field). The star is left out of the breaks. The rule splits each positive-width band at the declared breaks and
+scene's tabulated sources, which declare their spectral breaks (the instrument includes an
+attached speckle field). The tables resolve through the exposure's `Resolution`
+rather than adding a node per knot, so a rough star adds no nodes. The rule splits each positive-width band at the declared breaks and
 applies its Gauss-Legendre order within each interval. The photon record
 carries the quadrature, whose nm weights enter once at integration.
 

@@ -29,7 +29,7 @@ def test_exposure_argument_matches_closure():
     Instrument, scene and exposure as arguments must match closing over them
     bitwise, and so must a traced roll against a concrete one.
     """
-    system = make_system(star=FlatStar(jnp.asarray(1e6)))
+    system = make_system(star=FlatStar(jnp.asarray(1e6)), smooth_planet=True)
     path = make_path(n=8, step=0.5)
     path = eqx.tree_at(
         lambda p: (p.detector.read_noise_e_rms, p.detector.excess_noise_factor_sq),
@@ -83,7 +83,7 @@ def test_reader_compiles_once_for_any_values(reader, caplog):
     new node values and weights change the output, and observe reuses the
     program that expected compiled.
     """
-    system = make_system(star=FlatStar(jnp.asarray(1e6)))
+    system = make_system(star=FlatStar(jnp.asarray(1e6)), smooth_planet=True)
     varied = eqx.tree_at(lambda s: s.star.flux_phot_per_nm_m2, system, jnp.asarray(2e6))
     path = make_path(n=8, step=0.5, chromatic=True)
     bands = (Band(535.0, 565.0),)
@@ -116,7 +116,7 @@ def test_reader_compiles_once_for_any_values(reader, caplog):
 
 def test_forty_nodes_and_eight_rolls_compile_one_program(caplog):
     """Fails if a node count or a roll sequence compiles more than one program."""
-    system = make_system(star=FlatStar(jnp.asarray(1e6)))
+    system = make_system(star=FlatStar(jnp.asarray(1e6)), smooth_planet=True)
     path = make_path(n=8, step=0.5, chromatic=True)
     scene = system
     band = Band(520.0, 580.0)
@@ -140,7 +140,9 @@ def test_roll_and_node_gradients_match_finite_differences():
     The scalar mixes the planet and the leakage; central differences in
     float64 agree with jax.grad to rtol 1e-5 for the roll and each node.
     """
-    system = make_system(star=FlatStar(jnp.asarray(1e6)), sky_pa_deg=40.0)
+    system = make_system(
+        star=FlatStar(jnp.asarray(1e6)), sky_pa_deg=40.0, smooth_planet=True
+    )
     path = make_path(n=24, step=0.5, chromatic=True)
     scene = system
     quadrature = Quadrature(
@@ -184,7 +186,7 @@ def test_traced_nodes_select_the_band_model_inside_the_program():
     )
     path = make_path(n=16, step=0.5)
     path = eqx.tree_at(lambda p: p.coronagraph, path, MultiBandCoronagraph((blue, red)))
-    scene = make_system(star=FlatStar(jnp.asarray(1e6)))
+    scene = make_system(star=FlatStar(jnp.asarray(1e6)), smooth_planet=True)
     quadrature = Quadrature(
         (Band(490.0, 610.0),),
         jnp.array([[495.0, 600.0, 505.0]]),

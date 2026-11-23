@@ -42,7 +42,7 @@ from optixstuff import Exposure, Instrument, Rates
 from optixstuff.apertures import DEFAULT_APERTURE_RULE, Circular
 from optixstuff.coronagraph import AbstractImagingCoronagraph, MultiBandCoronagraph
 from optixstuff.grids import Image, Measure, PixelGrid, SkyOrientation
-from optixstuff.spectral import Quadrature
+from optixstuff.spectral import Quadrature, Resolution
 from orbix.system import SkyFrame
 from skyscapes import AbstractLocalZodi, Scene
 
@@ -140,6 +140,9 @@ class ApertureRecord(eqx.Module):
         sky_frame: The scene's ``SkyFrame``: its right ascension and
             declination (None for an unplaced scene) and the epoch, which is
             day zero of the read's ``time_d``.
+        resolution: The exposure's ``Resolution``, which reduces a tabulated
+            local zodi (and, in :func:`scene_aperture_rates`, the scene's
+            sources) on ``quadrature``.
         reads: Paths, relative to the scene, of every scene value the record was
             built from, each a whole leaf or a node covering the paths under it.
             Changing one of them leaves the record stale; rebuild it or hold the
@@ -160,6 +163,7 @@ class ApertureRecord(eqx.Module):
     thermal: Array
     local_zodi: AbstractLocalZodi | None
     sky_frame: SkyFrame
+    resolution: Resolution
     reads: tuple[str, ...] = eqx.field(static=True)
 
 
@@ -550,13 +554,16 @@ def aperture_record(
     )[0, :, 0]
     unsupported = ~_on_detector(response.radius_pix, *shape) | (bad > 0)
 
-    def per_contrast(wavelength_nm):
-        gain = instrument.effective_area_m2(wavelength_nm)
-        return gain * scene.star.photon_flux_density(
-            wavelength_nm, jnp.asarray(exposure.time_d), dist_pc=scene.dist_pc
-        )
-
-    star = jax.vmap(per_contrast)(nodes.ravel()).reshape(nodes.shape)
+    gain = jax.vmap(instrument.effective_area_m2)(nodes.ravel()).reshape(nodes.shape)
+    star = (
+        gain
+        * scene.star.node_flux_density(
+            quadrature,
+            exposure.resolution,
+            jnp.atleast_1d(jnp.asarray(exposure.time_d)),
+            dist_pc=scene.dist_pc,
+        )[..., 0]
+    )
     return ApertureRecord(
         quadrature,
         exposure.roll_deg,
@@ -572,6 +579,7 @@ def aperture_record(
         images.thermal[:, :, 0, 0],
         scene.local_zodi,
         scene.sky_frame,
+        exposure.resolution,
         reads=(
             "star",
             "dynamics.frame",
@@ -632,7 +640,10 @@ def aperture_rates(
     The planet sits ``east_arcsec`` east and ``north_arcsec`` north of the
     star, the order and convention of ``Scene.positions``, with planet-to-star
     ``contrast``: a scalar, or shape (W, Q) for one value per wavelength node.
-    The aperture is centred on the planet.
+    A per-node contrast is the star-weighted node contrast, ``Sources.contrast``
+    of ``Scene.sources``: the number that returns the planet's node-effective
+    flux when multiplied by the node-effective star the record holds. A scalar
+    is exact for a smooth contrast. The aperture is centred on the planet.
 
     ``time_d`` is the observation time in days from the record's epoch. It
     sets the local zodi: the record's zodi model is evaluated for the record's
@@ -669,7 +680,8 @@ def aperture_rates(
         record: The aperture record built for the target and exposure.
         east_arcsec: Planet offset east of the star, in arcsec.
         north_arcsec: Planet offset north of the star, in arcsec.
-        contrast: Planet-to-star contrast, a scalar or shape (W, Q).
+        contrast: Planet-to-star contrast, a scalar or the star-weighted node
+            contrast of shape (W, Q).
         time_d: Observation time in days from the record's epoch.
         roll_deg: Position angle of detector +y for this read, in degrees.
             None uses the record's roll.
@@ -698,8 +710,8 @@ def aperture_rates(
     bad_here, _ = _bilinear(record.unsupported, *here)
     bad_fixed, _ = _bilinear(record.unsupported, *fixed)
     if record.local_zodi is not None:
-        local_zodi = local_zodi * record.local_zodi.photon_radiance(
-            record.quadrature.nodes_nm, record.sky_frame, time_d
+        local_zodi = local_zodi * record.local_zodi.node_radiance(
+            record.quadrature, record.resolution, record.sky_frame, time_d
         )
     position = separation / record.separation_step_arcsec
     planet_per_contrast, in_table = _linear(record.planet_per_contrast, position)
@@ -747,7 +759,8 @@ def scene_aperture_rates(
 
     A ``jax.vmap`` of :func:`aperture_rates` over the scene's planets and the
     times: positions come from ``scene.positions(time_d)`` and each planet's
-    contrast from ``scene.contrasts`` at every wavelength node of the record.
+    contrast from ``Scene.sources`` on the record's quadrature and resolution
+    (the star-weighted node contrast, ``Sources.contrast``).
     Nothing is rebuilt. The scene should be the one the record was built from
     (``record.reads`` lists what the record holds fixed).
 
@@ -780,10 +793,7 @@ def scene_aperture_rates(
     if scene.batch_shape:
         raise ValueError("scene_aperture_rates reads one system; vmap it over a batch")
     east, north = scene.positions(time_d)
-    nodes = record.quadrature.nodes_nm
-    contrast = jax.vmap(
-        jax.vmap(lambda wavelength: scene.contrasts(wavelength, time_d))
-    )(nodes)
+    contrast = scene.sources(record.quadrature, record.resolution, time_d).contrast
 
     def read(east_arcsec, north_arcsec, contrast, time):
         rates = aperture_rates(

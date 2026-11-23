@@ -9,12 +9,12 @@ import pytest
 from conftest import (
     GaussianSceneCoronagraph,
     PlateauCoronagraph,
+    exposure_for,
     make_path,
     make_system,
     with_zodi,
 )
 from hwoutils.constants import arcsec2rad
-from optixstuff import Exposure
 from optixstuff.apertures import Circular
 from optixstuff.grids import Image, Measure, PixelGrid, SkyOrientation
 from optixstuff.spectral import Band, Quadrature
@@ -79,11 +79,8 @@ def test_aperture_closure_two_samplings():
         quadrature = Quadrature.build(
             (Band(549.5, 550.5),), system, path, zodi, order=1
         )
-        rates = photon_rates(
-            with_zodi(system, zodi),
-            path,
-            Exposure(time_d=0.0, roll_deg=0, quadrature=quadrature),
-        )
+        scene = with_zodi(system, zodi)
+        rates = photon_rates(scene, path, exposure_for(scene, quadrature))
         aperture_grid = PixelGrid.regular((n, n), step, "lod", frame=coro.grid.frame)
         psf = Image(
             rates.planet[0, 0],
@@ -193,10 +190,8 @@ def test_disk_equals_pixel_center_source():
         disk=disk,
     )
     scene = system
-    exposure = Exposure(
-        time_d=0.0,
-        roll_deg=0,
-        quadrature=Quadrature.build((Band(549.5, 550.5),), system, path, order=1),
+    exposure = exposure_for(
+        scene, Quadrature.build((Band(549.5, 550.5),), system, path, order=1)
     )
     rates = photon_rates(scene, path, exposure)
     a, b = np.asarray(rates.planet), np.asarray(rates.exozodi)
