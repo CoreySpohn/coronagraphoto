@@ -331,7 +331,13 @@ def make_path(
 
 
 def worked_setup(*, n_wavelengths=1201):
-    """AB=5 flat F_nu, dense cubic photon interpolation, linear contrast."""
+    """AB=5 flat F_nu, dense cubic photon interpolation, linear contrast.
+
+    The coronagraph tables reach 12 lambda/D (n=96 at 0.25) so that the 7.2
+    lambda/D detector half-width is supported at the 400 nm node, where the
+    tables' footprint on the sky is 400/550 of its width at 550 nm; nothing
+    outside the tables is rendered.
+    """
     wave = jnp.linspace(400.0, 700.0, n_wavelengths)
     star = Star(
         wavelengths_nm=wave,
@@ -340,7 +346,7 @@ def worked_setup(*, n_wavelengths=1201):
     )
     contrast = 1e-10 * (1 - 0.004 * (jnp.array([400.0, 500.0, 600.0, 700.0]) - 550))
     return make_system(star=star, contrast=contrast), make_path(
-        chromatic=True, detector_n=48, detector_step=0.3
+        n=96, chromatic=True, detector_n=48, detector_step=0.3
     )
 
 
@@ -490,21 +496,27 @@ def closure_system(scale):
 YIP_PITCH_LOD, YIP_SIGMA_LOD = 0.5, 0.7
 
 
-def write_yip(path, *, distinct_products=False, stellar_profile=None):
+def write_yip(
+    path, *, distinct_products=False, stellar_profile=None, reach=3, half_width=6
+):
     """Synthetic YIP package with SI-labelled wavelength headers and even centre.
 
     ``stellar_profile`` is an optional function of the radius in lambda/D that
     multiplies the uniform stellar leakage, for a leakage that varies with
-    separation.
+    separation. ``reach`` is the half-width in lambda/D of the off-axis grid (a
+    square of nodes at 1 lambda/D) and ``half_width`` that of the image tables;
+    a closure that reads apertures up to a separation ``s`` needs both above
+    ``s`` plus the aperture radius, since nothing outside them is rendered.
     """
     from yippy.testing import write_synthetic_yip
     from yippy.writer import yip_header
 
-    n, step, sigma = 24, YIP_PITCH_LOD, YIP_SIGMA_LOD
+    step, sigma = YIP_PITCH_LOD, YIP_SIGMA_LOD
+    n = round(2 * half_width / step)
     yy, xx = np.indices((n, n))
     xx, yy = (xx - (n - 1) / 2) * step, (yy - (n - 1) / 2) * step
     offsets = np.array(
-        [(x, y) for x in (0.0, 1.0, 2.0, 3.0) for y in (0.0, 1.0, 2.0, 3.0)]
+        [(x, y) for x in range(reach + 1) for y in range(reach + 1)], dtype=float
     )
     psfs = np.array(
         [

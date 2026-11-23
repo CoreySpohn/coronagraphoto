@@ -51,6 +51,11 @@ def test_speckle_leakage_day_clock():
     Over exactly one reflected halo footprint the linear reconstruction
     conserves its native flux at 2:1 sampling, to 64 eps. A larger detector
     would include reflected replicas. Roll cannot rotate this instrumental halo.
+    The halo grid is the detector footprint, so its outermost pixel ring is
+    unsupported (the linear read needs half a source pixel of margin) and
+    renders zero beside the base render; the excess is taken over the
+    supported pixels of the halo run, where the halo has no flux (the lit
+    pixel is interior), so the totals and the centroid are unchanged.
     """
     path = make_path(detector_n=16)
     wave = jnp.array([400.0, 500.0, 600.0, 700.0])
@@ -71,6 +76,10 @@ def test_speckle_leakage_day_clock():
             scene, path, Exposure(time_d=time_d, roll_deg=roll_deg, quadrature=q)
         )
 
+    def excess(a, b):
+        """The rate of ``a`` minus ``b`` on the pixels ``a`` supports."""
+        return jnp.where(a.supported[:, None], a.star_leakage - b.star_leakage, 0.0)
+
     snapshots = []
     for time, factor in ((3.0, 2.5), (3.0 + np.pi, 0.5)):
         base = rates(scene, path, time)
@@ -82,7 +91,7 @@ def test_speckle_leakage_day_clock():
                 path.detector.shape, float(path.detector.pixel_scale_arcsec), "arcsec"
             )
             np.testing.assert_allclose(
-                centroid(first.star_leakage[0, 0] - base.star_leakage[0, 0], grid),
+                centroid(excess(first, base)[0, 0], grid),
                 [grid.center_x + 5.0, grid.center_y + 3.0],
                 rtol=0,
                 atol=1e-10,  # Exact 2:1 sampling, floating-point subtraction.
@@ -90,7 +99,7 @@ def test_speckle_leakage_day_clock():
         phi = system.star.photon_flux_density(550.0, time, dist_pc=10.0)
         expected = 40 * 0.4 * phi * 64 * 1e-10 * factor
         np.testing.assert_allclose(
-            (first.star_leakage - base.star_leakage).sum(),
+            excess(first, base).sum(),
             expected,
             rtol=64 * np.finfo(float).eps,
         )
@@ -120,7 +129,7 @@ def test_speckle_leakage_day_clock():
     dimmed = rates(scene, path, 3.0, speckle=Halo(level=-1.01))
     phi = system.star.photon_flux_density(550.0, 3.0, dist_pc=10.0)
     np.testing.assert_allclose(
-        (dimmed.star_leakage - base.star_leakage).sum(),
+        excess(dimmed, base).sum(),
         40 * 0.4 * phi * 64e-10 * -0.01,
         rtol=1e-10,
     )

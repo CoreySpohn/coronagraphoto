@@ -41,13 +41,20 @@ def closure(tmp_path_factory):
     """Read one planet from the record and sum the same aperture on images.
 
     The scene is a Gaussian YIP (sigma 0.7 lambda/D, integral 0.3, pitch 0.5
-    lambda/D) with a parametric disk, a local zodi and one planet, observed
-    in two bands at a 15 degree roll on 0.2 and 0.1 lambda/D pixels. No
-    response is mocked or renormalized.
+    lambda/D, tables 8 lambda/D from the centre so that every pixel of the
+    9.6 lambda/D fields is inside them at both band edges) with a parametric
+    disk, a local zodi and one planet, observed in two bands at a 15 degree
+    roll on 0.2 and 0.1 lambda/D pixels. No response is mocked or renormalized.
     """
     rule = Circular(0.7)
     coro = (
-        open_yip(write_yip(tmp_path_factory.mktemp("calculator-closure") / "yip"))
+        open_yip(
+            write_yip(
+                tmp_path_factory.mktemp("calculator-closure") / "yip",
+                reach=8,
+                half_width=8,
+            )
+        )
         .prepare(rules=(rule,))
         .with_scene_operator()
     )

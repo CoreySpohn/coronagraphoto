@@ -151,7 +151,11 @@ def test_disk_equals_pixel_center_source():
 
     The disk table is a linear reconstruction, so a one-pixel table has the
     cell integral of a unit tent: weights 1/8, 3/4, 1/8 per axis over the
-    pixel and its neighbours (exact for the linear interpolant). Each cell's
+    pixel and its neighbours (exact for the linear interpolant). The tables
+    are the detector footprint, so the outermost pixel ring is unsupported
+    (the read needs half a table pixel of margin) and renders zero in the disk
+    and the planet alike; the comparison is on the supported pixels and the
+    unsupported ones must read exactly zero. Each cell's
     flux contracts to its point PSF before reconstruction, so the disk equals
     the planet path's point PSFs at those nine pixel centres with those
     weights, both integrating the same zero-extended band-limited density
@@ -209,9 +213,14 @@ def test_disk_equals_pixel_center_source():
         grid=pixels,
     ).image.data
     scale = a.max() / float(psfs[4].max())
+    supported = np.asarray(rates.supported)[0]
+    assert 0 < supported.sum() < supported.size
     expected = scale * np.einsum("k,kyx->yx", weights, np.asarray(psfs))
     np.testing.assert_allclose(
-        b[0, 0], expected, atol=1e3 * np.finfo(float).eps * a.max(), rtol=0
+        b[0, 0],
+        np.where(supported, expected, 0.0),
+        atol=1e3 * np.finfo(float).eps * a.max(),
+        rtol=0,
     )
     shifted = path.coronagraph.source_psfs(
         550.0,

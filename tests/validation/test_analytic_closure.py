@@ -73,6 +73,20 @@ NARROW_BANDS = (Band(524.0, 526.0), Band(574.0, 576.0))
 SEPARATIONS = (0.8, 1.0, 1.5, 2.0, 2.5, 3.0)
 BEYOND = 3.4
 POSITION_ANGLES = (250.0, 20.0)
+# Half-width in lambda/D of the synthetic tables. Nothing outside the tables is
+# rendered (the pixel reads zero and is unsupported), so the closures need the
+# tables to cover every pixel of the largest field (12.8 lambda/D at 550 nm,
+# 7.1 lambda/D from the centre at the 500 nm node) and every planet position.
+# The band-limited reconstruction of a table that does not vanish at its edge
+# is the zero-padded interpolant, whose edge ripple reaches the interior and
+# falls only slowly with the reach (see LEAKAGE_RIPPLE); 16 puts it below the
+# bounds registered here.
+TABLE_REACH = 16
+# Largest ripple of the uniform stellar map, as a relative error of the leakage
+# rate, measured at the reach above (2.5e-4 per node, 1.1e-3 per 2 nm band
+# against the same read without a table edge); each bound is 1.5 times it,
+# rounded up.
+LEAKAGE_RIPPLE_NODE, LEAKAGE_RIPPLE_BAND = 4e-4, 1.7e-3
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -218,6 +232,8 @@ def build(tmp_path_factory):
                 path = write_yip(
                     tmp_path_factory.mktemp("analytic-closure") / "yip",
                     stellar_profile=radial_leakage if radial else None,
+                    reach=TABLE_REACH,
+                    half_width=TABLE_REACH,
                 )
                 yips[radial] = (
                     open_yip(path).prepare(rules=(RULE,)).with_scene_operator()
@@ -396,9 +412,8 @@ def test_registered_bounds(table):
     - exozodi: the raw gap falls from 36% at 0.8 lambda/D to 0.9% at 3
       (``EXOZODI_GAP``); ``test_disk_structure`` explains it.
 
-    Beyond the last curve knot and near the detector edge (3.4 lambda/D) the
-    gaps are larger (leakage on the radial YIP 5.8e-2, exozodi 7.3e-2) and
-    are not registered; ``test_curve_interpolation`` and
+    Near the detector edge (3.4 lambda/D) the gaps are larger (exozodi 7.3e-2)
+    and are not registered; ``test_curve_interpolation`` and
     ``test_detector_edge`` name why.
     """
     assert _worst(table, "planet", radial=False) < 6e-4
@@ -498,20 +513,23 @@ def test_band_centre_aperture(causes):
     The stellar leakage of a uniform curve differs at a node by exactly
     ``(node / centre)**2 - 1``; the planet by the enclosed fraction of the
     node's PSF in the band-centre aperture, up to the pixelization. Basis:
-    measured; the leakage node gaps equal the law to 1e-6 (the numbers are
-    float64 products of the same terms) and the planet node gaps differ from
+    measured; the leakage node gaps equal the law to 2.5e-4 (the product of
+    the same terms plus the edge ripple of the band-limited reconstruction of
+    the uniform map, ``LEAKAGE_RIPPLE_NODE``) and the planet node gaps differ from
     the pixel-free law by 3.2e-3 at most, the pixelization of the next test.
     Narrowing the band from 50 to 2 nm takes the band leakage gap from 4.1e-3
-    to 6.6e-6, second order in the width as the quadrature sum cancels the
-    first.
+    to the ripple floor (at most 1.1e-3), second order in the width as the
+    quadrature sum cancels the first.
     """
     c = causes
-    np.testing.assert_allclose(c["node_leakage"], c["node_leakage_law"], atol=1e-6)
+    np.testing.assert_allclose(
+        c["node_leakage"], c["node_leakage_law"], atol=LEAKAGE_RIPPLE_NODE
+    )
     planet = c["planet_chromatic"]
     assert np.abs(planet["node"] - planet["predicted_node"]).max() < 3.2e-3
     assert np.abs(planet["predicted_node"]).max() > 5e-2
     assert np.abs(c["band_leakage"]["wide"]).min() > 3.5e-3
-    assert np.abs(c["band_leakage"]["narrow"]).max() < 1e-5
+    assert np.abs(c["band_leakage"]["narrow"]).max() < LEAKAGE_RIPPLE_BAND
 
 
 @vv.case("etc-count-rates", "code-verification", srq="analytic against image rates")
@@ -576,18 +594,22 @@ def test_curve_interpolation(causes):
     """Fails if the leakage gap of a varying curve is not the curve's interpolation.
 
     On the radial-leakage YIP a 2 nm band has no chromatic gap. The gap is the
-    PCHIP-in-log read of the curve between its knots (0, 1, 2 and 3
-    lambda/D) against the exact aperture mean of the leakage profile, and the
-    log-linear tail beyond the last knot. Basis: measured 3.4e-2 at 0.8
-    lambda/D and 5.4e-2 past the last knot, and the prediction from the knots
-    and the profile alone agrees with it to 3e-3 (4e-3 bound); on the uniform
-    YIP the same read has a gap of 7e-6.
+    PCHIP-in-log read of the curve between its knots (every lambda/D out to
+    the table reach) against the exact aperture mean of the leakage profile.
+    The curves end at the table edge, beyond the field, so the log-linear tail
+    past the last knot is not read: nothing outside the tables is rendered, and
+    the 5.4e-2 gap that tail had on the earlier 3 lambda/D tables is not
+    registered. Basis: measured 3.5e-2 at the largest (0.8 lambda/D), and the
+    prediction from the knots and the profile alone agrees with it to 3e-3
+    (4e-3 bound); on the uniform
+    YIP the same read has a gap of at most 1.1e-3, the edge ripple of the
+    zero-padded band-limited reconstruction (``LEAKAGE_RIPPLE_BAND``).
     """
     rows = causes["interp"]
     for s, row in rows.items():
         assert np.abs(row["gap"] - row["predicted"]).max() < 4e-3, s
-        assert np.abs(row["control"]).max() < 1e-5, s
-    assert max(np.abs(r["gap"]).max() for r in rows.values()) > 5e-2
+        assert np.abs(row["control"]).max() < LEAKAGE_RIPPLE_BAND, s
+    assert max(np.abs(r["gap"]).max() for r in rows.values()) > 3e-2
     assert np.abs(rows[1.5]["gap"]).min() > 1e-2
 
 
