@@ -1,13 +1,19 @@
 # Photon rates, electron rates and observations
 
 `build_exposure(scene, instrument, bands, *, time_d, roll_deg=0.0, plan=None,
-order=4, field_lod=0.0)` builds the `Exposure` record: observation time, roll,
+order=4, field_lod=None)` builds the `Exposure` record: observation time, roll,
 wavelength quadrature, the `Resolution` that reduces each tabulated spectrum of
 the scene to the nodes, the knot leaves the build read (`reads`) and the optional
 frame plan. The star, planet and local-zodi values are not stored: the image path
 asks `scene.sources` for them at each node, given the scene's sky frame and
-`time_d`. `field_lod` is the field of view in lambda/D at the band centre; with
-the default 0 each piece holds exactly `order` nodes.
+`time_d`. `field_lod` is the largest separation, in lambda/D at the band centre,
+at which the response is read. The default, None, takes the field the instrument
+declares, its detector half-diagonal, so every pixel of the detector is
+integrated over wavelength to the accuracy of the rule; the nodes of a piece
+grow with the field. A caller that reads a smaller field passes it and renders
+fewer nodes; with 0 each piece holds exactly `order` nodes. The image routes
+render the real nodes of each band only, so a band with fewer nodes than the
+widest costs no padded renders.
 
 `photon_rates(scene, instrument, exposure)` returns photon `Rates`. Each source field holds photons/s/nm/pixel with shape
 `(W,Q,ny,nx)`. Call `rates.integrate()` for band-integrated photons/s/pixel

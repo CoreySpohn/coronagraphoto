@@ -443,6 +443,7 @@ def causes(build):
     """Evidence for each cause, from cases that vary one thing."""
     out = {}
     wide, narrow = build(), build(bands=NARROW_BANDS)
+    out["active"] = np.asarray(wide.quadrature.active)
     out["node_leakage"] = wide.gaps(2.3, 250.0)[0]["star_leakage"]
     out["node_leakage_law"] = chromatic_leakage_gap(wide)
     out["band_leakage"] = {
@@ -519,15 +520,18 @@ def test_band_centre_aperture(causes):
     the pixel-free law by 3.2e-3 at most, the pixelization of the next test.
     Narrowing the band from 50 to 2 nm takes the band leakage gap from 4.1e-3
     to the ripple floor (at most 1.1e-3), second order in the width as the
-    quadrature sum cancels the first.
+    quadrature sum cancels the first. Only real nodes are compared: the two
+    bands hold different node counts at the default field, and a padded slot
+    carries zero weight and no defined rate.
     """
     c = causes
+    real = c["active"]
     np.testing.assert_allclose(
-        c["node_leakage"], c["node_leakage_law"], atol=LEAKAGE_RIPPLE_NODE
+        c["node_leakage"][real], c["node_leakage_law"][real], atol=LEAKAGE_RIPPLE_NODE
     )
     planet = c["planet_chromatic"]
-    assert np.abs(planet["node"] - planet["predicted_node"]).max() < 3.2e-3
-    assert np.abs(planet["predicted_node"]).max() > 5e-2
+    assert np.abs(planet["node"] - planet["predicted_node"])[real].max() < 3.2e-3
+    assert np.abs(planet["predicted_node"])[real].max() > 5e-2
     assert np.abs(c["band_leakage"]["wide"]).min() > 3.5e-3
     assert np.abs(c["band_leakage"]["narrow"]).max() < LEAKAGE_RIPPLE_BAND
 

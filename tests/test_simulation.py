@@ -316,7 +316,9 @@ def test_disk_render_does_not_depend_on_detector_extent():
 
     def exozodi(detector_n):
         path = make_path(n=64, cube=True, detector_n=detector_n)
-        exposure = cp.build_exposure(scene, path, bands, time_d=0.0)
+        # The two detectors declare different fields, hence different nodes; the
+        # crop compares one layout, so the field is zero.
+        exposure = cp.build_exposure(scene, path, bands, time_d=0.0, field_lod=0.0)
         return np.asarray(cp.photon_rates(scene, path, exposure).exozodi)[0]
 
     small, full = exozodi(32), exozodi(64)

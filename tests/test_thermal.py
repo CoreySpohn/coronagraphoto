@@ -51,7 +51,8 @@ def test_thermal_image_is_the_uniform_closed_form():
     rates = cp.photon_rates(scene, instrument, exposure)
     nodes = np.asarray(exposure.quadrature.nodes_nm)
     expected = _pixel_rate(instrument, nodes, 290.0, 0.5)
-    assert rates.thermal.shape == (1, 4, 16, 16)
+    assert rates.thermal.shape == (*nodes.shape, 16, 16)
+    assert nodes.shape[1] > 4, "the detector field adds nodes at the default"
     np.testing.assert_allclose(
         rates.thermal,
         np.broadcast_to(expected[..., None, None], rates.thermal.shape),

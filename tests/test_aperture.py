@@ -88,7 +88,9 @@ def plateau():
     """Flat-PSF instrument, its response and one target's record."""
     instrument = _instrument(PlateauCoronagraph(40, 0.25))
     scene = make_system(separation_arcsec=0.03)
-    exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0)
+    # The record tables are compared with the image at the same four nodes, so
+    # the layout is not under test here and the field is zero.
+    exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0, field_lod=0.0)
     response = cp.aperture_response(
         instrument,
         exposure.quadrature,
@@ -105,7 +107,8 @@ def sloped():
     """Sloped-leakage instrument with a record rendered at zero roll."""
     instrument = _instrument(SlopedLeakage(40, 0.25))
     scene = make_system(separation_arcsec=0.05)
-    exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0)
+    # Table and image are compared at the same four nodes; see ``plateau``.
+    exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0, field_lod=0.0)
     response = cp.aperture_response(
         instrument, exposure.quadrature, n_separations=9, n_angles=8
     )
@@ -307,7 +310,8 @@ def test_local_zodi_follows_the_read_time(sloped):
     scene = with_zodi(scene, LeinertZodi())
     scene = eqx.tree_at(lambda s: s.dynamics.frame.dec_deg, scene, jnp.asarray(23.0))
     exposures = [
-        cp.build_exposure(scene, instrument, _BANDS, time_d=t) for t in (0.0, 137.0)
+        cp.build_exposure(scene, instrument, _BANDS, time_d=t, field_lod=0.0)
+        for t in (0.0, 137.0)
     ]
     built, rebuilt = (
         cp.aperture_record(scene, instrument, exposure, response)
@@ -767,7 +771,7 @@ def test_aperture_read_needs_a_position_only_for_a_pointing_dependent_zodi(plate
         (None, None),
         is_leaf=lambda x: x is None,
     )
-    exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0)
+    exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0, field_lod=0.0)
     record = cp.aperture_record(
         with_zodi(scene, AYOZodi()), instrument, exposure, response
     )

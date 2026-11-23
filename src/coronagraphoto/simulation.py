@@ -351,6 +351,33 @@ def _zero_unsupported(values, supported):
     }
 
 
+def _real_counts(quadrature):
+    """Real nodes of each band from the static layout; every node if unknown."""
+    if quadrature.pieces is None:
+        return (quadrature.nodes_nm.shape[1],) * len(quadrature.bands)
+    return tuple(sum(n for *_, n in band) for band in quadrature.pieces)
+
+
+def _real_nodes(quadrature):
+    """Band index, node index and padded-slot source of the real nodes, as host arrays.
+
+    The first two list every real node in band order. ``source`` has the
+    quadrature's (W, Q) shape, flattened, and gives for each slot the position of
+    its node in that list; a padded slot points at the first real node of its
+    band.
+    """
+    counts = _real_counts(quadrature)
+    q = quadrature.nodes_nm.shape[1]
+    bands = np.concatenate([np.full(n, i) for i, n in enumerate(counts)])
+    nodes = np.concatenate([np.arange(n) for n in counts])
+    starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
+    slot = np.where(
+        np.arange(q)[None, :] < np.asarray(counts)[:, None], np.arange(q), 0
+    )
+    source = (starts[:, None] + slot).ravel()
+    return jnp.asarray(bands), jnp.asarray(nodes), jnp.asarray(source)
+
+
 @eqx.filter_jit
 def _render(scene, instrument, exposure, *, kind, band_ids, planets, uniform_sky):
     """Render every node of one observation as a single traced program.
@@ -371,13 +398,16 @@ def _render(scene, instrument, exposure, *, kind, band_ids, planets, uniform_sky
     )
     if kind == "photons":
         shape = quadrature.nodes_nm.shape
-        bands, nodes = jnp.indices(shape)
+        bands, nodes, source = _real_nodes(quadrature)
         values, covered = jax.lax.map(
             lambda x: node(*x),
-            (quadrature.nodes_nm.ravel(), bands.ravel(), nodes.ravel()),
+            (quadrature.nodes_nm[bands, nodes], bands, nodes),
         )
-        values = jax.tree.map(lambda x: x.reshape((*shape, *grid.shape)), values)
-        supported = jnp.all(covered.reshape((*shape, *grid.shape)), axis=1)
+        # Each padded slot repeats the first real node of its band.
+        values = jax.tree.map(
+            lambda x: x[source].reshape((*shape, *grid.shape)), values
+        )
+        supported = jnp.all(covered[source].reshape((*shape, *grid.shape)), axis=1)
         return _zero_unsupported(values, supported[:, None]), supported
 
     # Stream the nodes of each band: only its accumulated rate and one node
@@ -400,7 +430,8 @@ def _render(scene, instrument, exposure, *, kind, band_ids, planets, uniform_sky
                 supported & covered,
             ), None
 
-        xs = (row.nodes_nm[0], row.weights()[0], jnp.arange(row.nodes_nm.shape[1]))
+        real = _real_counts(quadrature)[i]
+        xs = (row.nodes_nm[0, :real], row.weights()[0, :real], jnp.arange(real))
         initial_support = jnp.ones(grid.shape, bool)
         total, supported = jax.lax.scan(step, (initial, initial_support), xs)[0]
         return _zero_unsupported(total, supported), supported
@@ -529,13 +560,15 @@ def build_exposure(
     roll_deg=0.0,
     plan: FramePlan | None = None,
     order: int = 4,
-    field_lod=0.0,
+    field_lod=None,
 ) -> Exposure:
     """Build the host-side Exposure for one observation of a scene.
 
     Each band is split at the breaks the instrument and the scene's local zodi
-    declare, and a Gauss-Legendre rule of ``order`` nodes is applied to every
-    piece (four nodes per band when no break falls inside it). The star, the
+    declare, and a Gauss-Legendre rule is applied to every piece: ``order``
+    nodes, raised for a piece the diffraction pattern slides across by the
+    detector field (``field_lod``), so every pixel of the detector, corners
+    included, is integrated over wavelength to the accuracy of the rule. The star, the
     planets and a tabulated local zodi are not breaks: the exposure also holds
     the ``Resolution`` that reduces each tabulated spectrum of the scene on the
     nodes, so a band integral of a rough stellar spectrum is exact in the
@@ -559,9 +592,11 @@ def build_exposure(
         plan: The frame plan, needed only by :func:`observe`. None for none.
         order: Number of quadrature nodes in each piece of a band.
         field_lod: Largest separation, in lambda/D at the band center, at which
-            the response is read; pieces the diffraction pattern slides across
-            get more nodes. Zero, the default, gives every piece ``order``
-            nodes.
+            the response is read: a number, one value per band, or None for the
+            field the instrument declares, its detector half-diagonal. Pieces
+            the diffraction pattern slides across get more nodes, so a caller
+            that reads a smaller field passes it here and pays for fewer
+            renders; zero gives every piece ``order`` nodes.
 
     Returns:
         The exposure holding the time, roll, wavelength quadrature, its

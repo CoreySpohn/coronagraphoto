@@ -117,30 +117,32 @@ def test_image_path_star_and_planet_match_the_fine_rule():
 
     Truth: the same render on a rule with a piece between every knot of the star
     and the planet (about 200 nodes), for which each node sample is exact Gauss
-    in the table and the table reduction is the identity. The four-node rule
-    with the operator must give the same band-integrated star leakage and planet
-    images to 1e-3 of the peak pixel. Basis: with flat tables the same four-node
-    and fine renders already differ by 3e-4 of the peak in the planet image
-    (the response is a sampled pattern, not a polynomial), so the floor is the
-    response and not the table operator. The floor comes from building the rule
-    with the default field radius of zero (no field-dependent node refinement);
-    a build that sets ``field_lod`` to the detector field gives the response
-    more nodes, and the tolerance returns to 1e-4 of the peak when the default
-    field radius is no longer zero.
+    in the table and the table reduction is the identity. The exposure is built
+    with the default field, the detector half-diagonal, so the response has six
+    nodes here. The band-integrated star leakage must match to 1e-4 of the peak
+    pixel (measured 7.7e-5; the measured four-node value was 3.9e-5, so the
+    bound does not hide the table operator). The planet image is held to 1e-3
+    of its peak (measured 4.8e-4): the order rule assumes the pattern is
+    centered on the detector, and the planet's own pattern is centered 1.6
+    lambda/D off axis on a detector whose half-diagonal is 3.7, so its far wing
+    slides across the band by more cycles than the rule counted. A field of 20
+    lambda/D brings the planet to 1.0e-4 and one of 80 to 1.3e-5, which is the
+    response and not the table operator. An operator that point-sampled the
+    tables would miss by order 1e-1 on both.
     """
     scene, instrument = _rough_scene(), _instrument(chromatic=True)
     coarse = cp.build_exposure(scene, instrument, (_BAND,), time_d=0.0)
     fine_rule = Quadrature.build((_BAND,), scene, instrument)
     fine = exposure_for(scene, fine_rule)
-    assert coarse.quadrature.nodes_nm.shape == (1, 4)
+    assert coarse.quadrature.nodes_nm.shape == (1, 6)
     assert fine_rule.nodes_nm.shape[1] > 150
     assert "table" in {r.kind for r in coarse.resolution.rules}
     got = cp.photon_rates(scene, instrument, coarse).integrate()
     truth = cp.photon_rates(scene, instrument, fine).integrate()
-    for name in ("star_leakage", "planet"):
+    for name, tolerance in (("star_leakage", 1e-4), ("planet", 1e-3)):
         a, b = np.asarray(getattr(got, name)), np.asarray(getattr(truth, name))
         assert np.max(np.abs(b)) > 0
-        np.testing.assert_allclose(a, b, rtol=0, atol=1e-3 * np.max(np.abs(b)))
+        np.testing.assert_allclose(a, b, rtol=0, atol=tolerance * np.max(np.abs(b)))
 
 
 def test_image_path_local_zodi_is_the_exact_table_integral():
@@ -205,21 +207,33 @@ def test_aperture_record_zodi_read_is_the_exact_table_integral():
     )
 
 
-def test_field_lod_reaches_the_build_and_the_default_keeps_the_layout():
-    """Fails if ``field_lod`` is ignored or the default adds nodes.
+def test_the_default_field_is_the_instruments_and_zero_keeps_the_layout():
+    """Fails if the default ignores the instrument's field or ``field_lod`` is ignored.
 
     With no cycles a piece holds exactly ``order`` nodes, odd or even, so the
-    default layout is the pieces times the order; a field of 10 lambda/D at the
-    band centre gives the same piece more nodes. Exact counts.
+    layout at ``field_lod=0`` is the pieces times the order. The default takes
+    the field the instrument declares, so it equals the build that passes that
+    value as a number (identical pieces, exact) and holds more nodes than the
+    order; a field of 10 lambda/D holds more than that of this small detector.
     """
     scene, instrument = make_system(smooth_planet=True), _instrument()
     for order in (1, 3, 4):
         exposure = cp.build_exposure(
-            scene, instrument, (_BAND,), time_d=0.0, order=order
+            scene, instrument, (_BAND,), time_d=0.0, order=order, field_lod=0.0
         )
         assert exposure.quadrature.nodes_nm.shape == (1, order)
+    default = cp.build_exposure(scene, instrument, (_BAND,), time_d=0.0)
+    declared = cp.build_exposure(
+        scene,
+        instrument,
+        (_BAND,),
+        time_d=0.0,
+        field_lod=instrument.spectral_field_lod(_BAND),
+    )
+    assert default.quadrature.pieces == declared.quadrature.pieces
+    assert default.quadrature.nodes_nm.shape[1] > 4
     wide = cp.build_exposure(scene, instrument, (_BAND,), time_d=0.0, field_lod=10.0)
-    assert wide.quadrature.nodes_nm.shape[1] > 4
+    assert wide.quadrature.nodes_nm.shape[1] > default.quadrature.nodes_nm.shape[1]
 
 
 def test_each_node_carries_its_own_star_value():
