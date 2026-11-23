@@ -524,6 +524,9 @@ _TABLE_N = 32
 _TABLE_STEP = 0.25
 _SAMPLING_MARGIN = {"linear": 0.5, "cubic": 2.0, "cubic_spline": 2.0}
 _DEPOSIT_HALF_SUPPORT = {"linear": 1.0, "cubic": 2.0}
+# Pixels of the footprint read's set that the deposit rule leaves out, by
+# geometry on the detectors below: one ring at 3 cells, none at 1 and 2.
+_LOST_TO_DEPOSIT = {("linear", 0.75): 36, ("cubic", 0.75): 28}
 
 
 def _declared_star(reconstruction, pad=0):
@@ -596,7 +599,8 @@ def test_star_support_matches_the_footprint_read(reconstruction, pitch_lod, dete
        holds a field 40 times brighter (a finite-reach read does not see it).
        Truth: finite kernel reach. Tolerance: 64 eps relative, rounding only
        (the wide read forms its kernel positions from a shifted source center
-       and sums over more columns, measured 7e-16; a pixel that reads the ring
+       and sums over more columns, measured at most 3.8e-15, at 0.25 lambda/D;
+       a pixel that reads the ring
        moves by order one). The supported set
        is the one the deposit rule gives, which is contained in the footprint
        read's own set (corners ``m`` cells inside: 0.5 linear, 2 cubic). On
@@ -656,7 +660,8 @@ def test_star_support_matches_the_footprint_read(reconstruction, pitch_lod, dete
         np.testing.assert_array_equal(supported, expected(deposit))
         assert not (supported & ~footprint_set).any()
         lost = int(footprint_set.sum() - supported.sum())
-        print(f"{reconstruction} {pitch_lod}: {lost} pixels lost to the deposit rule")
+        lost = int(footprint_set.sum() - supported.sum())
+        assert lost == _LOST_TO_DEPOSIT.get((reconstruction, pitch_lod), 0)
         _, wide = render(3)
         np.testing.assert_allclose(
             np.asarray(wide.star_leakage)[0][supported],

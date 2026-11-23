@@ -382,7 +382,8 @@ def test_observe_draws_the_default_render_beyond_the_field():
     is False that expectation holds no product term, so its total is exactly
     the thermal term; and the keyword render differs from it on at least one
     pixel beyond the field. Truth: the default ``expected``; exact (the same
-    rates and key through the same draw). The keyword photon record carries
+    rates and key through the same draw). The option given as a NumPy or JAX
+    boolean is the same request as a Python one. The keyword photon record carries
     the same flags and integrates to the keyword ``expected`` (1e-12 relative,
     summation order).
     """
@@ -402,6 +403,9 @@ def test_observe_draws_the_default_render_beyond_the_field():
         np.asarray(default.total())[off], np.asarray(default.thermal)[off]
     )
     assert np.any(np.asarray(kept.total())[off] != np.asarray(default.total())[off])
+    for flag in (np.True_, jnp.bool_(True)):
+        again = cp.expected(scene, path, exposure, static_beyond_speckle=flag)
+        np.testing.assert_array_equal(again.star_leakage, kept.star_leakage)
     # The spectral route keeps the same light under the same flags.
     photons = cp.photon_rates(scene, path, exposure, static_beyond_speckle=True)
     np.testing.assert_array_equal(photons.supported, kept.supported)
@@ -432,8 +436,12 @@ class MaskedPatch(Patch):
 def test_masked_field_support_ends_at_its_data():
     """Fails if a consumer ignores a field's data mask.
 
-    A 24 cell linear field on detector pixels of 2.5 cells whose right half
-    holds no data (zero-filled, mask False). Truth: ``coverage(valid=mask)``
+    A 24 cell linear field on detector pixels of 2.5 cells that holds data
+    only left of x = 0.1 and below y = 0.9 lambda/D (zero-filled elsewhere,
+    mask False); the mask has no mirror symmetry, so a mask read flipped along
+    either axis fails. Independent of ``coverage``, every supported pixel's
+    center lies over a cell with data and every pixel that reads only cells
+    without data lies over one without. Truth: ``coverage(valid=mask)``
     from primitives, at both nodes. ``supported`` is ``static_supported`` AND
     that coverage, so it is False and ``static_supported`` True on the pixels
     over the cells without data; the keyword render equals the no-field render
@@ -441,8 +449,8 @@ def test_masked_field_support_ends_at_its_data():
     with the complementary mask), where the zero fill adds an exact zero.
     """
     plain = _patch(24, 0.25, "linear")
-    x, _ = plain.grid.coordinates()
-    mask = np.asarray(x) < 0
+    x, y = (np.asarray(c) for c in plain.grid.coordinates())
+    mask = (x < 0.1) & (y < 0.9)
     field = MaskedPatch(plain.grid, "linear", plain.data, mask=jnp.asarray(mask))
     scene, path, exposure = _setup(2.5)
     nodes = np.asarray(exposure.quadrature.nodes_nm).ravel()
@@ -479,3 +487,12 @@ def test_masked_field_support_ends_at_its_data():
         np.asarray(kept.star_leakage)[0][no_data],
         np.asarray(alone.star_leakage)[0][no_data],
     )
+    # The cell under each pixel center, from the grids alone, at each node.
+    px, py = (np.asarray(c) for c in detector.coordinates())
+    for w in nodes:
+        column, row = field.grid.to_arcsec(w).unit_to_pixel(px, py)
+        column, row = (
+            np.clip(np.rint(np.asarray(c)), 0, 23).astype(int) for c in (column, row)
+        )
+        under = mask[row, column]
+        assert under[strict].all() and not under[no_data].any()
