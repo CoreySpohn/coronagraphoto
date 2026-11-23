@@ -429,6 +429,18 @@ def build_exposure(
     The build uses the scene only for the spectral breaks of its local zodi, a
     constant of the zodi model, so no scene value is cached in the result and it
     declares no read.
+
+    Args:
+        scene: The scene, used only for the breaks of its local zodi.
+        instrument: The instrument, which declares its own spectral breaks.
+        bands: The bands to observe, each split and integrated separately.
+        time_d: Observation time in days from the scene's epoch.
+        roll_deg: Position angle of detector +y, in degrees.
+        plan: The frame plan, needed only by :func:`observe`. None for none.
+        order: Number of quadrature nodes in each piece of a band.
+
+    Returns:
+        The exposure holding the time, roll, wavelength quadrature and plan.
     """
     models = [m for m in (instrument, scene.local_zodi) if m is not None]
     return Exposure(
@@ -455,6 +467,15 @@ def photon_rates(scene: Scene, instrument: Instrument, exposure: Exposure) -> Ra
     node of the band; the planet, star leakage, local zodi and exozodi are zero
     there at every node. A planet outside the coronagraph's source domain
     contributes zero and leaves every other planet as it would be alone.
+
+    Args:
+        scene: The scene to render.
+        instrument: The instrument to render it with.
+        exposure: The exposure giving the time, roll and wavelength nodes.
+
+    Returns:
+        The photon integrands in photons/s/nm/pixel, with the ``supported``
+        flag of shape (W, ny, nx).
     """
     return _run(scene, instrument, exposure, "photons")
 
@@ -473,6 +494,15 @@ def expected(scene: Scene, instrument: Instrument, exposure: Exposure) -> Rates:
     ``supported`` of shape (W, ny, nx) is False where any node of the band
     reads beyond a product's data (see :func:`photon_rates`); the band-integrated
     planet, star leakage, local zodi and exozodi are zero there.
+
+    Args:
+        scene: The scene to render.
+        instrument: The instrument to render it with, including its detector.
+        exposure: The exposure giving the time, roll and wavelength nodes.
+
+    Returns:
+        The expected rates in electrons/s, band integrated, shape (W, ny, nx),
+        with the ``supported`` flag of shape (W, ny, nx).
     """
     return _run(scene, instrument, exposure, "electrons")
 
@@ -484,6 +514,16 @@ def observe(key, scene: Scene, instrument: Instrument, exposure: Exposure) -> Im
     throughout ``exposure.plan``, which is required. Plan fields are scalar or
     (W,), with W matching the band axis. Detector noise is drawn once after
     combining all source terms.
+
+    Args:
+        key: JAX PRNG key for the detector noise draw.
+        scene: The scene to render.
+        instrument: The instrument to render it with, including its detector.
+        exposure: The exposure giving the time, roll, wavelength nodes and the
+            required frame plan.
+
+    Returns:
+        The noisy electron image of shape (W, ny, nx), one plane per band.
     """
     if exposure.plan is None:
         raise ValueError("observe needs an exposure built with a FramePlan")

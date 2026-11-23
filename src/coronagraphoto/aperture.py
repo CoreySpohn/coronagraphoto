@@ -69,11 +69,11 @@ class ApertureResponse(eqx.Module):
             centred on it, shape (2, W, Q, K): weights ``w`` then ``w**2``,
             each the mean over a ring of sources at that separation. Zero
             where the ring is not supported.
-        throughput_supported: Whether each ring lies in the coronagraph's
-            source domain at that node, shape (W, Q, K).
         throughput_ring_std: Standard deviation of the first moment around
             each ring, shape (W, Q, K): how much azimuth and pixel phase the
             ring mean hides.
+        throughput_supported: Whether each ring lies in the coronagraph's
+            source domain at that node, shape (W, Q, K).
         kernels: Aperture weights on detector pixels for a centre at each
             half-pixel phase, shape (2, W, 2, 2, n, n): moment, band, y
             phase, x phase.
@@ -339,6 +339,21 @@ def aperture_response(
     ``quadrature`` must be the one the exposures will carry, for example
     ``coronagraphoto.build_exposure(...).quadrature``. Only a
     ``Circular(radius_lod, centre="source")`` rule can be tabulated.
+
+    Args:
+        instrument: The instrument whose detector and coronagraph the tables
+            are built for.
+        quadrature: The wavelength nodes and bands the tables are sampled at.
+        rule: The aperture rule to sum with. Must be a ``Circular`` rule with
+            ``centre="source"``.
+        n_separations: Number of rings on the separation axis, at least two.
+        n_angles: Number of sources on each ring, at least one.
+        max_separation_arcsec: Outermost ring separation in arcsec. None uses
+            the largest separation whose aperture stays on the detector.
+
+    Returns:
+        The tables of throughput, ring statistics and pixel weights for this
+        instrument and band set.
     """
     if not isinstance(rule, Circular) or rule.centre != "source":
         raise NotImplementedError(
@@ -492,6 +507,18 @@ def aperture_record(
     applied at each read, through the kept model. A planet's scale is not
     read here; it multiplies the contrast the caller passes, which
     :func:`scene_aperture_rates` takes from the scene.
+
+    Args:
+        scene: The target scene, with its star, disk and local zodi.
+        instrument: The instrument the exposure is rendered with.
+        exposure: The exposure whose quadrature, ``time_d`` and ``roll_deg``
+            the star leakage, uniform sky and disk are rendered at.
+        response: The aperture tables built for this instrument and for
+            ``exposure.quadrature``.
+
+    Returns:
+        The tabulated aperture rates in photons/s/nm at the nodes of the
+        exposure's quadrature, ready to read with :func:`aperture_rates`.
     """
     quadrature = exposure.quadrature
     nodes = quadrature.nodes_nm
@@ -637,6 +664,19 @@ def aperture_rates(
     All arguments are scalars apart from ``contrast``. Batch with
     ``jax.vmap``; a ``time_d`` shared by a batch of planets (``in_axes`` None,
     or closed over) costs one radiance evaluation for the whole batch.
+
+    Args:
+        record: The aperture record built for the target and exposure.
+        east_arcsec: Planet offset east of the star, in arcsec.
+        north_arcsec: Planet offset north of the star, in arcsec.
+        contrast: Planet-to-star contrast, a scalar or shape (W, Q).
+        time_d: Observation time in days from the record's epoch.
+        roll_deg: Position angle of detector +y for this read, in degrees.
+            None uses the record's roll.
+
+    Returns:
+        The planet, star leakage, local zodi, exozodi and thermal rates in
+        photons/s/nm, with ``n_pix``, ``variance`` and the ``supported`` flag.
     """
     east, north = jnp.asarray(east_arcsec), jnp.asarray(north_arcsec)
     separation = jnp.hypot(east, north)
@@ -722,6 +762,17 @@ def scene_aperture_rates(
     ``supported`` has shape ``(W, K, T)``: False where the read is outside what
     the coronagraph data hold (see :func:`aperture_rates`), with zero fields.
     A scene with a batch of systems is not read; map this function over them.
+
+    Args:
+        record: The aperture record built for the scene's target.
+        scene: The scene whose planets are read.
+        time_d: Observation times, shape (T,), in days from the scene's epoch.
+        roll_deg: Position angle of detector +y, in degrees, as in
+            :func:`aperture_rates`. None uses the record's roll.
+
+    Returns:
+        The rates of every planet at every time in photons/s/nm, with the
+        shapes given above.
     """
     time_d = jnp.asarray(time_d)
     if time_d.ndim != 1:
