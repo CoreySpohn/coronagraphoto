@@ -437,8 +437,9 @@ def planet_source_support(
     )
     for w, band in enumerate(quadrature.bands):
         center = jnp.asarray(band.center_nm, dtype=dtype)
+        # The renderer reads a sole held component at every node, as here.
         model = models[0]
-        if isinstance(coro, MultiBandCoronagraph):
+        if len(models) > 1:
             index, covered = _covering_model(models, center)
             if not covered:
                 raise ValueError(
@@ -760,8 +761,13 @@ def build_exposure(
         resolution and the plan.
     """
     _refuse_numpy_leaves(scene)
-    models = [m for m in (instrument, scene.local_zodi, scene.disk) if m is not None]
-    quadrature = Quadrature.build(bands, *models, order=order, field_lod=field_lod)
+    models = [m for m in (instrument, scene.local_zodi) if m is not None]
+    # The disk supplies breaks only: its knots split the band, and it has no
+    # say in the field that sets the node count of a piece.
+    disk_breaks = () if scene.disk is None else scene.disk.spectral_breaks_nm()
+    quadrature = Quadrature.build(
+        bands, *models, order=order, breaks_nm=disk_breaks, field_lod=field_lod
+    )
     return Exposure(
         time_d=time_d,
         roll_deg=roll_deg,

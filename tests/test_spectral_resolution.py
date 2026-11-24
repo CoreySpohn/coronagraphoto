@@ -415,6 +415,21 @@ def test_the_default_field_is_the_instruments_and_zero_keeps_the_layout():
         np.testing.assert_array_equal(rule.weights_nm, truth.weights_nm)
         assert rule.pieces == truth.pieces
 
+    # A disk supplies breaks only, never the field: at the default field the
+    # rule is still the instrument's, even for a disk that declares one.
+    class WideFieldExozodi(AYOExozodi):
+        def spectral_field_lod(self, band):
+            return 100.0
+
+    wide_disk = eqx.tree_at(
+        lambda s: s.disk, scene, WideFieldExozodi(), is_leaf=lambda x: x is None
+    )
+    truth = Quadrature.build((_BAND,), instrument, zodi, order=4, field_lod=None)
+    rule = cp.build_exposure(wide_disk, instrument, (_BAND,), time_d=0.0).quadrature
+    np.testing.assert_array_equal(rule.nodes_nm, truth.nodes_nm)
+    np.testing.assert_array_equal(rule.weights_nm, truth.weights_nm)
+    assert rule.pieces == truth.pieces
+
 
 def test_exovista_disk_knots_resolve_narrow_spectral_feature():
     """Integrate one disk cell against the trapezoidal knot integral.

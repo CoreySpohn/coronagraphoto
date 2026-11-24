@@ -412,6 +412,18 @@ def test_planet_source_support_selects_each_component(multiband_source_domain):
     assert float(planet[0, 0].sum()) > 0
     np.testing.assert_array_equal(support[:, 0, 0], [True])
 
+    # A rule whose only node is red holds red alone, and the renderer reads a
+    # sole held component at every node, so the query reads red at a center
+    # (545 nm) that red's bandpass does not cover.
+    scene = make_system(separation_arcsec=separation, smooth_planet=True)
+    sole = exposure_for(
+        scene, Quadrature((Band(530.0, 560.0),), np.array([[558.0]]), np.ones((1, 1)))
+    )
+    assert float(cp.photon_rates(scene, path, sole).planet.sum()) > 0
+    np.testing.assert_array_equal(
+        cp.planet_source_support(scene, path, sole)[:, 0, 0], [True]
+    )
+
 
 def test_planet_source_support_uses_band_center_for_crossing_band(
     multiband_source_domain,
