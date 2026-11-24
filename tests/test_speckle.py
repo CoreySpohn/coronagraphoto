@@ -8,6 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import centroid, exposure_for, make_path, make_system
+from hwoutils.constants import s2d
 from hwoutils.epoch import Epoch
 from optixstuff import AbstractSpeckleField, FramePlan
 from optixstuff.grids import (
@@ -26,25 +27,25 @@ from coronagraphoto import photon_rates
 
 
 class Halo(AbstractSpeckleField):
-    """A finite halo evolving in days, on its own instrumental grid."""
+    """A finite halo evolving over days of its own clock, on its own grid."""
 
     grid: PixelGrid = eqx.field(
         static=True,
         default=PixelGrid.focal(8, 0.5, Frame(550.0, 6.0, "circumscribed")),
     )
-    epoch_d: float = 3.0
+    epoch_d: float = eqx.field(static=True, converter=float, default=3.0)
     level: float = 1.5
 
     def spectral_breaks_nm(self):
         """The halo is achromatic."""
         return np.empty(0)
 
-    def realize(self, *, wavelength_nm, time_d=0.0):
+    def realize(self, *, wavelength_nm, elapsed_s=0.0):
         """A time-dependent flux fraction per native pixel."""
         data = (
             jnp.zeros((8, 8))
             .at[5, 6]
-            .set(64e-10 * (self.level + jnp.cos(time_d - self.epoch_d)))
+            .set(64e-10 * (self.level + jnp.cos(elapsed_s * s2d)))
         )
         return Image(
             data,
@@ -160,6 +161,40 @@ def test_speckle_leakage_day_clock():
             np.testing.assert_allclose(a[index], b, rtol=1e-10, atol=1e-18)
 
 
+def test_render_converts_scene_time_once_and_refuses_x32():
+    """Fails if the render ignores the field's epoch or subtracts it itself.
+
+    Truth: the same halo anchored at zero and rendered at the elapsed time.
+    Under x64 a halo at ``epoch_d = 2`` rendered at ``2 + t * s2d`` d gives the
+    star leakage of the zero-anchored halo at ``t * s2d`` d to 4 float64 eps
+    (the binary64 subtraction rounds by at most half an ulp of 2.7 d, which
+    moves the cosine by under 1e-16 of the halo). Under x32 the anchored render
+    raises ``ValueError`` and the zero-anchored one does not. Fails if the
+    render passes ``time_d * d2s`` (the epoch is ignored) or forms
+    ``(time_d - epoch_d) * d2s`` itself (the x32 render no longer raises).
+    """
+    t_s = 0.7 * 86400.0
+
+    def render(time_d, speckle):
+        path = make_path(detector_n=16)
+        path = eqx.tree_at(
+            lambda p: p.speckle, path, speckle, is_leaf=lambda v: v is None
+        )
+        system = make_system()
+        q = Quadrature.build((Band(549.5, 550.5),), system, path, speckle, order=1)
+        return photon_rates(system, path, exposure_for(system, q, time_d=time_d))
+
+    anchored = render(2.0 + t_s * s2d, Halo(epoch_d=2.0))
+    zero = render(t_s * s2d, Halo(epoch_d=0.0))
+    np.testing.assert_allclose(
+        anchored.star_leakage, zero.star_leakage, rtol=4 * np.finfo(float).eps
+    )
+    with jax.enable_x64(False):
+        with pytest.raises(ValueError, match="epoch_d"):
+            render(2.0 + t_s * s2d, Halo(epoch_d=2.0))
+        render(t_s * s2d, Halo(epoch_d=0.0))
+
+
 class Patch(AbstractSpeckleField):
     """A smooth excess on a square grid narrower than the detector.
 
@@ -171,13 +206,13 @@ class Patch(AbstractSpeckleField):
     grid: PixelGrid = eqx.field(static=True)
     reconstruction: str = eqx.field(static=True)
     data: jax.Array
-    epoch_d: float = 0.0
+    epoch_d: float = eqx.field(static=True, converter=float, default=0.0)
 
     def spectral_breaks_nm(self):
         """The excess is achromatic."""
         return np.empty(0)
 
-    def realize(self, *, wavelength_nm, time_d=0.0):
+    def realize(self, *, wavelength_nm, elapsed_s=0.0):
         """The same cell integrals at every node and time."""
         return Image(
             self.data,
@@ -427,9 +462,9 @@ class MaskedPatch(Patch):
         """Cells that hold data (a leaf, so traced inside the render)."""
         return self.mask
 
-    def realize(self, *, wavelength_nm, time_d=0.0):
+    def realize(self, *, wavelength_nm, elapsed_s=0.0):
         """The Patch values where the mask holds, exactly 0.0 elsewhere."""
-        image = super().realize(wavelength_nm=wavelength_nm, time_d=time_d)
+        image = super().realize(wavelength_nm=wavelength_nm, elapsed_s=elapsed_s)
         return replace(image, data=jnp.where(self.mask, image.data, 0.0))
 
 

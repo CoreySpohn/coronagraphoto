@@ -129,11 +129,14 @@ def _node_rates(
     if speckle is not None:
         # The field owns its native lod grid, Frame and reconstruction, and
         # ends where its data end: its grid, narrowed by its data mask when
-        # its array is wider than its data. Its clock subtracts its own epoch.
-        # Its coverage is kept apart from the static products'. The excess is
-        # signed (coherent interference can lower the floor); only the total
-        # leakage is clipped at zero below.
-        excess = speckle.realize(wavelength_nm=wavelength_nm, time_d=time_d)
+        # its array is wider than its data. Scene time is converted by the
+        # field's ``elapsed_s``, which refuses a float32 time at a nonzero
+        # epoch. Its coverage is kept apart from the static products'. The
+        # excess is signed (coherent interference can lower the floor); only
+        # the total leakage is clipped at zero below.
+        excess = speckle.realize(
+            wavelength_nm=wavelength_nm, elapsed_s=speckle.elapsed_s(time_d)
+        )
         leakage = leakage + onto_detector(excess)
         speckle_covered = coverage(
             replace(excess.grid.to_arcsec(wavelength_nm), orientation=grid.orientation),

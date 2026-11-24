@@ -1073,13 +1073,13 @@ class _CentralField(ox.AbstractSpeckleField):
         static=True,
         default=PixelGrid.focal(16, 0.25, Frame(550.0, 6.0, "circumscribed")),
     )
-    epoch_d: float = 0.0
+    epoch_d: float = eqx.field(static=True, converter=float, default=0.0)
 
     def spectral_breaks_nm(self):
         """The excess is achromatic."""
         return np.empty(0)
 
-    def realize(self, *, wavelength_nm, time_d=0.0):
+    def realize(self, *, wavelength_nm, elapsed_s=0.0):
         """Ten times the static floor in every cell."""
         return Image(
             jnp.full(self.grid.shape, 1e-8 * self.grid.pixel_area),

@@ -48,7 +48,11 @@ Use deterministic rates for gradients and likelihood means; discrete noisy
 draws are not differentiable physical forward models. Access individual
 sources through record fields and `.total()` for their sum. A scene with
 `local_zodi=None` has no local zodi. The speckle model is `instrument.speckle`;
-construct an instrument without that field to disable an attached model.
+construct an instrument without that field to disable an attached model. The
+render converts the exposure time with the field's `elapsed_s(time_d)`; under
+x32 a field with a nonzero `epoch_d` is refused, and the ways out are to enable
+x64, to move the scene epoch to the observation so that `epoch_d` is zero, or to
+anchor the field at zero.
 
 ## Image orientation and roll
 

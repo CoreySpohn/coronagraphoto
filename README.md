@@ -142,8 +142,12 @@ up; at 90 degrees, north is right. A roll changes this orientation for both
 planets and disks.
 
 Speckle fields are supplied through `Instrument.speckle`. Their positive excess joins `star_leakage`; their existing
-physics is retained. The reader calls `realize(wavelength_nm=..., time_d=...)`
-and leaves epoch conversion to the field. The speckle pattern remains fixed
+physics is retained. The reader calls
+`realize(wavelength_nm=..., elapsed_s=speckle.elapsed_s(time_d))`: the field
+converts scene time to seconds on its own clock. Under x32 a field with a
+nonzero `epoch_d` is refused, because a float32 scene time near that epoch has
+already lost the offset; enable x64, move the scene epoch to the observation so
+that `epoch_d` is zero, or anchor the field at zero. The speckle pattern remains fixed
 in detector coordinates as pointing rolls.
 
 Select record fields for per-source access. See
