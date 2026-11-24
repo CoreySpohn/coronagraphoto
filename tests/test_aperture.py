@@ -1069,7 +1069,6 @@ def test_curves_and_record_routes_agree_on_the_flag_across_the_stamp_edge():
             contrast=1e-10,
             time_d=0.0,
             sources=sources,
-            uniform_sky=None,
         )
         for rates in (image, analytic):
             if not np.any(rates.supported):

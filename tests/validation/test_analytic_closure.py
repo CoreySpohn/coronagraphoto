@@ -196,7 +196,6 @@ class Case:
             contrast=CONTRAST,
             time_d=0.0,
             sources=self.sources,
-            uniform_sky=self.coro.uniform_sky_profile,
         )
         return analytic, image
 
