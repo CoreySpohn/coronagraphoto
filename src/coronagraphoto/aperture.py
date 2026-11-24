@@ -629,18 +629,25 @@ def aperture_record(
     )
 
 
-def _linear(table, position):
+def _linear(table, position, *, weighted=False):
     """Read the last axis of a table at a fractional index.
 
     Returns the value and whether the position lies inside the table. The
     read clamps to the table, so the value is finite and its gradient exact
     everywhere; outside the table it is the edge's linear continuation and the
-    caller replaces it.
+    caller replaces it. ``weighted`` forms the value as a weighted sum of the
+    two endpoints, which keeps full relative precision where the table falls
+    by orders of magnitude between neighbours; the default difference form is
+    cheaper and fine for smooth tables.
     """
     last = table.shape[-1] - 1
     k = jnp.clip(jnp.floor(position), 0, last - 1).astype(int)
     pair = jax.lax.dynamic_slice_in_dim(table, k, 2, axis=-1)
-    value = pair[..., 0] + (position - k) * (pair[..., 1] - pair[..., 0])
+    fraction = position - k
+    if weighted:
+        value = (1 - fraction) * pair[..., 0] + fraction * pair[..., 1]
+    else:
+        value = pair[..., 0] + fraction * (pair[..., 1] - pair[..., 0])
     return value, (position >= 0) & (position <= last)
 
 
@@ -755,10 +762,23 @@ def aperture_rates(
             record.quadrature, record.resolution, record.sky_frame, time_d
         )
     position = separation / record.separation_step_arcsec
-    planet_response, in_table = _linear(record.planet_response, position)
+    planet_response, in_table = _linear(record.planet_response, position, weighted=True)
+    selected = jnp.asarray(planet if contrast is None else contrast)
+    name = "planet" if contrast is None else "contrast"
+    try:
+        selected = jnp.broadcast_to(selected, record.star.shape)
+    except ValueError:
+        raise ValueError(
+            f"{name} has shape {selected.shape}, which does not broadcast to "
+            f"the record's (W, Q) = {record.star.shape}"
+        ) from None
+    # Promote to the response's dtype before any product, so a float32 star or
+    # contrast is not rounded to float32 ahead of a float64 response.
+    dtype = jnp.result_type(record.star, selected, planet_response)
+    selected = selected.astype(dtype)
     if contrast is not None:
-        planet = record.star * jnp.asarray(contrast)
-    planet = jnp.asarray(planet) * planet_response
+        selected = record.star.astype(dtype) * selected
+    planet = selected * planet_response
     bad_ring, _ = _linear(record.planet_unsupported, position)
     supported = (
         inside_here

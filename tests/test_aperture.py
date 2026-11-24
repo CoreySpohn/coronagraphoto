@@ -531,8 +531,8 @@ def test_thermal_planet_scale_is_its_own_on_the_record_route(
 
     Basis: a 300 K blackbody planet's flux does not depend on the host, so a
     star scale of two doubles only the leakage and a planet scale of two
-    doubles only the planet, each by its factor within 1e-5 relative float32
-    rounding; the record and the contrasts are rebuilt for each scene.
+    doubles only the planet, each by its factor within rtol=1e-5; the record
+    is rebuilt for each scene.
     """
     _, instrument, exposure, response, _ = plateau
     planet = Planet(jnp.ones(1), BlackbodyPhysicalModel(teff_K=jnp.array([300.0])))
@@ -1389,3 +1389,112 @@ def test_aperture_requires_one_planet_input(plateau, kwargs):
     for read in (cp.aperture_rates, jax.jit(cp.aperture_rates)):
         with pytest.raises(ValueError, match=r"contrast.*planet|planet.*contrast"):
             read(record, 0.03, 0.0, time_d=0.0, **kwargs)
+
+
+@pytest.fixture(scope="module")
+def two_band_record(unit_response):
+    """Return a (W=2, Q=4) record and the read position, at unit throughput."""
+    instrument, _ = unit_response
+    wave = jnp.array([400.0, 500.0, 600.0, 700.0])
+    star = Star(
+        wavelengths_nm=wave,
+        times_d=jnp.array([0.0]),
+        flux_density_jy=photons_per_nm_per_m2_to_jy(
+            jnp.array([1.0, 2.0, 4.0, 8.0]), wave
+        )[:, None],
+        interpolation_method="linear",
+    )
+    scene = make_system(star=star, separation_arcsec=0.03)
+    exposure = cp.build_exposure(
+        scene,
+        instrument,
+        (Band(500.0, 550.0), Band(550.0, 600.0)),
+        time_d=0.0,
+        field_lod=0.0,
+    )
+    response = cp.aperture_response(
+        instrument,
+        exposure.quadrature,
+        n_separations=2,
+        n_angles=1,
+        max_separation_arcsec=0.04,
+    )
+    response = eqx.tree_at(
+        lambda r: r.throughput, response, jnp.ones_like(response.throughput)
+    )
+    record = cp.aperture_record(scene, instrument, exposure, response)
+    east, north = scene.positions(jnp.array([0.0]))
+    return record, east[0, 0], north[0, 0]
+
+
+@vv.case("aperture-photon-budget", "code-verification")
+@pytest.mark.medium(reason="Two-band response build and x64 compilation take over 5 s")
+@pytest.mark.parametrize("keyword", ["planet", "contrast"])
+def test_planet_input_with_an_extra_axis_is_refused(two_band_record, keyword):
+    """Truth: an input is (W, Q) or broadcasts to it; a batch is not silently read.
+
+    Exact-algebra host refusal, no tolerance. Without the shape check before
+    the response product, a stacked pair becomes the mean and variance inputs.
+    """
+    record, east, north = two_band_record
+    one = jnp.full(record.star.shape, 1e-10)
+    batch = jnp.stack([one, 17 * one])
+    for read in (cp.aperture_rates, jax.jit(cp.aperture_rates)):
+        with pytest.raises(ValueError, match=keyword):
+            read(record, east, north, time_d=0.0, **{keyword: batch})
+    ok = cp.aperture_rates(record, east, north, time_d=0.0, **{keyword: one})
+    assert ok.supported.all()
+
+
+@vv.case("aperture-photon-budget", "code-verification")
+@pytest.mark.medium(reason="Two-band response build and x64 compilation take over 5 s")
+def test_contrast_read_promotes_to_the_response_dtype(two_band_record):
+    """Truth: float32 star and contrast are promoted before the float64 response.
+
+    Floating-point basis: the product of the float32 values taken exactly in
+    float64, rtol=1e-14, atol=0; rounding the product to float32 first
+    differs by 5e-8 relative.
+    """
+    record, east, north = two_band_record
+    star = (record.star * (1 + 1 / 3)).astype(jnp.float32)
+    contrast = jnp.full(record.star.shape, 1.1e-10 / 3, dtype=jnp.float32)
+    record = eqx.tree_at(lambda r: r.star, record, star)
+    assert record.planet_response.dtype == jnp.float64
+    expected = np.asarray(star, np.float64) * np.asarray(contrast, np.float64)
+    for read in (cp.aperture_rates, jax.jit(cp.aperture_rates)):
+        rates = read(record, east, north, contrast=contrast, time_d=0.0)
+        unit = cp.aperture_rates(record, east, north, planet=1.0, time_d=0.0)
+        np.testing.assert_allclose(
+            rates.planet, expected * unit.planet, rtol=1e-14, atol=0
+        )
+
+
+@vv.case("aperture-photon-budget", "code-verification")
+@pytest.mark.medium(reason="Two-band response build and x64 compilation take over 5 s")
+def test_planet_response_keeps_precision_near_a_throughput_drop(two_band_record):
+    """Truth: the weighted sum of the two adjacent ring rates, exactly rounded.
+
+    Floating-point basis: the throughput falls from 0.41 to 8.7e-10 between
+    the rings; the read just inside the outer ring is compared with the exact
+    rational interpolation of the stored endpoints, atol=1e-15 times the outer
+    ring rate (the difference form loses 1e-9 relative here).
+    """
+    from fractions import Fraction
+
+    record, _, _ = two_band_record
+    high, low = 0.41, 8.7e-10
+    table = jnp.stack(
+        [jnp.full(record.star.shape, high), jnp.full(record.star.shape, low)], -1
+    )
+    record = eqx.tree_at(
+        lambda r: r.planet_response,
+        record,
+        jnp.broadcast_to(table, record.planet_response.shape),
+    )
+    step = float(record.separation_step_arcsec)
+    separation = (1 - 1e-9) * step
+    rates = cp.aperture_rates(record, separation, 0.0, planet=1.0, time_d=0.0)
+    assert rates.supported.all()
+    f = Fraction(separation / step)
+    exact = float((1 - f) * Fraction(high) + f * Fraction(low))
+    np.testing.assert_allclose(rates.planet, exact, rtol=0, atol=1e-15 * low)
