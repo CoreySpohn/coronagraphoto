@@ -18,6 +18,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.leaves import check_tree
 from optixstuff import Exposure, FramePlan, Instrument, Rates
 from optixstuff.coronagraph import (
     AbstractImagingCoronagraph,
@@ -549,6 +550,25 @@ def _resolve(scene, quadrature):
     return Resolution(tuple(quadratures), tuple(keys), tuple(rules))
 
 
+def _refuse_numpy_leaves(scene):
+    """Raise ``TypeError`` naming every NumPy leaf of the scene.
+
+    A NumPy leaf is the one violation that can stand in for a value the host
+    build depends on, so it is refused here with its path. The other leaf
+    violations of the rule (weak scalars, Python numbers, a float dtype that is
+    not the active one) are still produced by the libraries that build scenes
+    and are left to those constructors; widen this to ``require_tree`` once they
+    convert every field.
+    """
+    found = [v for v in check_tree(scene) if v.reason == "NumPy leaf"]
+    if found:
+        lines = "\n".join(f"  {v.path}: {v.type} {v.dtype}" for v in found)
+        raise TypeError(
+            "the scene holds NumPy leaves; build it through its constructors, or "
+            f"pass replacement values through as_float_leaf or as_leaf:\n{lines}"
+        )
+
+
 def build_exposure(
     scene: Scene,
     instrument: Instrument,
@@ -589,11 +609,13 @@ def build_exposure(
     :func:`observe`. The local zodi is evaluated at render time for the scene's
     sky frame and ``time_d``.
 
-    The build reads the knot grids of the scene's tables, and ``Exposure.reads``
-    names those leaves: a fit refuses to free one, and moving one after the
-    build is refused by the next build. No other scene value is cached in the
-    result. A band that leaves a table is refused here, naming the table and
-    its end; end the band at the table.
+    The build reads the static knot grids of the scene's tables and caches no
+    other scene value, so the exposure declares no reads: a knot grid is never a
+    leaf, and no fit can move one. Replacing a table's ``Knots`` gives a grid
+    with another digest, and the resolution then holds no operator for it and
+    refuses. A NumPy leaf in the scene is refused at entry, naming its path.
+    A band that leaves a table is refused here, naming the table and its end;
+    end the band at the table.
 
     Args:
         scene: The scene, whose tabulated sources are resolved on the nodes.
@@ -614,6 +636,7 @@ def build_exposure(
         The exposure holding the time, roll, wavelength quadrature, its
         resolution and the plan.
     """
+    _refuse_numpy_leaves(scene)
     models = [m for m in (instrument, scene.local_zodi) if m is not None]
     quadrature = Quadrature.build(bands, *models, order=order, field_lod=field_lod)
     return Exposure(
@@ -622,7 +645,6 @@ def build_exposure(
         quadrature=quadrature,
         plan=plan,
         resolution=_resolve(scene, quadrature),
-        reads=scene.knot_leaves(),
     )
 
 

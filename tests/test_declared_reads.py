@@ -1,7 +1,8 @@
-"""The exposure and the aperture record declare the scene paths they read, exactly.
+"""The exposure reads only static knots; the aperture record declares what it reads.
 
-The exposure reads the knot grids of the scene's tables and caches no value; the
-record also holds the star's node-effective flux.
+The exposure reads the static knot grids of the scene's tables and caches no
+value, so it declares no reads; the record also holds the star's node-effective
+flux and names the scene paths it holds fixed.
 """
 
 from dataclasses import replace
@@ -12,10 +13,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import PlateauCoronagraph, make_path, make_system, with_zodi
+from hwoutils.leaves import canonical
 from hwoutils.model_paths import paths_overlap
 from optixstuff.spectral import Band, Quadrature
 from skyscapes import LeinertZodi, PrecomputedZodi
-from skyscapes.scene import Star
+from skyscapes.scene import Scene, Star
 
 import coronagraphoto as cp
 
@@ -58,22 +60,15 @@ def _floating_leaves(scene):
         yield _dotted(key_path), jax.tree_util.tree_unflatten(treedef, leaves)
 
 
-_KNOTS = {
-    "planets[0].physical_model.wavelengths_nm",
-    "star._wavelengths_nm",
-    "local_zodi.wavelengths_nm",
-}
-
-
-def _tabulated_scene(zodi):
+def _tabulated_scene(zodi, last_knot_nm=700.0, smooth_planet=False):
     """A scene whose star, planet and local zodi (when tabulated) carry knots."""
-    wave = jnp.array([400.0, 450.0, 520.0, 600.0, 700.0])
+    wave = jnp.array([400.0, 450.0, 520.0, 600.0, last_knot_nm])
     star = Star(
         wavelengths_nm=wave,
         times_d=jnp.array([0.0]),
         flux_density_jy=jnp.array([[1.0], [2.0], [3.0], [2.5], [2.0]]),
     )
-    scene = make_system(star=star, separation_arcsec=0.03)
+    scene = make_system(star=star, separation_arcsec=0.03, smooth_planet=smooth_planet)
     return scene if zodi is None else with_zodi(scene, zodi)
 
 
@@ -84,40 +79,86 @@ _ZODIS = {
 }
 
 
-@pytest.mark.parametrize("zodi", _ZODIS.values(), ids=_ZODIS.keys())
-def test_exactly_the_knot_leaves_change_the_build(zodi):
-    """Fails if the build reads a value leaf, or ``reads`` misses a knot leaf.
+def _bitwise_equal(a, b):
+    """True when two trees have one structure and bitwise equal, same-dtype leaves."""
+    return jax.tree.structure(a) == jax.tree.structure(b) and all(
+        np.asarray(x).dtype == np.asarray(y).dtype
+        and np.array_equal(np.asarray(x), np.asarray(y), equal_nan=True)
+        for x, y in zip(jax.tree.leaves(a), jax.tree.leaves(b), strict=True)
+    )
 
-    Every floating leaf of the scene is moved in turn and the exposure rebuilt.
-    The build must raise (the digest of a table no longer matches its knots)
-    for the knot leaves and no other, those leaves must be exactly
-    ``Exposure.reads``, and every other leaf must leave the built exposure
-    unchanged, array for array. The knot leaves are named here by hand: the
-    star's wavelength grid, the planet's, and the tabulated zodi's. A
-    smooth local zodi has none.
+
+@pytest.mark.parametrize("zodi", _ZODIS.values(), ids=_ZODIS.keys())
+def test_exposure_of_a_round_trip_scene_equals_the_live_exposure(zodi):
+    """Fails if the build reads anything the batch round trip changes.
+
+    The scene goes through ``Scene.from_scenes`` and ``to_scenes`` (then
+    ``canonical``, which gives the leaves JAX form; ``to_scenes`` returns host
+    leaves until the batch card removes its host copies, and ``canonical`` is a
+    no-op after) and both are built into an exposure on the same instrument and
+    bands. The two exposures
+    must have one tree structure (the static knots and resolution keys
+    included) and bitwise equal leaves of equal dtype: the same inputs go
+    through the same host build, so there is no tolerance, and the exposure
+    declares no reads.
     """
-    scene = _tabulated_scene(zodi)
+    scene = _tabulated_scene(None)
+    (round_trip,) = canonical(Scene.from_scenes([scene]).to_scenes())
+    if zodi is not None:  # a batch holds no local zodi; it is put back after
+        scene, round_trip = with_zodi(scene, zodi), with_zodi(round_trip, zodi)
     instrument = _instrument()
-    base = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0)
-    expected = {
-        path
-        for path in _KNOTS
-        if path != "local_zodi.wavelengths_nm" or isinstance(zodi, PrecomputedZodi)
-    }
-    assert set(base.reads) == expected
-    moved = list(_floating_leaves(scene))
-    assert len(moved) > len(expected), "the scene should have value leaves to move"
-    refused = set()
-    for path, other in moved:
-        try:
-            rebuilt = cp.build_exposure(other, instrument, _BANDS, time_d=0.0)
-        except ValueError as error:
-            assert "knot" in str(error), (path, error)
-            refused.add(path)
-            continue
-        assert jax.tree.structure(rebuilt) == jax.tree.structure(base), path
-        assert not _changed(base, rebuilt), path
-    assert refused == expected
+    live = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0)
+    other = cp.build_exposure(round_trip, instrument, _BANDS, time_d=0.0)
+    assert live.reads == ()
+    assert _bitwise_equal(live, other)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [np.asarray(12.5), np.float64(12.5)],
+    ids=["ndarray", "np.float64"],
+)
+def test_a_numpy_leaf_is_refused_by_the_build_with_its_path(value):
+    """Fails if a NumPy leaf put into a scene by ``tree_at`` reaches the build.
+
+    ``eqx.tree_at`` bypasses the field converters, so a NumPy value can stand
+    in a scene whose constructors never produced one. The build must raise
+    ``TypeError`` naming the leaf's path, on a NumPy array and on a NumPy
+    scalar; the unchanged scene builds. The truth is the path of the leaf that
+    was replaced, so there is no tolerance.
+    """
+    scene = _tabulated_scene(None)
+    instrument = _instrument()
+    cp.build_exposure(scene, instrument, _BANDS, time_d=0.0)
+    broken = eqx.tree_at(lambda s: s.dynamics.frame.dist_pc, scene, value)
+    with pytest.raises(TypeError, match=r"\.dynamics\.frame\.dist_pc"):
+        cp.build_exposure(broken, instrument, _BANDS, time_d=0.0)
+
+
+def test_replacing_a_stars_knots_leaves_the_old_exposure_without_an_operator():
+    """Fails if an exposure built for one knot grid is accepted for another.
+
+    The star is replaced by one whose static ``Knots`` has the same length and
+    another last knot, on a scene whose planet has no table (so the star's is the
+    only operator and no other refusal can stand in for it). Every leaf shape is
+    unchanged and only the digest differs. The exposure built before the change
+    must refuse the new scene (``LookupError``: no operator for the new digest)
+    in ``photon_rates``, and the exposure built after the change must render it.
+    The truth is the presence of an operator for the digest, so there is no tolerance.
+    """
+    scene = _tabulated_scene(None, smooth_planet=True)
+    instrument = _instrument()
+    exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0)
+    moved = eqx.tree_at(
+        lambda s: s.star, scene, _tabulated_scene(None, 710.0, smooth_planet=True).star
+    )
+    assert moved.star.knots.digest != scene.star.knots.digest
+    with pytest.raises(LookupError):
+        cp.photon_rates(moved, instrument, exposure)
+    fresh = cp.build_exposure(moved, instrument, _BANDS, time_d=0.0)
+    assert np.all(
+        np.isfinite(np.asarray(cp.photon_rates(moved, instrument, fresh).star_leakage))
+    )
 
 
 def _bolometric_scene():
@@ -180,17 +221,19 @@ def test_a_calibration_band_beyond_the_other_tables_is_resolved_for_the_star_onl
 
 
 @pytest.mark.medium(reason="one aperture record per scene leaf")
+@pytest.mark.parametrize("host", [False, True], ids=["jax-input", "numpy-input"])
 @pytest.mark.parametrize("zodi", [None, LeinertZodi()], ids=["no-zodi", "zodi"])
-def test_aperture_record_declares_exactly_what_it_reads(zodi):
+def test_aperture_record_declares_exactly_what_it_reads(zodi, host):
     """Fails if the record reads a leaf outside ``reads``, or ``reads`` is loose.
 
     Every floating leaf of the scene is moved in turn and the record rebuilt. A leaf the
     record depends on must lie under a declared path (a refusal that missed it would let
     a stale record stand), and every declared path must cover a leaf the record depends
     on. The planets and their orbits are not read: a planet enters the read only as an
-    offset and a contrast.
+    offset and a contrast. With ``host`` the planet's table is built from NumPy arrays,
+    which the constructors convert, so the declaration is the same as for JAX input.
     """
-    scene = make_system(separation_arcsec=0.03)
+    scene = make_system(separation_arcsec=0.03, host=host)
     if zodi is not None:
         scene = with_zodi(scene, zodi)
     instrument = _instrument()

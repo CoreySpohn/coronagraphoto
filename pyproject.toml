@@ -18,6 +18,7 @@ classifiers = [
 ]
 dependencies = [
   "equinox>=0.13.2",
+  "hwoutils[jax]>=3.0.0",  # unreleased: next release
   "jax>=0.8.1",
   "jaxtyping>=0.3.3",
   "numpy>=2.1.2",
@@ -37,7 +38,6 @@ docs = [
 ]
 test = [
   "astropy>=6.0.0",
-  "hwoutils[jax]>=3.0.0",  # unreleased: next release
   "jaxedith>=4.0.0",  # unreleased: next release, see .github/sibling-pins.txt
   "ineedvalidation>=1.1.0",
   "pytest>=7.3.2",

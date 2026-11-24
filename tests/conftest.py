@@ -310,23 +310,26 @@ def make_system(
     planet_groups=None,
     smooth_planet=False,
     wavelengths_nm=(400.0, 500.0, 600.0, 700.0),
+    host=False,
 ):
     """Real static-spectrum photometry with a circular orbit at its node.
 
     The planet's contrast is tabulated on ``wavelengths_nm`` unless
-    ``smooth_planet``, which uses a model with no knots.
+    ``smooth_planet``, which uses a model with no knots. With ``host`` the
+    planet's table is given as NumPy arrays, as a loader hands them over.
     """
     star = FlatStar(flux_phot_per_nm_m2=1e6) if star is None else star
-    wavelengths = jnp.asarray(wavelengths_nm)
-    contrast = jnp.asarray(contrast)
+    xp = np if host else jnp
+    wavelengths = xp.asarray(wavelengths_nm)
+    contrast = xp.asarray(contrast)
     values = jnp.broadcast_to(contrast, (wavelengths.size,))
     if smooth_planet:
         model = FlatContrast(contrast)
     else:
         model = GridPhysicalModel(
             wavelengths,
-            jnp.array([0.0, 90.0, 180.0]),
-            jnp.broadcast_to(values[None, :, None], (1, wavelengths.size, 3)),
+            xp.array([0.0, 90.0, 180.0]),
+            xp.broadcast_to(values[None, :, None], (1, wavelengths.size, 3)),
         )
     planet = Planet(jnp.ones(1), model)
     return Scene.from_classical(

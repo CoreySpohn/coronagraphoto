@@ -65,8 +65,9 @@ tabulated sources and the instrument. Its Gauss-Legendre rule splits at every de
 break, including detector QE knots, and the exposure also holds the
 `Resolution` that reduces each tabulated spectrum (star, planet, local zodi) to
 the band's nodes, so a line-rich table integrates exactly with few nodes. A band
-a table does not cover is refused. `Exposure.reads` lists the knot leaves the
-build depends on; changing one needs a new exposure. Reuse one exposure across
+a table does not cover is refused. A table's knot grid is a static `Knots`
+value, never a leaf, so the exposure declares no reads; a scene that
+holds a NumPy leaf is refused at entry. Reuse one exposure across
 readers, and change other fields with `dataclasses.replace`.
 
 ## Exposure times
