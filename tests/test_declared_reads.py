@@ -170,7 +170,7 @@ def test_a_numpy_leaf_in_a_user_module_is_refused_at_every_entry_with_its_path()
     with pytest.raises(TypeError, match=match):
         cp.expected(broken, instrument, exposure)
     rates = jax.jit(lambda sc: cp.expected(sc, instrument, exposure))(scene)
-    assert np.all(np.isfinite(np.asarray(rates.rates)))
+    assert np.all(np.isfinite(np.asarray(rates.star_leakage)))
 
 
 def test_replacing_a_stars_knots_leaves_the_old_exposure_without_an_operator():

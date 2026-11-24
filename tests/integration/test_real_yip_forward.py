@@ -117,9 +117,11 @@ def test_planet_position_gradient_is_exact_inside_and_zero_beyond_the_hull(tmp_p
     2.6 lambda/D (inside the nodes, off a node) and at 6.4 lambda/D (beyond
     the hull at 3), where the image is zero and the gradient is exactly
     zero. Fails on a square root of a zero node distance (NaN) or an
-    unclamped read beyond the hull.
+    unclamped read beyond the hull. The finite-difference probes of ``check_grads``
+    are NumPy values, so each is converted to a JAX leaf before it enters the scene.
     """
     import jax
+    import jax.numpy as jnp
     from jax.test_util import check_grads
 
     from coronagraphoto import photon_rates
@@ -128,7 +130,9 @@ def test_planet_position_gradient_is_exact_inside_and_zero_beyond_the_hull(tmp_p
 
     def planet_sum(a_au):
         scene = eqx.tree_at(
-            lambda s: s.dynamics.orbits.a_AU, scene_for(0.5), a_au[None]
+            lambda s: s.dynamics.orbits.a_AU,
+            scene_for(0.5),
+            jnp.asarray(a_au)[None],
         )
         rates = photon_rates(scene, path, exposure)
         return rates.planet.sum() * 1e12
