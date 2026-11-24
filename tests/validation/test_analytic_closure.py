@@ -183,7 +183,9 @@ class Case:
     def read(self, separation_lod, angle_deg):
         """Return (analytic, image) rates of one planet position."""
         east, north = self.offset(separation_lod, angle_deg)
-        image = cp.aperture_rates(self.record, east, north, CONTRAST, time_d=0.0)
+        image = cp.aperture_rates(
+            self.record, east, north, contrast=CONTRAST, time_d=0.0
+        )
         analytic = analytic_rates(
             self.curves,
             self.system,
@@ -191,7 +193,7 @@ class Case:
             self.quadrature,
             east,
             north,
-            CONTRAST,
+            contrast=CONTRAST,
             time_d=0.0,
             sources=self.sources,
             uniform_sky=self.coro.uniform_sky_profile,

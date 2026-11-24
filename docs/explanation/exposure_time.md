@@ -11,7 +11,7 @@ too slow, so the answer is read from tables that the image path fills once.
 |---|---|---|---|
 | Response | `aperture_response(instrument, quadrature, rule=...)` | once per instrument and band set | seconds to minutes |
 | Record | `aperture_record(scene, instrument, exposure, response)` | once per target, instrument and band set | one background render |
-| Read | `aperture_rates(record, east_arcsec, north_arcsec, contrast, time_d=...)` | once per planet and observation time | a few gathers |
+| Read | `aperture_rates(record, east_arcsec, north_arcsec, *, contrast=None, planet=None, time_d=...)` | once per planet and observation time | a few gathers |
 | Scene read | `scene_aperture_rates(record, scene, time_d, roll_deg=...)` | once per scene and set of times | a vmap of the read |
 
 **Response.** Point sources are placed on rings around the star, imaged on
@@ -24,23 +24,39 @@ centre at each half-pixel phase. Nothing in it depends on a target.
 sky of unit radiance and the scene's disk are rendered once, without planets,
 by the same program as `photon_rates`. Each image is then summed in the
 aperture at every position of a half-pixel lattice, by one convolution. The
-planet table is the response throughput times the star's photon flux
-density, the collecting area and the optical throughput, per unit
-planet-to-star contrast. The collecting area, optical throughput and the
+planet table, `planet_response`, is the response throughput times the effective
+collecting area, per unit planet photon flux density; `record.star` stores the
+node-effective stellar photon flux density at build separately. The collecting area, optical throughput and the
 instrument's `flux_scale` come from one product, `instrument.effective_area_m2`,
 so a record carries the scale of the instrument it was built for. The scene's
 own `flux_scale` leaves behave differently: the star's and the disk's are baked
 into the tables, so changing one makes the record stale, while the local
-zodi's is applied at each read and a planet's multiplies its contrast. The record
+zodi's is applied at each read and a planet's is carried by the photon flux
+density passed to the read (the scene's `Sources.planets`). The record
 refuses a response built for another instrument: another coronagraph, detector
 pixel scale, band set or set of wavelength nodes raises a `ValueError`, so a
 coronagraph swapped with `equinox.tree_at` needs a new response.
 
-**Read.** A planet is an east and a north offset from the star and a contrast, observed
-at a time. The planet rate is read linearly between rings and scaled by the
-contrast. The backgrounds are read bilinearly at the detector position the
+**Read.** A planet is an east and a north offset from the star and a photon flux
+density, observed at a time. The planet response is read linearly between rings
+and multiplied by that flux density. The backgrounds are read bilinearly at the detector position the
 planet falls on, and the uniform-sky read is scaled by the local-zodi radiance
 of that time.
+Read a scene's node-effective planet photon flux density with `planet=`, in
+photons/s/m^2/nm, so its light is independent of the record's stored star.
+Alternatively, `contrast=` states a planet-to-star hypothesis relative to
+`record.star` at build; exactly one of the two keywords is required.
+
+```python notest
+sources = scene.sources(record.quadrature, record.resolution, time_d)
+by_flux = cp.aperture_rates(
+    record, east_arcsec, north_arcsec, planet=sources.planets[:, :, 0, 0], time_d=time_d
+)
+by_contrast = cp.aperture_rates(
+    record, east_arcsec, north_arcsec, contrast=1e-10, time_d=time_d
+)
+```
+
 The read is a pure function of arrays, so it runs under `jax.jit`, `jax.vmap`
 and `jax.grad`.
 
@@ -84,7 +100,7 @@ The radiance costs a table lookup per wavelength node. Under `jax.vmap` a
 evaluated once for the batch; a `time_d` batched alongside the planets is
 evaluated per read. Both stay inside the read budget below.
 
-Only the local zodi follows `time_d`. The star's flux, the disk and any
+The local zodi and the scene's planet flux follow `time_d`. The stored star, the disk and any
 speckle realization are those of the exposure the record was built from.
 
 ## Roll
@@ -138,7 +154,7 @@ record = cp.aperture_record(scene, instrument, exposure, response)
 
 def time_to_snr(east_arcsec, north_arcsec, contrast, time_d):
     rates = cp.aperture_rates(
-        record, east_arcsec, north_arcsec, contrast, time_d=time_d
+        record, east_arcsec, north_arcsec, contrast=contrast, time_d=time_d
     )
     return ox.exposure_time(
         rates,
@@ -157,7 +173,7 @@ times = by_time(easts, norths, contrasts, observation_times_d)
 ```
 
 `scene_aperture_rates(record, scene, time_d)` is that read mapped over every
-planet of a scene and every time in `time_d`, with the positions and contrasts
+planet of a scene and every time in `time_d`, with the positions and planet photon flux densities
 taken from the scene at the record's wavelength nodes. Its `Rates` fields have
 shape `(W, Q, K, T)`, so `optixstuff.exposure_time(rates, detector, 7.0,
 frame_time_s=100.0, post_processing=...)` returns one time per band, planet and time; a planet with
@@ -175,7 +191,7 @@ frame_time_s=100.0, post_processing=...)` returns one time per band, planet and 
   detector, where the separation leaves the planet table, and where the
   coronagraph has no response model. S/N and exposure time are then NaN and
   `valid` is False.
-- Apart from the local zodi, a record holds one time: the star's flux, the
+- The record holds one build time for its backgrounds and contrast reference: the star's flux, the
   disk and any speckle realization are those of `exposure.time_d`.
 - The star's sky position is the one the scene held when the record was
   built; a scene edited afterwards needs a new record.

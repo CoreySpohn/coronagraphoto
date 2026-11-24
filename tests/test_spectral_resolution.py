@@ -357,7 +357,7 @@ def test_aperture_record_zodi_read_is_the_exact_table_integral():
             max_separation_arcsec=0.04,
         )
         record = cp.aperture_record(scene, instrument, exposure, response)
-        read = cp.aperture_rates(record, 0.0, 0.0, 1e-10, time_d=0.0)
+        read = cp.aperture_rates(record, 0.0, 0.0, contrast=1e-10, time_d=0.0)
         assert bool(read.supported.all())
         result[name] = float(read.integrate().local_zodi[0])
     truth = _band_integral(wave, np.asarray(rough.radiance_phot_per_s_m2_nm_sr), _cubic)

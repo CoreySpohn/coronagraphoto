@@ -86,7 +86,7 @@ def closure(tmp_path_factory):
             path, exposure.quadrature, rule=rule, n_separations=33, n_angles=16
         )
         record = cp.aperture_record(system, path, exposure, response)
-        rates = cp.aperture_rates(record, east, north, contrast, time_d=0.0)
+        rates = cp.aperture_rates(record, east, north, contrast=contrast, time_d=0.0)
         electrons = detector.electrons(rates)
 
         # The independent reader: the rule's own weights on the expected images.
@@ -172,7 +172,7 @@ def closure(tmp_path_factory):
         doubled = eqx.tree_at(lambda s: s.disk.amplitude.level, system, 6.0)
         doubled_record = cp.aperture_record(doubled, path, exposure, response)
         doubled_rates = cp.aperture_rates(
-            doubled_record, east, north, contrast, time_d=0.0
+            doubled_record, east, north, contrast=contrast, time_d=0.0
         )
         levels.append(
             dict(

@@ -113,8 +113,10 @@ class ApertureRecord(eqx.Module):
         roll_deg: Roll the backgrounds were rendered at.
         pixel_scale_arcsec: Detector pixel pitch; the lattice pitch is half.
         separation_step_arcsec: Spacing of the planet table's separation axis.
-        planet_per_contrast: Planet rate per unit planet-to-star contrast,
-            shape (2, W, Q, K).
+        planet_response: Collecting gain times aperture throughput, multiplying
+            a planet photon flux density, shape (2, W, Q, K).
+        star: Node-effective stellar photon flux density at build, without
+            collecting gain, shape (W, Q), in photons/s/m^2/nm.
         star_leakage: Star leakage summed in an aperture centred on each
             lattice position, shape (2, W, Q, 2 ny, 2 nx): moment, band,
             node, then the lattice. Lattice index (2 i + a, 2 j + b) is
@@ -153,7 +155,8 @@ class ApertureRecord(eqx.Module):
     roll_deg: Array
     pixel_scale_arcsec: Array
     separation_step_arcsec: Array
-    planet_per_contrast: Array
+    planet_response: Array
+    star: Array
     star_leakage: Array
     uniform_sky: Array
     exozodi: Array
@@ -505,9 +508,10 @@ def aperture_record(
     radiance at the time of each read; nothing of the local zodi is fixed at
     ``exposure.time_d``. A sightline-dependent local zodi on a scene with no sky
     position still builds a record; it raises a ``ValueError`` at the read, not
-    here. The planet table is the response's throughput times the star's photon
-    flux density and the collecting area and optical throughput, so a planet
-    enters the read only as an east offset, a north offset and a contrast.
+    here. The planet table is the response's throughput times the effective
+    collecting area, independent of the star. A planet enters the read as an
+    east offset, a north offset and a photon flux density, or a contrast
+    hypothesis relative to the stellar photon flux density stored at build.
 
     ``response`` must have been built for this instrument and for
     ``exposure.quadrature``. On concrete inputs the call refuses another one
@@ -525,16 +529,17 @@ def aperture_record(
     aperture's pixel count.
 
     The record's ``reads`` lists the scene paths it was built from: the ``star``
-    and the ``dynamics.frame`` (distance, position and epoch), plus the
-    ``local_zodi`` when there is one and the ``disk`` with its two midplane angles
-    when there is one. The planets and their orbits are not read.
+    (for leakage and ``record.star``) and the ``dynamics.frame`` (distance,
+    position and epoch), plus the ``local_zodi`` when there is one and the
+    ``disk`` with its two midplane angles when there is one. The planets and
+    their orbits are not read.
 
     The scene's ``flux_scale`` leaves enter as follows. The star's and the
     disk's scales are part of the nodes the record reads, so they are fixed at
     the build: changing one leaves the record stale. The local zodi's scale is
     applied at each read, through the kept model. A planet's scale is not
-    read here; it multiplies the contrast the caller passes, which
-    :func:`scene_aperture_rates` takes from the scene.
+    read here; it is carried by the planet photon flux density the caller
+    passes, which :func:`scene_aperture_rates` takes from ``Sources.planets``.
 
     Args:
         scene: The target scene, with its star, disk and local zodi.
@@ -588,21 +593,19 @@ def aperture_record(
     unsupported = ~_on_detector(response.radius_pix, *shape) | (bad > 0)
 
     gain = jax.vmap(instrument.effective_area_m2)(nodes.ravel()).reshape(nodes.shape)
-    star = (
-        gain
-        * scene.star.node_flux_density(
-            quadrature,
-            exposure.resolution,
-            jnp.atleast_1d(jnp.asarray(exposure.time_d)),
-            dist_pc=scene.dist_pc,
-        )[..., 0]
-    )
+    star = scene.star.node_flux_density(
+        quadrature,
+        exposure.resolution,
+        jnp.atleast_1d(jnp.asarray(exposure.time_d)),
+        dist_pc=scene.dist_pc,
+    )[..., 0]
     return ApertureRecord(
         quadrature,
         exposure.roll_deg,
         jnp.asarray(instrument.detector.pixel_scale_arcsec),
         response.separation_step_arcsec,
-        star[None, :, :, None] * response.throughput,
+        gain[None, :, :, None] * response.throughput,
+        star,
         star_leakage,
         uniform_sky,
         exozodi,
@@ -626,18 +629,25 @@ def aperture_record(
     )
 
 
-def _linear(table, position):
+def _linear(table, position, *, weighted=False):
     """Read the last axis of a table at a fractional index.
 
     Returns the value and whether the position lies inside the table. The
     read clamps to the table, so the value is finite and its gradient exact
     everywhere; outside the table it is the edge's linear continuation and the
-    caller replaces it.
+    caller replaces it. ``weighted`` forms the value as a weighted sum of the
+    two endpoints, which keeps full relative precision where the table falls
+    by orders of magnitude between neighbours; the default difference form is
+    cheaper and fine for smooth tables.
     """
     last = table.shape[-1] - 1
     k = jnp.clip(jnp.floor(position), 0, last - 1).astype(int)
     pair = jax.lax.dynamic_slice_in_dim(table, k, 2, axis=-1)
-    value = pair[..., 0] + (position - k) * (pair[..., 1] - pair[..., 0])
+    fraction = position - k
+    if weighted:
+        value = (1 - fraction) * pair[..., 0] + fraction * pair[..., 1]
+    else:
+        value = pair[..., 0] + fraction * (pair[..., 1] - pair[..., 0])
     return value, (position >= 0) & (position <= last)
 
 
@@ -663,20 +673,21 @@ def aperture_rates(
     record: ApertureRecord,
     east_arcsec: ArrayLike,
     north_arcsec: ArrayLike,
-    contrast: ArrayLike,
     *,
+    contrast: ArrayLike | None = None,
+    planet: ArrayLike | None = None,
     time_d: ArrayLike,
     roll_deg: ArrayLike | None = None,
 ) -> Rates:
     """Read one planet's aperture rates, in photons/s/nm, from a record.
 
     The planet sits ``east_arcsec`` east and ``north_arcsec`` north of the
-    star, the order and convention of ``Scene.positions``, with planet-to-star
-    ``contrast``: a scalar, or shape (W, Q) for one value per wavelength node.
-    A per-node contrast is the star-weighted node contrast, ``Sources.contrast``
-    of ``Scene.sources``: the number that returns the planet's node-effective
-    flux when multiplied by the node-effective star the record holds. A scalar
-    is exact for a smooth contrast. The aperture is centred on the planet.
+    star, the order and convention of ``Scene.positions``. Pass exactly one
+    of ``planet`` (photon flux density in photons/s/m^2/nm) and ``contrast``
+    (a planet-to-star hypothesis relative to the star at the record's build).
+    Each is scalar or broadcasts to (W, Q). A scene read should pass its
+    node-effective planet flux density, ``Sources.planets``. The aperture is
+    centered on the planet.
 
     ``time_d`` is the observation time in days from the record's epoch. It
     sets the local zodi: the record's zodi model is evaluated for the record's
@@ -684,8 +695,8 @@ def aperture_rates(
     the record's uniform-sky table.
     It has no default, because the time a record was built at is not the time
     of a later read and the zodi would silently be that of the wrong season.
-    The star's flux, the disk and any speckle realization stay those of the
-    exposure the record was built from.
+    The star leakage, ``record.star``, the disk and any speckle realization
+    stay those of the exposure the record was built from.
 
     ``roll_deg`` is the position angle of detector +y for this read and
     defaults to the record's roll. Star leakage, local zodi and the pixel
@@ -705,7 +716,7 @@ def aperture_rates(
     Thermal is the per-pixel rate of the record times ``n_pix``; companion
     terms are zero.
 
-    All arguments are scalars apart from ``contrast``. Batch with
+    All arguments are scalars apart from ``contrast`` and ``planet``. Batch with
     ``jax.vmap``; a ``time_d`` shared by a batch of planets (``in_axes`` None,
     or closed over) costs one radiance evaluation for the whole batch.
 
@@ -713,8 +724,10 @@ def aperture_rates(
         record: The aperture record built for the target and exposure.
         east_arcsec: Planet offset east of the star, in arcsec.
         north_arcsec: Planet offset north of the star, in arcsec.
-        contrast: Planet-to-star contrast, a scalar or the star-weighted node
-            contrast of shape (W, Q).
+        contrast: Planet-to-star hypothesis relative to ``record.star``, scalar
+            or broadcastable to (W, Q). Mutually exclusive with ``planet``.
+        planet: Planet photon flux density in photons/s/m^2/nm, scalar or
+            broadcastable to (W, Q). Mutually exclusive with ``contrast``.
         time_d: Observation time in days from the record's epoch.
         roll_deg: Position angle of detector +y for this read, in degrees.
             None uses the record's roll.
@@ -723,6 +736,8 @@ def aperture_rates(
         The planet, star leakage, local zodi, exozodi and thermal rates in
         photons/s/nm, with ``n_pix``, ``variance`` and the ``supported`` flag.
     """
+    if (contrast is None) == (planet is None):
+        raise ValueError("give exactly one of contrast and planet")
     east, north = jnp.asarray(east_arcsec), jnp.asarray(north_arcsec)
     separation = jnp.hypot(east, north)
     ny, nx = record.n_pix.shape[-2] // 2, record.n_pix.shape[-1] // 2
@@ -747,8 +762,23 @@ def aperture_rates(
             record.quadrature, record.resolution, record.sky_frame, time_d
         )
     position = separation / record.separation_step_arcsec
-    planet_per_contrast, in_table = _linear(record.planet_per_contrast, position)
-    planet = contrast * planet_per_contrast
+    planet_response, in_table = _linear(record.planet_response, position, weighted=True)
+    selected = jnp.asarray(planet if contrast is None else contrast)
+    name = "planet" if contrast is None else "contrast"
+    try:
+        selected = jnp.broadcast_to(selected, record.star.shape)
+    except ValueError:
+        raise ValueError(
+            f"{name} has shape {selected.shape}, which does not broadcast to "
+            f"the record's (W, Q) = {record.star.shape}"
+        ) from None
+    # Promote to the response's dtype before any product, so a float32 star or
+    # contrast is not rounded to float32 ahead of a float64 response.
+    dtype = jnp.result_type(record.star, selected, planet_response)
+    selected = selected.astype(dtype)
+    if contrast is not None:
+        selected = record.star.astype(dtype) * selected
+    planet = selected * planet_response
     bad_ring, _ = _linear(record.planet_unsupported, position)
     supported = (
         inside_here
@@ -792,8 +822,8 @@ def scene_aperture_rates(
 
     A ``jax.vmap`` of :func:`aperture_rates` over the scene's planets and the
     times: positions come from ``scene.positions(time_d)`` and each planet's
-    contrast from ``Scene.sources`` on the record's quadrature and resolution
-    (the star-weighted node contrast, ``Sources.contrast``).
+    photon flux density from ``Sources.planets`` on the record's quadrature
+    and resolution. No division by the stellar flux enters the planet read.
     Nothing is rebuilt. The scene should be the one the record was built from
     (``record.reads`` lists what the record holds fixed).
 
@@ -826,11 +856,16 @@ def scene_aperture_rates(
     if scene.batch_shape:
         raise ValueError("scene_aperture_rates reads one system; vmap it over a batch")
     east, north = scene.positions(time_d)
-    contrast = scene.sources(record.quadrature, record.resolution, time_d).contrast
+    planet = scene.sources(record.quadrature, record.resolution, time_d).planets
 
-    def read(east_arcsec, north_arcsec, contrast, time):
+    def read(east_arcsec, north_arcsec, planet, time):
         rates = aperture_rates(
-            record, east_arcsec, north_arcsec, contrast, time_d=time, roll_deg=roll_deg
+            record,
+            east_arcsec,
+            north_arcsec,
+            planet=planet,
+            time_d=time,
+            roll_deg=roll_deg,
         )
         return tuple(
             (
@@ -843,7 +878,7 @@ def scene_aperture_rates(
 
     over_times = jax.vmap(read, in_axes=(0, 0, -1, 0), out_axes=-1)
     mean, variance = jax.vmap(over_times, in_axes=(0, 0, -2, None), out_axes=-2)(
-        east, north, contrast, time_d
+        east, north, planet, time_d
     )
 
     def rates(values, variance=None):
