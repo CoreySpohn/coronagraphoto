@@ -380,6 +380,37 @@ def test_planet_source_support_selects_each_component(multiband_source_domain):
     outside = exposure_for(scene, Quadrature.monochromatic(610.0))
     with pytest.raises(ValueError, match=r"610.*nm"):
         cp.planet_source_support(scene, path, outside)
+    # A planet-free scene has nothing to select a component for.
+    empty = make_system(planet_groups=(), separation_arcsec=np.empty(0))
+    assert cp.planet_source_support(empty, path, outside).shape == (1, 0, 1)
+
+    # In float32 a red edge 1e-5 nm above 550 nm rounds onto 550 nm, so the
+    # renderer's node comparison admits red at a 550 nm node when its other
+    # node holds red as well; the query compares in the node dtype among the
+    # same components, not in the host's float64 over every component.
+    from dataclasses import replace
+
+    import jax
+    import jax.numpy as jnp
+    from conftest import make_path
+    from optixstuff import MultiBandCoronagraph
+
+    with jax.enable_x64(False):
+        red = BoundedGaussianCoronagraph(n=40, bandpass=Band(550.00001, 600.0))
+        blue = BoundedGaussianCoronagraph(n=16, bandpass=Band(500.0, 550.0))
+        shifted = replace(
+            make_path(n=16, detector_n=8),
+            coronagraph=MultiBandCoronagraph((red, blue)),
+        )
+        scene = make_system(separation_arcsec=separation, smooth_planet=True)
+        rule = Quadrature(
+            (Band(540.0, 560.0),), jnp.array([[550.0, 555.0]]), jnp.ones((1, 2))
+        )
+        edge = exposure_for(scene, rule)
+        planet = cp.photon_rates(scene, shifted, edge).planet
+        support = cp.planet_source_support(scene, shifted, edge)
+    assert float(planet[0, 0].sum()) > 0
+    np.testing.assert_array_equal(support[:, 0, 0], [True])
 
 
 def test_planet_source_support_uses_band_center_for_crossing_band(

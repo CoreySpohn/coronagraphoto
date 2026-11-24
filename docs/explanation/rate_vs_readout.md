@@ -84,7 +84,9 @@ interval; a disk that declares no breaks (an analytic exozodi law) adds none.
 `planet_source_support(scene, instrument, exposure)` returns a `(W, K, T)`
 boolean: whether each planet at each time lies inside the source domain of the
 coronagraph component the renderer selects for each band, read at the band
-center. A planet outside it contributes nothing to that band's image.
+center. The renderer admits each planet at each node, so the flag describes the
+center only: a planet's separation in lambda/D changes across a band, and the
+nodes of a band that crosses a component boundary read different components.
 
 At each node, native coronagraph products are converted with their `Frame`
 and resampled with `optixstuff.grids.resample`, honouring each input Image's

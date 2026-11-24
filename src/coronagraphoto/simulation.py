@@ -384,11 +384,15 @@ def planet_source_support(
     band ``w``: ``source_psfs(...).valid`` of that component, read at the band
     center with the renderer's own planet positions, detector orientation at
     the exposure's roll, component selection (the first component whose
-    bandpass covers the wavelength) and lambda/D conversion. Where it is False
-    the planet contributes nothing to the band's image from that component.
-    The renderer selects a component at each quadrature node, so for a band
-    that crosses a component boundary the query reports the center's
-    component only. Times are ``exposure.time_d`` (a scalar gives T = 1).
+    bandpass covers the wavelength, among the components the renderer holds
+    for this quadrature, compared in the dtype of the quadrature nodes) and
+    lambda/D conversion. The flag describes the band center only.
+    The renderer admits each planet at each quadrature node: the planet's
+    separation in lambda/D changes across a band, and for a band that crosses a
+    component boundary the nodes on either side read different components. A
+    False flag therefore does not guarantee a zero band image, nor a True flag a
+    nonzero one, when admission changes inside the band. Times are
+    ``exposure.time_d`` (a scalar gives T = 1).
     This is a host function on concrete values.
 
     Examples:
@@ -410,30 +414,41 @@ def planet_source_support(
         and time. A planet-free scene has K equal to zero.
 
     Raises:
-        ValueError: A band center falls outside every multiband component.
+        ValueError: A band center falls outside every multiband component the
+            renderer holds for the quadrature.
     """
     _refuse_numpy_leaves(scene)
     grid = _exposure_grid(instrument, exposure)
-    bands = exposure.quadrature.bands
+    quadrature = exposure.quadrature
     _, positions = _planet_positions(scene, jnp.atleast_1d(exposure.time_d))
     _, n_planets, n_times = positions.shape
-    support = np.empty((len(bands), n_planets, n_times), dtype=bool)
+    support = np.zeros((len(quadrature.bands), n_planets, n_times), dtype=bool)
+    if not n_planets:
+        return support
+    # The renderer reads each node in the dtype of the quadrature nodes, so the
+    # center is compared and converted in that dtype too.
+    dtype = jnp.asarray(quadrature.nodes_nm).dtype
     coro = instrument.coronagraph
-    for w, band in enumerate(bands):
-        center = band.center_nm
-        model = coro
+    # The components the renderer holds for this quadrature, in dispatch order.
+    models = (
+        tuple(coro.coronagraphs[i] for i in _band_ids(instrument, scene, quadrature))
+        if isinstance(coro, MultiBandCoronagraph)
+        else (coro,)
+    )
+    for w, band in enumerate(quadrature.bands):
+        center = jnp.asarray(band.center_nm, dtype=dtype)
+        model = models[0]
         if isinstance(coro, MultiBandCoronagraph):
-            index, covered = _covering_model(coro.coronagraphs, center)
+            index, covered = _covering_model(models, center)
             if not covered:
                 raise ValueError(
-                    f"No coronagraph bandpass covers band center {center} nm"
+                    f"No coronagraph bandpass covers band center {band.center_nm} nm"
                 )
-            model = coro.coronagraphs[int(index)]
-        if positions.size:
-            native = model.at_wavelength(center).source_grid
-            x, y = _source_offsets_lod(center, grid, native, positions)
-            valid = model.source_psfs(center, x.ravel(), y.ravel()).valid
-            support[w] = np.asarray(valid).reshape(n_planets, n_times)
+            model = models[int(index)]
+        native = model.at_wavelength(center).source_grid
+        x, y = _source_offsets_lod(center, grid, native, positions)
+        valid = model.source_psfs(center, x.ravel(), y.ravel()).valid
+        support[w] = np.asarray(valid).reshape(n_planets, n_times)
     return support
 
 
