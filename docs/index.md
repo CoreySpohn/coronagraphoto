@@ -13,7 +13,8 @@ Inputs are a `skyscapes.Scene` (star, planets, disk and local zodi), an
 epoch, and a roll in degrees.
 
 `aperture_record` tabulates one target's aperture rates from the same images,
-and `aperture_rates` reads that table once per planet under `jax.vmap`;
+and `aperture_rates` reads that table once per planet under `jax.vmap`, with
+`planet=` for photon flux density or `contrast=` for a build-time stellar hypothesis;
 `optixstuff.snr` and `optixstuff.exposure_time` turn the rates into S/N and time.
 
 See the [README quick start](https://github.com/CoreySpohn/coronagraphoto#quick-start),

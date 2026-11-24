@@ -79,8 +79,8 @@ path fills tables once and the answer is read from them:
 | Function | When | Output |
 |---|---|---|
 | `aperture_response(instrument, quadrature)` | once per instrument and band set | planet throughput against separation, aperture pixel weights |
-| `aperture_record(scene, instrument, exposure, response)` | once per target and exposure | star-leakage, uniform-sky and exozodi tables summed in the aperture on a half-pixel lattice, and `planet_per_contrast` |
-| `aperture_rates(record, east_arcsec, north_arcsec, contrast, time_d=...)` | once per planet and time | aperture `Rates`, photons/s/nm, with `n_pix` and squared-weight `variance` |
+| `aperture_record(scene, instrument, exposure, response)` | once per target and exposure | star-leakage, uniform-sky and exozodi tables summed in the aperture on a half-pixel lattice, and `planet_response` plus build-time `star` |
+| `aperture_rates(record, east_arcsec, north_arcsec, *, contrast=None, planet=None, time_d=...)` | once per planet and time | aperture `Rates`, photons/s/nm, with `n_pix` and squared-weight `variance` |
 | `scene_aperture_rates(record, scene, time_d)` | once per scene and set of times | the same read for every planet at every time, `Rates` fields `(W, Q, K, T)`, ready for `optixstuff.exposure_time` |
 | `optixstuff.snr(rates, detector, time_s, frame_time_s=..., post_processing=...)` | once per planet | S/N per band |
 | `optixstuff.exposure_time(rates, detector, target_snr, frame_time_s=..., post_processing=...)` | once per planet | `ExposureTime(time_s, valid)` per band |

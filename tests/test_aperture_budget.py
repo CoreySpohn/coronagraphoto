@@ -85,7 +85,7 @@ def test_record_meets_the_planner_budget(tmp_path):
     pp = ox.PostProcessing(1e-4, 0.01, background_variance_factor=1.0)
 
     def read(east, north, contrast, time_d):
-        rates = cp.aperture_rates(record, east, north, contrast, time_d=time_d)
+        rates = cp.aperture_rates(record, east, north, contrast=contrast, time_d=time_d)
         kwargs = dict(frame_time_s=100.0, post_processing=pp)
         return (
             ox.snr(rates, detector, 36000.0, **kwargs),
@@ -136,7 +136,9 @@ def test_record_meets_the_planner_budget(tmp_path):
     assert np.all(np.isfinite(batched(*planets, 200.0)[0]))
     assert np.all(np.isfinite(each(*planets, every)[0]))
     zodi = jax.vmap(
-        lambda t: cp.aperture_rates(record, 0.025, 0.043, 1e-10, time_d=t).local_zodi
+        lambda t: (
+            cp.aperture_rates(record, 0.025, 0.043, contrast=1e-10, time_d=t).local_zodi
+        )
     )(times)
     assert np.all(zodi > 0) and float(zodi.max() / zodi.min()) > 1.5
     assert read_us < 5.0
