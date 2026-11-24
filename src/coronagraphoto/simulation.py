@@ -18,7 +18,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.leaves import check_tree
+from hwoutils.leaves import require_tree
 from optixstuff import Exposure, FramePlan, Instrument, Rates
 from optixstuff.coronagraph import (
     AbstractImagingCoronagraph,
@@ -554,19 +554,24 @@ def _refuse_numpy_leaves(scene):
     """Raise ``TypeError`` naming every NumPy leaf of the scene.
 
     A NumPy leaf is the one violation that can stand in for a value the host
-    build depends on, so it is refused here with its path. The other leaf
-    violations of the rule (weak scalars, Python numbers, a float dtype that is
-    not the active one) are still produced by the libraries that build scenes
-    and are left to those constructors; widen this to ``require_tree`` once they
-    convert every field.
+    build depends on, so it is refused here with its path, by the same walk as
+    ``require_tree`` (it enters a user's own Module nested in the scene). The
+    other leaf violations of the rule (weak scalars, Python numbers, a float
+    dtype that is not the active one) are still produced by the libraries that
+    build scenes and are left to those constructors; widen this to
+    ``require_tree`` once they convert every field. Tracers are never NumPy
+    leaves, so a scene under ``jit`` passes.
     """
-    found = [v for v in check_tree(scene) if v.reason == "NumPy leaf"]
-    if found:
-        lines = "\n".join(f"  {v.path}: {v.type} {v.dtype}" for v in found)
-        raise TypeError(
-            "the scene holds NumPy leaves; build it through its constructors, or "
-            f"pass replacement values through as_float_leaf or as_leaf:\n{lines}"
-        )
+    try:
+        require_tree(scene)
+    except TypeError as err:
+        lines = [x for x in str(err).splitlines() if x.endswith("(NumPy leaf)")]
+        if lines:
+            raise TypeError(
+                "the scene holds NumPy leaves; build it through its constructors, or "
+                "pass replacement values through as_float_leaf or as_leaf:\n"
+                + "\n".join(lines)
+            ) from None
 
 
 def build_exposure(
@@ -695,6 +700,7 @@ def photon_rates(
         The photon integrands in photons/s/nm/pixel, with the ``supported``
         and ``static_supported`` flags of shape (W, ny, nx).
     """
+    _refuse_numpy_leaves(scene)
     return _run(
         scene,
         instrument,
@@ -749,6 +755,7 @@ def expected(
         with the ``supported`` and ``static_supported`` flags of shape
         (W, ny, nx).
     """
+    _refuse_numpy_leaves(scene)
     return _run(
         scene,
         instrument,

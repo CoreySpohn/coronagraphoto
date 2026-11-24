@@ -316,10 +316,18 @@ def make_system(
 
     The planet's contrast is tabulated on ``wavelengths_nm`` unless
     ``smooth_planet``, which uses a model with no knots. With ``host`` the
-    planet's table is given as NumPy arrays, as a loader hands them over.
+    planet's table, the default star's table (a short tabulated star in place of
+    the flat one) and the orbit arrays are given as NumPy arrays, as a loader
+    hands them over.
     """
-    star = FlatStar(flux_phot_per_nm_m2=1e6) if star is None else star
     xp = np if host else jnp
+    if star is None and host:
+        star = Star(
+            wavelengths_nm=np.array([400.0, 550.0, 700.0]),
+            times_d=np.array([0.0]),
+            flux_density_jy=np.array([[1.0], [2.0], [1.5]]),
+        )
+    star = FlatStar(flux_phot_per_nm_m2=1e6) if star is None else star
     wavelengths = xp.asarray(wavelengths_nm)
     contrast = xp.asarray(contrast)
     values = jnp.broadcast_to(contrast, (wavelengths.size,))
@@ -341,12 +349,12 @@ def make_system(
         epoch=Epoch(2451545.0) if epoch is None else epoch,
         ra_deg=100.0,
         dec_deg=-20.0,
-        a_AU=jnp.atleast_1d(separation_arcsec) * 10,
-        e=0.0,
-        W_rad=jnp.deg2rad(sky_pa_deg),
-        i_rad=0.0,
-        w_rad=0.0,
-        M0_rad=0.0,
+        a_AU=xp.atleast_1d(separation_arcsec) * 10,
+        e=xp.zeros(1),
+        W_rad=xp.deg2rad(xp.asarray(sky_pa_deg)),
+        i_rad=xp.zeros(1),
+        w_rad=xp.zeros(1),
+        M0_rad=xp.zeros(1),
         epoch_d=epoch_d,
         disk=disk,
     )

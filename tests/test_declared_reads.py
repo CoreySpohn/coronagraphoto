@@ -1,8 +1,9 @@
 """The exposure reads only static knots; the aperture record declares what it reads.
 
 The exposure reads the static knot grids of the scene's tables and caches no
-value, so it declares no reads; the record also holds the star's node-effective
-flux and names the scene paths it holds fixed.
+value, so it declares no reads and moving any floating scene leaf leaves it
+unchanged; the record also holds the star's node-effective flux and names the
+scene paths it holds fixed.
 """
 
 from dataclasses import replace
@@ -93,14 +94,16 @@ def test_exposure_of_a_round_trip_scene_equals_the_live_exposure(zodi):
     """Fails if the build reads anything the batch round trip changes.
 
     The scene goes through ``Scene.from_scenes`` and ``to_scenes`` (then
-    ``canonical``, which gives the leaves JAX form; ``to_scenes`` returns host
-    leaves until the batch card removes its host copies, and ``canonical`` is a
-    no-op after) and both are built into an exposure on the same instrument and
-    bands. The two exposures
+    ``canonical``, which gives the leaves JAX form; ``to_scenes`` may return host
+    leaves, and ``canonical`` is a no-op on JAX ones) and both are built into an
+    exposure on the same instrument and bands. The two exposures
     must have one tree structure (the static knots and resolution keys
     included) and bitwise equal leaves of equal dtype: the same inputs go
     through the same host build, so there is no tolerance, and the exposure
-    declares no reads.
+    declares no reads. Then every floating leaf of the scene is moved in turn
+    and the exposure rebuilt: the build must accept the moved scene and return
+    an exposure bitwise equal to the first, which is the evidence that the
+    exposure needs no reads.
     """
     scene = _tabulated_scene(None)
     (round_trip,) = canonical(Scene.from_scenes([scene]).to_scenes())
@@ -111,6 +114,9 @@ def test_exposure_of_a_round_trip_scene_equals_the_live_exposure(zodi):
     other = cp.build_exposure(round_trip, instrument, _BANDS, time_d=0.0)
     assert not hasattr(live, "reads")
     assert _bitwise_equal(live, other)
+    for path, moved in _floating_leaves(scene):
+        rebuilt = cp.build_exposure(moved, instrument, _BANDS, time_d=0.0)
+        assert _bitwise_equal(live, rebuilt), path
 
 
 @pytest.mark.parametrize(
@@ -133,6 +139,38 @@ def test_a_numpy_leaf_is_refused_by_the_build_with_its_path(value):
     broken = eqx.tree_at(lambda s: s.dynamics.frame.dist_pc, scene, value)
     with pytest.raises(TypeError, match=r"\.dynamics\.frame\.dist_pc"):
         cp.build_exposure(broken, instrument, _BANDS, time_d=0.0)
+
+
+class _UserBox(eqx.Module):
+    """A user's own Module, defined outside the owned packages."""
+
+    inner: object
+
+
+def test_a_numpy_leaf_in_a_user_module_is_refused_at_every_entry_with_its_path():
+    """Fails if a NumPy leaf inside a user's Module nested in the scene gets through.
+
+    The user Module is put into the scene by ``tree_at``. ``build_exposure``,
+    ``photon_rates`` and ``expected`` must raise ``TypeError`` naming the path
+    through the user Module (the walk enters it, as ``require_tree`` does), and
+    ``expected`` under ``jit`` must run on the unchanged scene, where every leaf is
+    a tracer. The truth is the replaced path, so there is no tolerance.
+    """
+    scene = _tabulated_scene(None, smooth_planet=True)
+    instrument = _instrument()
+    exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0)
+    broken = eqx.tree_at(
+        lambda s: s.dynamics.frame.dist_pc, scene, _UserBox(np.asarray(12.5))
+    )
+    match = r"\.dynamics\.frame\.dist_pc.*\.inner"
+    with pytest.raises(TypeError, match=match):
+        cp.build_exposure(broken, instrument, _BANDS, time_d=0.0)
+    with pytest.raises(TypeError, match=match):
+        cp.photon_rates(broken, instrument, exposure)
+    with pytest.raises(TypeError, match=match):
+        cp.expected(broken, instrument, exposure)
+    rates = jax.jit(lambda sc: cp.expected(sc, instrument, exposure))(scene)
+    assert np.all(np.isfinite(np.asarray(rates.rates)))
 
 
 def test_replacing_a_stars_knots_leaves_the_old_exposure_without_an_operator():
@@ -230,8 +268,9 @@ def test_aperture_record_declares_exactly_what_it_reads(zodi, host):
     record depends on must lie under a declared path (a refusal that missed it would let
     a stale record stand), and every declared path must cover a leaf the record depends
     on. The planets and their orbits are not read: a planet enters the read only as an
-    offset and a contrast. With ``host`` the planet's table is built from NumPy arrays,
-    which the constructors convert, so the declaration is the same as for JAX input.
+    offset and a contrast. With ``host`` the planet's table, the star's table and
+    the orbit arrays are built from NumPy arrays, which the constructors convert,
+    so the declaration is the same as for JAX input.
     """
     scene = make_system(separation_arcsec=0.03, host=host)
     if zodi is not None:
