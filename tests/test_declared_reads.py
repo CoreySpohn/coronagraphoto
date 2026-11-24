@@ -14,7 +14,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import PlateauCoronagraph, make_path, make_system, with_zodi
-from hwoutils.leaves import canonical
 from hwoutils.model_paths import paths_overlap
 from optixstuff.spectral import Band, Quadrature
 from skyscapes import LeinertZodi, PrecomputedZodi
@@ -93,20 +92,18 @@ def _bitwise_equal(a, b):
 def test_exposure_of_a_round_trip_scene_equals_the_live_exposure(zodi):
     """Fails if the build reads anything the batch round trip changes.
 
-    The scene goes through ``Scene.from_scenes`` and ``to_scenes`` (then
-    ``canonical``, which gives the leaves JAX form; ``to_scenes`` may return host
-    leaves, and ``canonical`` is a no-op on JAX ones) and both are built into an
-    exposure on the same instrument and bands. The two exposures
-    must have one tree structure (the static knots and resolution keys
-    included) and bitwise equal leaves of equal dtype: the same inputs go
-    through the same host build, so there is no tolerance, and the exposure
-    declares no reads. Then every floating leaf of the scene is moved in turn
-    and the exposure rebuilt: the build must accept the moved scene and return
-    an exposure bitwise equal to the first, which is the evidence that the
-    exposure needs no reads.
+    The scene goes through ``Scene.from_scenes`` and ``to_scenes`` (which
+    return JAX leaves) and both are built into an exposure on the same
+    instrument and bands. The two exposures must have one tree structure (the
+    static knots and resolution keys included) and bitwise equal leaves of
+    equal dtype: the same inputs go through the same host build, so there is no
+    tolerance, and the exposure declares no reads. Then every floating leaf of
+    the scene is moved in turn and the exposure rebuilt: the build must accept
+    the moved scene and return an exposure bitwise equal to the first, which is
+    the evidence that the exposure needs no reads.
     """
     scene = _tabulated_scene(None)
-    (round_trip,) = canonical(Scene.from_scenes([scene]).to_scenes())
+    (round_trip,) = Scene.from_scenes([scene]).to_scenes()
     if zodi is not None:  # a batch holds no local zodi; it is put back after
         scene, round_trip = with_zodi(scene, zodi), with_zodi(round_trip, zodi)
     instrument = _instrument()
