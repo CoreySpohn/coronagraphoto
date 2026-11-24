@@ -61,9 +61,9 @@ def test_node_yield_once(chromatic):
         import jax.numpy as jnp
 
         path = eqx.tree_at(
-            lambda p: p.detector._qe_curve,
+            lambda p: p.detector._qe_values,
             path,
-            (jnp.array([500.0, 600.0]), jnp.array([0.8, 0.8])),
+            jnp.array([0.8, 0.8]),
         )
     actual = cp.expected(scene, path, exposure).planet
     expected = np.zeros_like(actual)
@@ -199,9 +199,9 @@ def test_expected_integrates_declared_response_kink():
         lambda p: p.attenuating_elements, path, (TransmissiveElement(response),)
     )
     path = eqx.tree_at(
-        lambda p: p.detector._qe_curve,
+        lambda p: p.detector._qe_values,
         path,
-        (jnp.array([500.0, 600.0]), jnp.full(2, 0.8)),
+        jnp.full(2, 0.8),
     )
     sky = PrecomputedZodi(jnp.array([500.0, 600.0]), jnp.full(2, 1e12))
     q = Quadrature.build((band,), system, path, sky, order=1)

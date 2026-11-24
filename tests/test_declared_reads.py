@@ -109,7 +109,7 @@ def test_exposure_of_a_round_trip_scene_equals_the_live_exposure(zodi):
     instrument = _instrument()
     live = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0)
     other = cp.build_exposure(round_trip, instrument, _BANDS, time_d=0.0)
-    assert live.reads == ()
+    assert not hasattr(live, "reads")
     assert _bitwise_equal(live, other)
 
 

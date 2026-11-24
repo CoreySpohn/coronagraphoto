@@ -362,14 +362,9 @@ def make_path(
     detector = Detector(
         pixel_scale_arcsec=(step if detector_step is None else detector_step) * scale,
         shape=(n if detector_n is None else detector_n,) * 2,
-        qe_curve=(jnp.array([400.0, 700.0]), jnp.array([1.1, 0.5]).clip(0, 1)),
+        # Exact .8 - .002*(lambda-550) in the worked interval.
+        qe_curve=(jnp.array([500.0, 600.0]), jnp.array([0.9, 0.7])),
         survival_fraction=0.9,
-    )
-    # Exact .8 - .002*(lambda-550) in the worked interval.
-    detector = eqx.tree_at(
-        lambda d: d._qe_curve,
-        detector,
-        (jnp.array([500.0, 600.0]), jnp.array([0.9, 0.7])),
     )
     return Instrument(
         SimplePrimary(circumscribed_diameter_m=6.0, collecting_area_m2=40.0),
