@@ -428,7 +428,7 @@ def test_disk_render_does_not_depend_on_detector_extent():
     np.testing.assert_allclose(small, crop, rtol=0, atol=1e-10 * crop.max())
 
 
-def test_disk_reaches_the_operator_on_its_scene_grid(monkeypatch):
+def test_disk_reaches_the_operator_on_its_scene_grid():
     """Fails if disk cells beyond the stored PSF grid never reach the operator.
 
     A coronagraph whose ``scene_grid`` pads its 24-pixel PSF grid by 8 cells
@@ -473,9 +473,8 @@ def test_disk_reaches_the_operator_on_its_scene_grid(monkeypatch):
             seen.setdefault(type(self).__name__, scene)
             return super().render_scene(scene, wavelength_nm, grid=grid)
 
-    # The operators are read as concrete values from outside the trace; a
-    # checkpoint traces its body even without JIT, so this test runs without it.
-    monkeypatch.setattr(jax, "checkpoint", lambda f, **kwargs: f)
+    # The operators are read as concrete values from outside the trace, which
+    # holds under disable_jit because the node is not checkpointed there.
     scene = make_system(disk=AYOExozodi(level_zodis=3.0))
     bands = (Band(500.0, 600.0),)
     base = make_path(n=n, cube=True)

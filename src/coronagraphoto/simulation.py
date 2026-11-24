@@ -257,6 +257,10 @@ def _band_ids(instrument, scene, quadrature):
     return ids
 
 
+def _identity(fn):
+    return fn
+
+
 def _node_function(models, scene, instrument, exposure, grid, planets, uniform_sky):
     """Return node(w, i, j): the rates and pixel support at one node.
 
@@ -275,7 +279,9 @@ def _node_function(models, scene, instrument, exposure, grid, planets, uniform_s
     The returned function is wrapped in :func:`jax.checkpoint`, so reverse-mode
     differentiation recomputes one node on the backward pass instead of
     holding every node's intermediates of the coronagraph synthesis. Forward
-    evaluation and forward-mode differentiation are unchanged.
+    evaluation and forward-mode differentiation are unchanged. Under
+    ``jax.disable_jit()`` the wrapper is skipped, because a checkpoint traces its
+    body even eagerly and eager debugging then loses concrete values.
     """
     system, zodi = scene, scene.local_zodi
     time_d = jnp.asarray(exposure.time_d)
@@ -323,8 +329,10 @@ def _node_function(models, scene, instrument, exposure, grid, planets, uniform_s
             w, model, system, instrument, time_d, grid, positions, row(w, i, j)
         )
 
+    remat = _identity if jax.config.jax_disable_jit else jax.checkpoint
+
     if len(models) == 1:
-        return jax.checkpoint(with_model(models[0]))
+        return remat(with_model(models[0]))
 
     def node(w, i, j):
         covered = jnp.stack(
@@ -340,7 +348,7 @@ def _node_function(models, scene, instrument, exposure, grid, planets, uniform_s
             speckle,
         )
 
-    return jax.checkpoint(node)
+    return remat(node)
 
 
 # Terms that read a coronagraph product. Thermal emission is uniform and reads
