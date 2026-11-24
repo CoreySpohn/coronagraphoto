@@ -73,6 +73,19 @@ rather than adding a node per knot, so a rough star adds no nodes. The rule spli
 applies its Gauss-Legendre order within each interval. The photon record
 carries the quadrature, whose nm weights enter once at integration.
 
+Spectral breaks come from the instrument, the local zodi and the disk. A disk
+has no reduction operator: its radiance is read at the nodes. A disk with a
+tabulated spectrum, such as the contrast cube of an ExoVista disk, therefore
+declares its wavelength knots as breaks, and each knot interval inside a band
+gets its own nodes, so a narrow feature in the disk spectrum is integrated
+rather than missed between nodes. This costs one set of nodes per knot
+interval; a disk that declares no breaks (an analytic exozodi law) adds none.
+
+`planet_source_support(scene, instrument, exposure)` returns a `(W, K, T)`
+boolean: whether each planet at each time lies inside the source domain of the
+coronagraph component the renderer selects for each band, read at the band
+center. A planet outside it contributes nothing to that band's image.
+
 At each node, native coronagraph products are converted with their `Frame`
 and resampled with `optixstuff.grids.resample`, honouring each input Image's
 reconstruction declaration. Disk radiance uses linear reconstruction and is

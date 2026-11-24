@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+from conftest import GaussianCoronagraph
 
 
 @pytest.mark.medium(reason="1600 declared stellar nodes in the worked spectrum")
@@ -240,41 +241,174 @@ def test_node_checkpoint_keeps_reverse_gradients_and_flat_memory(monkeypatch):
     jax.clear_caches()
 
 
-def test_refused_planet_psf_only_invalidates_lit_source():
-    """A refused PSF contributes zero, lit or dark, and never NaN.
+class BoundedGaussianCoronagraph(GaussianCoronagraph):
+    """Gaussian PSFs with source support inside the native square grid."""
 
-    A source outside the source domain has a finite zero image and is flagged
-    for that source alone.
+    def _native_source_psfs(self, x_lod, y_lod):
+        from dataclasses import replace
+
+        import jax.numpy as jnp
+        from optixstuff import SourcePSFs
+
+        psfs = super()._native_source_psfs(x_lod, y_lod)
+        half_extent = self.grid.shape[0] * self.grid.step / 2
+        valid = (jnp.abs(x_lod) <= half_extent) & (jnp.abs(y_lod) <= half_extent)
+        return SourcePSFs(
+            replace(
+                psfs.image, data=jnp.where(valid[:, None, None], psfs.image.data, 0)
+            ),
+            valid,
+        )
+
+
+def test_refused_planet_psf_only_invalidates_lit_source():
+    """Outside the square source domain, the support flag and image are zero.
+
+    The manufactured grid reaches only 1 lambda/D along each axis, less than
+    the planet's north offset. Admission and discarded flux are exact zeros.
     """
     from dataclasses import replace
 
-    import equinox as eqx
-    import jax.numpy as jnp
-    from conftest import GaussianCoronagraph, make_path, make_system
-    from optixstuff import Exposure, SourcePSFs
+    from conftest import exposure_for, make_path, make_system
     from optixstuff.spectral import Quadrature
 
     import coronagraphoto as cp
 
-    class RefusedSource(GaussianCoronagraph):
-        def _native_source_psfs(self, x_lod, y_lod):
-            psfs = super()._native_source_psfs(x_lod, y_lod)
-            return SourcePSFs(
-                replace(psfs.image, data=jnp.zeros_like(psfs.image.data)),
-                jnp.zeros_like(psfs.valid),
-            )
-
-    path = make_path(n=8)
-    path = eqx.tree_at(lambda p: p.coronagraph, path, RefusedSource(n=8))
+    path = replace(make_path(n=8), coronagraph=BoundedGaussianCoronagraph(n=8))
     for contrast in (0.0, 1e-10):
-        planet = cp.photon_rates(
-            make_system(contrast=contrast, smooth_planet=True),
-            path,
-            Exposure(
-                time_d=0.0, roll_deg=0, quadrature=Quadrature.monochromatic(550.0)
-            ),
-        ).planet
-        np.testing.assert_array_equal(planet, 0.0)
+        scene = make_system(contrast=contrast, smooth_planet=True)
+        exposure = exposure_for(scene, Quadrature.monochromatic(550.0))
+        np.testing.assert_array_equal(
+            cp.photon_rates(scene, path, exposure).planet, 0.0
+        )
+        np.testing.assert_array_equal(
+            cp.planet_source_support(scene, path, exposure), False
+        )
+
+
+def test_planet_source_support_uses_exposure_roll_and_times():
+    """Match direct source PSF flags at rolled scene positions, bit for bit.
+
+    Boolean admission needs no tolerance. The middle planet crosses the square
+    boundary between epochs and also changes admission under a zero roll.
+    """
+    from dataclasses import replace
+
+    import jax.numpy as jnp
+    from conftest import FlatContrast, exposure_for, make_path, make_system
+    from optixstuff.grids import SkyOrientation
+    from optixstuff.spectral import Band, Quadrature
+    from skyscapes.scene import Planet
+
+    import coronagraphoto as cp
+
+    coro = BoundedGaussianCoronagraph(n=16)
+    path = replace(make_path(n=16), coronagraph=coro)
+    separations = coro.frame.lod_to_arcsec(550.0) * jnp.array([1.0, 2.4, 4.0])
+    scene = make_system(
+        separation_arcsec=separations,
+        planet_groups=(Planet(jnp.ones(3), FlatContrast(jnp.asarray(1e-10))),),
+    )
+    times, roll = jnp.array([0.0, 10.0]), 45.0
+    bands = (Band(520.0, 540.0), Band(560.0, 580.0))
+    rule = Quadrature.build(bands, order=1)
+    exposure = exposure_for(scene, rule, time_d=times, roll_deg=roll)
+    east, north = scene.positions(times)
+
+    def direct_flags(angle):
+        x, y = SkyOrientation(angle).sky_to_detector(east, north)
+        masks = []
+        for band in bands:
+            center = band.center_nm
+            scale = coro.at_wavelength(center).source_grid.frame.lod_to_arcsec(center)
+            flags = coro.source_psfs(center, x.ravel() / scale, y.ravel() / scale).valid
+            masks.append(flags.reshape(x.shape))
+        return np.stack(masks)
+
+    truth = direct_flags(roll)
+    assert truth[:, 1, 0].all() and not truth[:, 1, 1].any()
+    assert not direct_flags(0.0)[:, 1, 0].any()
+    support = cp.planet_source_support(scene, path, exposure)
+    assert isinstance(support, np.ndarray) and support.dtype == np.bool_
+    assert support.shape == (2, 3, 2)
+    np.testing.assert_array_equal(support, truth)
+
+    empty = make_system(planet_groups=(), separation_arcsec=jnp.empty(0))
+    support = cp.planet_source_support(empty, path, exposure)
+    assert support.shape == (2, 0, 2) and support.dtype == np.bool_
+
+
+@pytest.fixture
+def multiband_source_domain():
+    """A wide red component first in dispatch order and a narrow blue one."""
+    from dataclasses import replace
+
+    from conftest import make_path
+    from optixstuff import MultiBandCoronagraph
+    from optixstuff.spectral import Band
+
+    red = BoundedGaussianCoronagraph(n=40, bandpass=Band(550.0, 600.0))
+    blue = BoundedGaussianCoronagraph(n=16, bandpass=Band(500.0, 550.0))
+    path = make_path(n=16, detector_n=8)
+    return replace(path, coronagraph=MultiBandCoronagraph((red, blue)))
+
+
+def test_planet_source_support_selects_each_component(multiband_source_domain):
+    """Compare admission against the two square half-extents, exactly.
+
+    At roll zero the planet is on the north axis. Its lambda/D separation at
+    either band center is between the two grids' half-widths, so the flags
+    must differ with no tolerance on the Boolean result.
+    """
+    from conftest import exposure_for, make_system
+    from optixstuff.spectral import Band, Quadrature
+
+    import coronagraphoto as cp
+
+    path = multiband_source_domain
+    bands = (Band(570.0, 580.0), Band(520.0, 530.0))
+    separation = 0.06
+    scene = make_system(separation_arcsec=separation, smooth_planet=True)
+    exposure = exposure_for(scene, Quadrature.build(bands, path, order=1))
+    half_extents = np.array([40, 16]) * 0.25 / 2
+    wavelengths = np.array([band.center_nm for band in bands])
+    offsets = separation / (np.rad2deg(wavelengths * 1e-9 / 6.0) * 3600)
+    assert np.all((half_extents[1] < offsets) & (offsets < half_extents[0]))
+    support = cp.planet_source_support(scene, path, exposure)
+    np.testing.assert_array_equal(support[:, 0, 0], offsets <= half_extents)
+
+    outside = exposure_for(scene, Quadrature.monochromatic(610.0))
+    with pytest.raises(ValueError, match=r"610.*nm"):
+        cp.planet_source_support(scene, path, outside)
+
+
+def test_planet_source_support_uses_band_center_for_crossing_band(
+    multiband_source_domain,
+):
+    """Compare flags with the rendered lit planet for three manufactured bands.
+
+    The blue component rejects the planet, so its flux is exactly zero. The
+    red component admits it and produces positive flux. A crossing band with
+    its center in red has red flux even though its first node is blue. The
+    resulting Boolean comparison is exact.
+    """
+    from conftest import make_system
+    from optixstuff.spectral import Band
+
+    import coronagraphoto as cp
+
+    path = multiband_source_domain
+    scene = make_system(separation_arcsec=0.06, smooth_planet=True)
+    bands = (Band(520.0, 530.0), Band(540.0, 580.0), Band(570.0, 580.0))
+    exposure = cp.build_exposure(scene, path, bands, time_d=0.0, order=1, field_lod=0.0)
+    assert exposure.quadrature.nodes_nm[1, 0] < 550.0 < bands[1].center_nm
+    rates = cp.photon_rates(scene, path, exposure)
+    planet = np.asarray(rates.integrate().planet)
+    np.testing.assert_array_equal(planet[0], 0.0)
+    totals = planet.sum(axis=(1, 2))
+    assert np.all(totals[1:] > 0)
+    support = cp.planet_source_support(scene, path, exposure)
+    np.testing.assert_array_equal(support[:, 0, 0], totals > 0, err_msg=f"{totals=}")
 
 
 def test_expected_integrates_declared_response_kink():

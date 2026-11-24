@@ -46,6 +46,18 @@ def _detector_grid(instrument, orientation):
     return replace(instrument.detector.grid, orientation=orientation)
 
 
+def _exposure_grid(instrument, exposure):
+    """Read the detector grid at the exposure's roll."""
+    return _detector_grid(instrument, SkyOrientation(exposure.roll_deg))
+
+
+def _source_offsets_lod(wavelength_nm, grid, native, positions):
+    """Convert sky positions to detector offsets in the source product frame."""
+    x, y = grid.orientation.sky_to_detector(positions[0], positions[1])
+    lod_arcsec = native.frame.lod_to_arcsec(wavelength_nm)
+    return x / lod_arcsec, y / lod_arcsec
+
+
 # Disk sub-samples per source-cell side; see ``_refined``.
 _DISK_SUBSAMPLE = 4
 
@@ -91,7 +103,6 @@ def _node_rates(
     speckle = instrument.speckle
     products = coro.at_wavelength(wavelength_nm)
     native = products.source_grid
-    lod_arcsec = native.frame.lod_to_arcsec(wavelength_nm)
     gain = instrument.effective_area_m2(wavelength_nm)
 
     def detector_pixels(product_grid):
@@ -148,11 +159,9 @@ def _node_rates(
 
     planet = jnp.zeros(grid.shape)
     if positions is not None:
-        x, y = grid.orientation.sky_to_detector(positions[0], positions[1])
+        x, y = _source_offsets_lod(wavelength_nm, grid, native, positions)
         phi = node["planets"]
-        psfs = coro.source_psfs(
-            wavelength_nm, x / lod_arcsec, y / lod_arcsec, grid=detector_pixels(native)
-        )
+        psfs = coro.source_psfs(wavelength_nm, x, y, grid=detector_pixels(native))
         # A source outside the coronagraph's source domain has a zero image
         # and is flagged for that source alone: it contributes nothing and
         # leaves every other planet's image as it would be without it.
@@ -261,6 +270,23 @@ def _identity(fn):
     return fn
 
 
+def _planet_positions(system, times):
+    """Read sky positions and retain the ephemeris for other source reads."""
+    ephemeris = system.ephemeris(times)
+    return ephemeris, system.positions(times, ephemeris=ephemeris)
+
+
+def _covering_model(models, wavelength_nm):
+    """Return the first covering model index and whether any model covers."""
+    covered = jnp.stack(
+        [
+            (m.bandpass.low_nm <= wavelength_nm) & (wavelength_nm <= m.bandpass.high_nm)
+            for m in models
+        ]
+    )
+    return jnp.argmax(covered), jnp.any(covered)
+
+
 def _node_function(models, scene, instrument, exposure, grid, planets, uniform_sky):
     """Return node(w, i, j): the rates and pixel support at one node.
 
@@ -288,9 +314,8 @@ def _node_function(models, scene, instrument, exposure, grid, planets, uniform_s
 
     ephemeris, positions = None, None
     if planets and system.planets:
-        times = jnp.atleast_1d(time_d)
-        ephemeris = system.ephemeris(times)
-        positions = system.positions(times, ephemeris=ephemeris)[:, :, 0]
+        ephemeris, positions = _planet_positions(system, jnp.atleast_1d(time_d))
+        positions = positions[:, :, 0]
     # A uniform sky reads no zodi, so a model that needs a sightline is not
     # asked for one.
     read = (
@@ -335,20 +360,81 @@ def _node_function(models, scene, instrument, exposure, grid, planets, uniform_s
         return remat(with_model(models[0]))
 
     def node(w, i, j):
-        covered = jnp.stack(
-            [(m.bandpass.low_nm <= w) & (w <= m.bandpass.high_nm) for m in models]
-        )
+        model_index, covered = _covering_model(models, w)
         rates, static, speckle = jax.lax.switch(
-            jnp.argmax(covered), [with_model(m) for m in models], w, i, j
+            model_index, [with_model(m) for m in models], w, i, j
         )
         # A node outside every declared band has no performance model.
         return (
-            jax.tree.map(lambda x: jnp.where(jnp.any(covered), x, jnp.nan), rates),
+            jax.tree.map(lambda x: jnp.where(covered, x, jnp.nan), rates),
             static,
             speckle,
         )
 
     return remat(node)
+
+
+def planet_source_support(
+    scene: Scene, instrument: Instrument, exposure: Exposure
+) -> np.ndarray:
+    """Read whether each planet is inside the coronagraph's source domain.
+
+    Entry ``[w, k, t]`` is True where planet ``k`` at time ``t`` lies inside
+    the source domain of the coronagraph component the renderer selects for
+    band ``w``: ``source_psfs(...).valid`` of that component, read at the band
+    center with the renderer's own planet positions, detector orientation at
+    the exposure's roll, component selection (the first component whose
+    bandpass covers the wavelength) and lambda/D conversion. Where it is False
+    the planet contributes nothing to the band's image from that component.
+    The renderer selects a component at each quadrature node, so for a band
+    that crosses a component boundary the query reports the center's
+    component only. Times are ``exposure.time_d`` (a scalar gives T = 1).
+    This is a host function on concrete values.
+
+    Examples:
+        Two bands, each read through the component that covers its center::
+
+            bands = (Band(520.0, 530.0), Band(570.0, 580.0))
+            exposure = build_exposure(scene, instrument, bands, time_d=0.0)
+            support = planet_source_support(scene, instrument, exposure)
+            support.shape  # (2, number of planets, 1)
+            support[:, 0, 0]  # e.g. [False, True]: outside the blue grid only
+
+    Args:
+        scene: The unbatched scene supplying planet positions.
+        instrument: The instrument supplying the coronagraph and detector grid.
+        exposure: The exposure supplying the bands, times and roll.
+
+    Returns:
+        A NumPy Boolean array of shape (W, K, T), one entry per band, planet
+        and time. A planet-free scene has K equal to zero.
+
+    Raises:
+        ValueError: A band center falls outside every multiband component.
+    """
+    _refuse_numpy_leaves(scene)
+    grid = _exposure_grid(instrument, exposure)
+    bands = exposure.quadrature.bands
+    _, positions = _planet_positions(scene, jnp.atleast_1d(exposure.time_d))
+    _, n_planets, n_times = positions.shape
+    support = np.empty((len(bands), n_planets, n_times), dtype=bool)
+    coro = instrument.coronagraph
+    for w, band in enumerate(bands):
+        center = band.center_nm
+        model = coro
+        if isinstance(coro, MultiBandCoronagraph):
+            index, covered = _covering_model(coro.coronagraphs, center)
+            if not covered:
+                raise ValueError(
+                    f"No coronagraph bandpass covers band center {center} nm"
+                )
+            model = coro.coronagraphs[int(index)]
+        if positions.size:
+            native = model.at_wavelength(center).source_grid
+            x, y = _source_offsets_lod(center, grid, native, positions)
+            valid = model.source_psfs(center, x.ravel(), y.ravel()).valid
+            support[w] = np.asarray(valid).reshape(n_planets, n_times)
+    return support
 
 
 # Terms that read a coronagraph product. Thermal emission is uniform and reads
@@ -427,7 +513,7 @@ def _render(
         else (coro,)
     )
     quadrature = exposure.quadrature
-    grid = _detector_grid(instrument, SkyOrientation(exposure.roll_deg))
+    grid = _exposure_grid(instrument, exposure)
     node = _node_function(
         models, scene, instrument, exposure, grid, planets, uniform_sky
     )
@@ -600,10 +686,10 @@ def build_exposure(
 ) -> Exposure:
     """Build the host-side Exposure for one observation of a scene.
 
-    Each band is split at the breaks the instrument and the scene's local zodi
-    declare, and a Gauss-Legendre rule is applied to every piece: ``order``
-    nodes, raised for a piece the diffraction pattern slides across by the
-    detector field (``field_lod``). The field is measured from the axis and
+    Each band is split at the breaks the instrument, the scene's local zodi
+    and its disk declare, and a Gauss-Legendre rule is applied to every piece:
+    ``order`` nodes, raised for a piece the diffraction pattern slides across by
+    the detector field (``field_lod``). The field is measured from the axis and
     sets the nodes for a response that is smooth in wavelength. The per-pixel
     accuracy of a product read from a table is set by how the detector pixels
     read the table instead: the reconstruction the product declares, and
@@ -622,7 +708,11 @@ def build_exposure(
     star, the planets and a tabulated local zodi are not breaks: the exposure also holds
     the ``Resolution`` that reduces each tabulated spectrum of the scene on the
     nodes, so a band integral of a rough stellar spectrum is exact in the
-    spectrum however few nodes the band has. ``roll_deg`` is the position angle
+    spectrum however few nodes the band has. A disk has no such reduction and
+    is read at the nodes, so a disk with a tabulated spectrum (an ExoVista
+    contrast cube) declares its wavelength knots as breaks and every knot
+    interval inside a band gets its own nodes; a disk that declares
+    no breaks adds none. ``roll_deg`` is the position angle
     of detector +y, north through east. ``plan`` is only needed by
     :func:`observe`. The local zodi is evaluated at render time for the scene's
     sky frame and ``time_d``.
@@ -655,7 +745,7 @@ def build_exposure(
         resolution and the plan.
     """
     _refuse_numpy_leaves(scene)
-    models = [m for m in (instrument, scene.local_zodi) if m is not None]
+    models = [m for m in (instrument, scene.local_zodi, scene.disk) if m is not None]
     quadrature = Quadrature.build(bands, *models, order=order, field_lod=field_lod)
     return Exposure(
         time_d=time_d,
