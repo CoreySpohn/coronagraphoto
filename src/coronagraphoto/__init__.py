@@ -13,6 +13,7 @@ from coronagraphoto.simulation import (
     expected,
     observe,
     photon_rates,
+    planet_source_support,
 )
 
 __all__ = [
@@ -25,5 +26,6 @@ __all__ = [
     "expected",
     "observe",
     "photon_rates",
+    "planet_source_support",
     "scene_aperture_rates",
 ]

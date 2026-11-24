@@ -15,9 +15,11 @@ import numpy as np
 import pytest
 from conftest import exposure_for, make_path, make_system, with_zodi
 from numpy.polynomial.legendre import leggauss
+from optixstuff.grids import PixelGrid, SkyOrientation
 from optixstuff.optical_elements import AbstractUniformElement
 from optixstuff.spectral import Band, Quadrature
 from skyscapes import PrecomputedZodi
+from skyscapes.disk import AYOExozodi, ExovistaDisk
 from skyscapes.physical_model import GridPhysicalModel
 from skyscapes.scene import Planet, Star
 
@@ -72,8 +74,9 @@ def _star(tilt=0.0):
     )
 
 
-def _flat_star():
-    wave = np.arange(490.0, 566.0)
+def _flat_star(wave=None):
+    if wave is None:
+        wave = np.arange(490.0, 566.0)
     return Star(
         wavelengths_nm=jnp.asarray(wave),
         times_d=jnp.array([0.0]),
@@ -375,6 +378,8 @@ def test_the_default_field_is_the_instruments_and_zero_keeps_the_layout():
     the field the instrument declares, so it equals the build that passes that
     value as a number (identical pieces, exact) and holds more nodes than the
     order; a field of 10 lambda/D holds more than that of this small detector.
+    An analytic disk contributes no breaks, so its rule and the diskless rule
+    both match the direct instrument and local-zodi build bit for bit.
     """
     scene, instrument = make_system(smooth_planet=True), _instrument()
     for order in (1, 3, 4):
@@ -394,6 +399,72 @@ def test_the_default_field_is_the_instruments_and_zero_keeps_the_layout():
     assert default.quadrature.nodes_nm.shape[1] > 4
     wide = cp.build_exposure(scene, instrument, (_BAND,), time_d=0.0, field_lod=10.0)
     assert wide.quadrature.nodes_nm.shape[1] > default.quadrature.nodes_nm.shape[1]
+
+    zodi = PrecomputedZodi(jnp.array([490.0, 535.0, 560.0]), jnp.full(3, 1e12))
+    scene = with_zodi(scene, zodi)
+    with_disk = eqx.tree_at(
+        lambda s: s.disk, scene, AYOExozodi(), is_leaf=lambda x: x is None
+    )
+    options = dict(order=4, field_lod=0.0)
+    truth = Quadrature.build((_BAND,), instrument, zodi, **options)
+    for system in (scene, with_disk):
+        rule = cp.build_exposure(
+            system, instrument, (_BAND,), time_d=0.0, **options
+        ).quadrature
+        np.testing.assert_array_equal(rule.nodes_nm, truth.nodes_nm)
+        np.testing.assert_array_equal(rule.weights_nm, truth.weights_nm)
+        assert rule.pieces == truth.pieces
+
+    # A disk supplies breaks only, never the field: at the default field the
+    # rule is still the instrument's, even for a disk that declares one.
+    class WideFieldExozodi(AYOExozodi):
+        def spectral_field_lod(self, band):
+            return 100.0
+
+    wide_disk = eqx.tree_at(
+        lambda s: s.disk, scene, WideFieldExozodi(), is_leaf=lambda x: x is None
+    )
+    truth = Quadrature.build((_BAND,), instrument, zodi, order=4, field_lod=None)
+    rule = cp.build_exposure(wide_disk, instrument, (_BAND,), time_d=0.0).quadrature
+    np.testing.assert_array_equal(rule.nodes_nm, truth.nodes_nm)
+    np.testing.assert_array_equal(rule.weights_nm, truth.weights_nm)
+    assert rule.pieces == truth.pieces
+
+
+def test_exovista_disk_knots_resolve_narrow_spectral_feature():
+    """Integrate one disk cell against the trapezoidal knot integral.
+
+    The sampled peak is a compact cubic B-spline whose area also equals the
+    area of the piecewise-linear interpolant on these uniform knots. Four
+    Gauss nodes per knot interval integrate the spline exactly. A relative
+    tolerance of 1e-6 allows rounding in the contrast read and weight sum.
+    """
+    wave = np.arange(500.0, 601.0)
+    contrast = np.full(wave.size, 1e-4)
+    contrast[49:52] += 1.5 * np.array([1, 4, 1]) / 6
+    grid = PixelGrid.regular((8, 8), 0.01, "arcsec", orientation=SkyOrientation(0.0))
+    disk = ExovistaDisk(
+        grid,
+        wave,
+        jnp.broadcast_to(
+            jnp.asarray(contrast)[:, None, None], (wave.size, *grid.shape)
+        ),
+    )
+    scene = make_system(star=_flat_star(wave), smooth_planet=True, disk=disk)
+    exposure = cp.build_exposure(
+        scene, _instrument(), (Band(500, 600),), time_d=0.0, order=4, field_lod=0.0
+    )
+    rule = exposure.quadrature
+    nodes = rule.nodes_nm[0]
+    radiance = scene.photon_radiance(nodes, exposure.time_d, grid=grid).data[:, 3, 3]
+    stellar_flux = scene.star.photon_flux_density(
+        nodes, exposure.time_d, dist_pc=scene.dist_pc
+    )
+    cell_contrast = radiance * grid.cell_area("sr") / stellar_flux.reshape(nodes.shape)
+    integral = float(rule.weights_nm[0] @ cell_contrast)
+    np.testing.assert_allclose(
+        integral, np.trapezoid(contrast, wave), rtol=1e-6, atol=0
+    )
 
 
 def test_each_node_carries_its_own_star_value():
