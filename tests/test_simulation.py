@@ -139,6 +139,107 @@ def test_streaming_jit_and_gradient():
     )
 
 
+def _position_grad_setup(knots):
+    """Two planets whose sky offsets follow ``a_AU``, on a ``knots``-knot table.
+
+    Returns ``(scene_of, path, exposure)``: ``scene_of(a)`` is the scene with
+    the planets' semi-major axes ``a`` in AU (their sky positions scale with
+    it), real constants, in the Gaussian coronagraph's field.
+    """
+    import equinox as eqx
+    import jax.numpy as jnp
+    from conftest import Planet, exposure_for, make_path, make_system
+    from optixstuff.spectral import Band, Quadrature
+    from skyscapes.physical_model import GridPhysicalModel
+
+    wave = jnp.linspace(400.0, 700.0, knots)
+    base = make_system(
+        wavelengths_nm=wave,
+        separation_arcsec=jnp.array([0.02, 0.04]),
+        sky_pa_deg=30.0,
+        planet_groups=(
+            Planet(
+                jnp.ones(2),
+                GridPhysicalModel(
+                    wave, jnp.array([0.0, 90.0, 180.0]), jnp.full((2, knots, 3), 1e-10)
+                ),
+            ),
+        ),
+    )
+    path = make_path(n=40)
+    exposure = exposure_for(base, Quadrature.build((Band(500.0, 600.0),), base, path))
+
+    def scene_of(a):
+        return eqx.tree_at(lambda s: s.dynamics.orbits.a_AU, base, a)
+
+    return scene_of, path, exposure
+
+
+def _position_grads(knots):
+    """Reverse gradients of the planet image sum with respect to ``a_AU``.
+
+    Returns the photon-reader gradient (a ``lax.map`` over nodes), the
+    streamed-electron gradient (a ``scan``) and the compiled temp bytes of each.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    import coronagraphoto as cp
+
+    scene_of, path, exposure = _position_grad_setup(knots)
+    a = jnp.array([0.2, 0.4])
+    out = []
+    for read in (cp.photon_rates, cp.expected):
+
+        def total(x, read=read):
+            return read(scene_of(x), path, exposure).planet.sum()
+
+        grad = jax.jit(jax.grad(total))
+        temp = grad.lower(a).compile().memory_analysis().temp_size_in_bytes
+        out.append((grad(a), temp))
+    return exposure.quadrature.nodes_nm.shape[1], out
+
+
+@pytest.mark.medium(reason="reverse-mode compiles at two node counts, with and without")
+def test_node_checkpoint_keeps_reverse_gradients_and_flat_memory(monkeypatch):
+    """Fails if the node render is unchecked or the checkpoint changes a gradient.
+
+    Truth: the unwrapped node function (``jax.checkpoint`` replaced by the
+    identity) is the same expression, so the reverse gradients with respect to
+    the planets' sky positions agree to floating point, rtol 1e-12 (measured:
+    bitwise equal). Memory: the compiled temp of each reverse gradient at 12
+    nodes is under 1.3 times that at 4 (mutation basis: unwrapped it grows by
+    2.43 times for the photon reader and 2.38 for the streamed electrons;
+    wrapped 1.15 and 1.02, the photon reader also returning every node's
+    image).
+    """
+    import jax
+
+    small_nodes, small = _position_grads(4)
+    large_nodes, large = _position_grads(8)
+    assert large_nodes == 3 * small_nodes
+    for (_, t_small), (g_large, t_large) in zip(small, large, strict=True):
+        assert t_large < 1.3 * t_small, t_large / t_small
+        assert float(abs(g_large).max()) > 0.0
+
+    monkeypatch.setattr(jax, "checkpoint", lambda f, **kwargs: f)
+    jax.clear_caches()
+    _, plain = _position_grads(4)
+    plain_ratio = [
+        p_large[1] / p_small[1]
+        for p_small, p_large in zip(plain, _position_grads(8)[1], strict=True)
+    ]
+    assert min(plain_ratio) > 2.0
+    for (wrapped, _), (unwrapped, _) in zip(small, plain, strict=True):
+        np.testing.assert_allclose(
+            wrapped,
+            unwrapped,
+            rtol=1e-12,
+            err_msg=f"gradients differ by {abs(wrapped - unwrapped).max()}",
+        )
+    jax.clear_caches()
+
+
 def test_refused_planet_psf_only_invalidates_lit_source():
     """A refused PSF contributes zero, lit or dark, and never NaN.
 
@@ -327,7 +428,7 @@ def test_disk_render_does_not_depend_on_detector_extent():
     np.testing.assert_allclose(small, crop, rtol=0, atol=1e-10 * crop.max())
 
 
-def test_disk_reaches_the_operator_on_its_scene_grid():
+def test_disk_reaches_the_operator_on_its_scene_grid(monkeypatch):
     """Fails if disk cells beyond the stored PSF grid never reach the operator.
 
     A coronagraph whose ``scene_grid`` pads its 24-pixel PSF grid by 8 cells
@@ -372,6 +473,9 @@ def test_disk_reaches_the_operator_on_its_scene_grid():
             seen.setdefault(type(self).__name__, scene)
             return super().render_scene(scene, wavelength_nm, grid=grid)
 
+    # The operators are read as concrete values from outside the trace; a
+    # checkpoint traces its body even without JIT, so this test runs without it.
+    monkeypatch.setattr(jax, "checkpoint", lambda f, **kwargs: f)
     scene = make_system(disk=AYOExozodi(level_zodis=3.0))
     bands = (Band(500.0, 600.0),)
     base = make_path(n=n, cube=True)

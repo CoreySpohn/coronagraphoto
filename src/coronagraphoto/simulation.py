@@ -271,6 +271,11 @@ def _node_function(models, scene, instrument, exposure, grid, planets, uniform_s
     for the scene's sky frame at the observation time; with ``uniform_sky`` it
     is one photon s^-1 m^-2 nm^-1 sr^-1 at every wavelength (still absent when
     the scene has no local zodi).
+
+    The returned function is wrapped in :func:`jax.checkpoint`, so reverse-mode
+    differentiation recomputes one node on the backward pass instead of
+    holding every node's intermediates of the coronagraph synthesis. Forward
+    evaluation and forward-mode differentiation are unchanged.
     """
     system, zodi = scene, scene.local_zodi
     time_d = jnp.asarray(exposure.time_d)
@@ -319,7 +324,7 @@ def _node_function(models, scene, instrument, exposure, grid, planets, uniform_s
         )
 
     if len(models) == 1:
-        return with_model(models[0])
+        return jax.checkpoint(with_model(models[0]))
 
     def node(w, i, j):
         covered = jnp.stack(
@@ -335,7 +340,7 @@ def _node_function(models, scene, instrument, exposure, grid, planets, uniform_s
             speckle,
         )
 
-    return node
+    return jax.checkpoint(node)
 
 
 # Terms that read a coronagraph product. Thermal emission is uniform and reads
