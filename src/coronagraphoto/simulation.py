@@ -616,7 +616,8 @@ def _render(
         model = models[0 if band_branches is None else band_branches[i]]
         center = centers[i]
         native = model.at_wavelength(center).source_grid
-        return _planet_samples(model, center, center, grid, native, positions)
+        scale_nm = model.scale_wavelength_nm(center, center)
+        return _planet_samples(model, center, scale_nm, grid, native, positions)
 
     if kind == "photons":
         shape = quadrature.nodes_nm.shape

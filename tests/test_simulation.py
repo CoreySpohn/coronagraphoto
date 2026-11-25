@@ -1011,11 +1011,13 @@ def test_stellar_and_planet_images_follow_product_scale(
         assert np.all(difference > 1e-5)
 
 
-class _PerNodeGaussian(IntegratedGaussianCoronagraph):
-    """Read each node with the geometry of its observing band."""
+class _BandScaledGaussian(IntegratedGaussianCoronagraph):
+    """A build band sampled on a grid in reference-wavelength lambda/D."""
 
     def scale_wavelength_nm(self, wavelength_nm, band_center_nm):
-        return band_center_nm
+        return band_center_nm * (
+            self.frame.reference_wavelength_nm / self.bandpass.center_nm
+        )
 
 
 def _weighted_planet_sum(roll, scene, instrument, exposure):
@@ -1033,9 +1035,8 @@ def _weighted_planet_sum(roll, scene, instrument, exposure):
 def test_band_planet_samples_match_per_node_reads(gaussian_observation, quantity):
     """Compare both planet readers and a roll derivative to per-node Gaussians.
 
-    Each reference child reads its Gaussian on the observing band's centre
-    grid at every node. Maximum relative differences were 4.425e-15 for
-    electrons, 4.418e-15 for photons and 6.715e-16 for the roll gradient.
+    Each reference child converts the observing band's center to its native
+    grid at every node. Reusing one read must give the same image and gradient.
     The floating-point tolerance (rtol 1e-13, atol 0) allows for roundoff
     in pixel integration and summation over nodes.
     """
@@ -1050,10 +1051,10 @@ def test_band_planet_samples_match_per_node_reads(gaussian_observation, quantity
     scene, instrument, _ = gaussian_observation()
     bands = (Band(520, 540), Band(560, 590))
 
-    def setup(model, averaged):
+    def setup(averaged):
         children = (
-            model(Band(550, 600), averaged, throughput=0.7),
-            model(Band(500, 550), averaged, throughput=0.1),
+            _BandScaledGaussian(Band(550, 600), averaged, throughput=0.7),
+            _BandScaledGaussian(Band(500, 550), averaged, throughput=0.1),
         )
         path = replace(instrument, coronagraph=MultiBandCoronagraph(children))
         exposure = cp.build_exposure(
@@ -1061,8 +1062,8 @@ def test_band_planet_samples_match_per_node_reads(gaussian_observation, quantity
         )
         return path, exposure
 
-    path, exp = setup(IntegratedGaussianCoronagraph, True)
-    reference, ref_exp = setup(_PerNodeGaussian, False)
+    path, exp = setup(True)
+    reference, ref_exp = setup(False)
     np.testing.assert_array_equal(exp.quadrature.nodes_nm, ref_exp.quadrature.nodes_nm)
     np.testing.assert_array_equal(
         exp.quadrature.weights(), ref_exp.quadrature.weights()
@@ -1104,7 +1105,7 @@ def test_band_planet_psf_read_counts(gaussian_observation):
             jax.debug.callback(lambda x, _: reads.append(x.size), x_lod, wavelength_nm)
             return super().source_psfs(wavelength_nm, x_lod, y_lod, grid=grid)
 
-    class CountedPerNode(_PerNodeGaussian, CountedGaussian):
+    class CountedPerNode(_BandScaledGaussian, CountedGaussian):
         pass
 
     for model, averaged in ((CountedGaussian, True), (CountedPerNode, False)):
