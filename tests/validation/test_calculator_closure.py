@@ -16,9 +16,12 @@ from yippy import open_yip
 import coronagraphoto as cp
 
 TERMS = ("planet", "star_leakage", "local_zodi", "exozodi")
-pytestmark = pytest.mark.medium(
-    reason="YIP load, scene operator and four renders at two detector pitches"
-)
+pytestmark = [
+    pytest.mark.medium(
+        reason="YIP load, scene operator and four renders at two detector pitches"
+    ),
+    pytest.mark.float64_only(reason="V&V reference values for calculator closure"),
+]
 
 
 def _bilinear_bound(table, row, column):

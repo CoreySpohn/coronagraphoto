@@ -56,6 +56,7 @@ class Halo(AbstractSpeckleField):
         )
 
 
+@pytest.mark.float64_only(reason="speckle clock rebasing at nonzero epoch_d")
 def test_speckle_leakage_day_clock():
     """Fails on epoch subtraction twice, wrong units or dead path wiring.
 
@@ -161,7 +162,7 @@ def test_speckle_leakage_day_clock():
             np.testing.assert_allclose(a[index], b, rtol=1e-10, atol=1e-18)
 
 
-def test_render_converts_scene_time_once_and_refuses_x32():
+def test_render_converts_scene_time_once_and_refuses_x32(precision):
     """Fails if the render ignores the field's epoch or subtracts it itself.
 
     Truth: the same halo anchored at zero and rendered at the elapsed time.
@@ -184,15 +185,15 @@ def test_render_converts_scene_time_once_and_refuses_x32():
         q = Quadrature.build((Band(549.5, 550.5),), system, path, speckle, order=1)
         return photon_rates(system, path, exposure_for(system, q, time_d=time_d))
 
-    anchored = render(2.0 + t_s * s2d, Halo(epoch_d=2.0))
     zero = render(t_s * s2d, Halo(epoch_d=0.0))
-    np.testing.assert_allclose(
-        anchored.star_leakage, zero.star_leakage, rtol=4 * np.finfo(float).eps
-    )
-    with jax.enable_x64(False):
+    if precision == np.float64:
+        anchored = render(2.0 + t_s * s2d, Halo(epoch_d=2.0))
+        np.testing.assert_allclose(
+            anchored.star_leakage, zero.star_leakage, rtol=4 * np.finfo(float).eps
+        )
+    else:
         with pytest.raises(ValueError, match="epoch_d"):
             render(2.0 + t_s * s2d, Halo(epoch_d=2.0))
-        render(t_s * s2d, Halo(epoch_d=0.0))
 
 
 class Patch(AbstractSpeckleField):

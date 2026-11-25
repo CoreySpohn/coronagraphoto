@@ -109,6 +109,7 @@ def test_planet_beyond_the_hull_leaves_the_inner_planet_untouched(tmp_path):
 
 
 @pytest.mark.medium(reason="synthetic YIP load and reverse-mode programs")
+@pytest.mark.float64_only(reason="check_grads finite differences at eps=1e-5")
 def test_planet_position_gradient_is_exact_inside_and_zero_beyond_the_hull(tmp_path):
     """Fails if the planet image has a wrong or NaN gradient in its position.
 
@@ -137,20 +138,17 @@ def test_planet_position_gradient_is_exact_inside_and_zero_beyond_the_hull(tmp_p
         rates = photon_rates(scene, path, exposure)
         return rates.planet.sum() * 1e12
 
-    with jax.enable_x64():
-        import jax.numpy as jnp
-
-        inside, beyond = jnp.asarray(0.5), jnp.asarray(1.2)
-        assert float(planet_sum(inside)) > 0
-        check_grads(
-            planet_sum,
-            (inside,),
-            order=1,
-            modes=("fwd", "rev"),
-            eps=1e-5,
-            atol=1e-4,
-            rtol=1e-4,
-        )
-        assert float(planet_sum(beyond)) == 0.0
-        gradient = jax.grad(planet_sum)(beyond)
-        assert float(gradient) == 0.0
+    inside, beyond = jnp.asarray(0.5), jnp.asarray(1.2)
+    assert float(planet_sum(inside)) > 0
+    check_grads(
+        planet_sum,
+        (inside,),
+        order=1,
+        modes=("fwd", "rev"),
+        eps=1e-5,
+        atol=1e-4,
+        rtol=1e-4,
+    )
+    assert float(planet_sum(beyond)) == 0.0
+    gradient = jax.grad(planet_sum)(beyond)
+    assert float(gradient) == 0.0

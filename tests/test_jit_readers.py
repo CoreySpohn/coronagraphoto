@@ -134,6 +134,7 @@ def test_forty_nodes_and_eight_rolls_compile_one_program(caplog):
 
 
 @pytest.mark.medium(reason="four reverse-mode programs and finite differences")
+@pytest.mark.float64_only(reason="central finite differences at step 1e-4")
 def test_roll_and_node_gradients_match_finite_differences():
     """Fails if a traced roll or node wavelength has a wrong derivative.
 

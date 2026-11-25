@@ -91,7 +91,7 @@ def test_node_yield_once(chromatic):
 
 @pytest.mark.medium(reason="two bands, reverse-mode scan and JIT compilation")
 @pytest.mark.fail_slow("90s")  # over 30 s on the hosted runner
-def test_streaming_jit_and_gradient():
+def test_streaming_jit_and_gradient(precision):
     """Fails on incorrect scan band indexing or broken contrast gradients.
 
     Scan/eager tolerance 64 eps; central difference h=1e-4 has a 1e-9
@@ -134,10 +134,11 @@ def test_streaming_jit_and_gradient():
         )
         return render(varied).planet.sum()
 
-    h = 1e-4
-    np.testing.assert_allclose(
-        jax.grad(total)(1.0), (total(1 + h) - total(1 - h)) / (2 * h), rtol=1e-9
-    )
+    if precision == np.float64:
+        h = 1e-4
+        np.testing.assert_allclose(
+            jax.grad(total)(1.0), (total(1 + h) - total(1 - h)) / (2 * h), rtol=1e-9
+        )
 
 
 def _position_grad_setup(knots):
@@ -353,7 +354,9 @@ def multiband_source_domain():
     return replace(path, coronagraph=MultiBandCoronagraph((red, blue)))
 
 
-def test_planet_source_support_selects_each_component(multiband_source_domain):
+def test_planet_source_support_selects_each_component(
+    multiband_source_domain, precision
+):
     """Compare admission against the two square half-extents, exactly.
 
     At roll zero the planet is on the north axis. Its lambda/D separation at
@@ -390,12 +393,11 @@ def test_planet_source_support_selects_each_component(multiband_source_domain):
     # same components, not in the host's float64 over every component.
     from dataclasses import replace
 
-    import jax
     import jax.numpy as jnp
     from conftest import make_path
     from optixstuff import MultiBandCoronagraph
 
-    with jax.enable_x64(False):
+    if precision == np.float32:
         red = BoundedGaussianCoronagraph(n=40, bandpass=Band(550.00001, 600.0))
         blue = BoundedGaussianCoronagraph(n=16, bandpass=Band(500.0, 550.0))
         shifted = replace(
@@ -409,8 +411,8 @@ def test_planet_source_support_selects_each_component(multiband_source_domain):
         edge = exposure_for(scene, rule)
         planet = cp.photon_rates(scene, shifted, edge).planet
         support = cp.planet_source_support(scene, shifted, edge)
-    assert float(planet[0, 0].sum()) > 0
-    np.testing.assert_array_equal(support[:, 0, 0], [True])
+        assert float(planet[0, 0].sum()) > 0
+        np.testing.assert_array_equal(support[:, 0, 0], [True])
 
     # A rule whose only node is red holds red alone, and the renderer reads a
     # sole held component at every node, so the query reads red at a center

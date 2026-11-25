@@ -59,9 +59,12 @@ from yippy import open_yip
 
 import coronagraphoto as cp
 
-pytestmark = pytest.mark.medium(
-    reason="two YIP loads and a dozen aperture responses at three pixel pitches"
-)
+pytestmark = [
+    pytest.mark.medium(
+        reason="two YIP loads and a dozen aperture responses at three pixel pitches"
+    ),
+    pytest.mark.float64_only(reason="V&V reference values for analytic image closure"),
+]
 
 SOURCES = ("planet", "star_leakage", "local_zodi", "exozodi", "thermal")
 RULE = Circular(0.7)

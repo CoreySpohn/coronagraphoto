@@ -1447,6 +1447,7 @@ def test_planet_input_with_an_extra_axis_is_refused(two_band_record, keyword):
 
 @vv.case("aperture-photon-budget", "code-verification")
 @pytest.mark.medium(reason="Two-band response build and x64 compilation take over 5 s")
+@pytest.mark.float64_only(reason="mixed inputs promote to a float64 response")
 def test_contrast_read_promotes_to_the_response_dtype(two_band_record):
     """Truth: float32 star and contrast are promoted before the float64 response.
 
