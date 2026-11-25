@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from conftest import GaussianCoronagraph
+from conftest import GaussianCoronagraph, IntegratedGaussianCoronagraph
 
 
 @pytest.mark.medium(reason="1600 declared stellar nodes in the worked spectrum")
@@ -1009,6 +1009,127 @@ def test_stellar_and_planet_images_follow_product_scale(
         )
         # Center scaling changes the star by 1.40e-3 and the planet by 1.08e-3 of peak.
         assert np.all(difference > 1e-5)
+
+
+class _PerNodeGaussian(IntegratedGaussianCoronagraph):
+    """Read each node with the geometry of its observing band."""
+
+    def scale_wavelength_nm(self, wavelength_nm, band_center_nm):
+        return band_center_nm
+
+
+def _weighted_planet_sum(roll, scene, instrument, exposure):
+    import equinox as eqx
+    import jax.numpy as jnp
+
+    import coronagraphoto as cp
+
+    exposure = eqx.tree_at(lambda e: e.roll_deg, exposure, roll)
+    image = cp.expected(scene, instrument, exposure).planet
+    return jnp.sum(image * jnp.arange(image.shape[-1]))
+
+
+@pytest.mark.parametrize("quantity", ["electrons", "photons", "roll_gradient"])
+def test_band_planet_samples_match_per_node_reads(gaussian_observation, quantity):
+    """Compare both planet readers and a roll derivative to per-node Gaussians.
+
+    Each reference child reads its Gaussian on the observing band's centre
+    grid at every node. Maximum relative differences were 4.425e-15 for
+    electrons, 4.418e-15 for photons and 6.715e-16 for the roll gradient.
+    The floating-point tolerance (rtol 1e-13, atol 0) allows for roundoff
+    in pixel integration and summation over nodes.
+    """
+    from dataclasses import replace
+
+    import jax
+    from optixstuff import MultiBandCoronagraph
+    from optixstuff.spectral import Band
+
+    import coronagraphoto as cp
+
+    scene, instrument, _ = gaussian_observation()
+    bands = (Band(520, 540), Band(560, 590))
+
+    def setup(model, averaged):
+        children = (
+            model(Band(550, 600), averaged, throughput=0.7),
+            model(Band(500, 550), averaged, throughput=0.1),
+        )
+        path = replace(instrument, coronagraph=MultiBandCoronagraph(children))
+        exposure = cp.build_exposure(
+            scene, path, bands, time_d=0.0, roll_deg=17.0, order=2, field_lod=0.0
+        )
+        return path, exposure
+
+    path, exp = setup(IntegratedGaussianCoronagraph, True)
+    reference, ref_exp = setup(_PerNodeGaussian, False)
+    np.testing.assert_array_equal(exp.quadrature.nodes_nm, ref_exp.quadrature.nodes_nm)
+    np.testing.assert_array_equal(
+        exp.quadrature.weights(), ref_exp.quadrature.weights()
+    )
+    if quantity == "roll_gradient":
+        grad = jax.grad(_weighted_planet_sum)
+        actual = grad(exp.roll_deg, scene, path, exp)
+        truth = grad(ref_exp.roll_deg, scene, reference, ref_exp)
+        assert abs(truth) > 0
+    else:
+        render = cp.expected if quantity == "electrons" else cp.photon_rates
+        actual = render(scene, path, exp).planet
+        truth = render(scene, reference, ref_exp).planet
+    np.testing.assert_allclose(actual, truth, rtol=1e-13, atol=0)
+
+
+def test_band_planet_psf_read_counts(gaussian_observation):
+    """Count PSF calls and their sources with a callback in the actual read.
+
+    The exact-algebra truth is one call with both planets per observing band,
+    including under reverse differentiation. The per-node control reads both
+    at every node and reads again when the checkpoint recomputes the node.
+    With two nodes the measured forward and gradient counts were 1 and 1
+    for the band average, and 2 and 4 for the per-node control.
+    """
+    import jax
+    import jax.numpy as jnp
+    from conftest import make_system
+    from optixstuff.spectral import Band
+    from skyscapes.scene import Planet
+
+    import coronagraphoto as cp
+
+    reads = []
+
+    class CountedGaussian(IntegratedGaussianCoronagraph):
+        def source_psfs(self, wavelength_nm, x_lod, y_lod, *, grid=None):
+            # Tie the callback to the read's wavelength as well as its sources.
+            jax.debug.callback(lambda x, _: reads.append(x.size), x_lod, wavelength_nm)
+            return super().source_psfs(wavelength_nm, x_lod, y_lod, grid=grid)
+
+    class CountedPerNode(_PerNodeGaussian, CountedGaussian):
+        pass
+
+    for model, averaged in ((CountedGaussian, True), (CountedPerNode, False)):
+        coro = model(Band(500, 600), averaged)
+        one, path, exp = gaussian_observation(coro=coro)
+        scene = make_system(
+            star=one.star,
+            planet_groups=(Planet(jnp.ones(2), one.planets[0].physical_model),),
+            separation_arcsec=jnp.array([0.02, 0.03]),
+        )
+        n = exp.quadrature.nodes_nm.shape[1]
+        assert n > 1
+        reads.clear()
+        cp.expected(scene, path, exp)
+        jax.effects_barrier()
+        assert reads == [2] * (1 if averaged else n)
+
+        reads.clear()
+        jax.grad(_weighted_planet_sum)(exp.roll_deg, scene, path, exp)
+        jax.effects_barrier()
+        if averaged:
+            assert reads == [2]
+        else:
+            assert len(reads) > n
+            assert all(k == 2 for k in reads)
 
 
 def test_build_exposure_refuses_underblurred_band(gaussian_observation):

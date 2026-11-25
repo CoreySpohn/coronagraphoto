@@ -6,16 +6,18 @@ selection are static; the wavelength nodes and weights, the roll and the epoch
 are traced leaves, so one compiled program serves any node values and any roll
 (a new node count or band count is a new array shape and compiles once).
 Scenes, instruments and exposures can all be arguments of JAX
-transformations. Band-averaged coronagraph images have the same geometry at
-every node of an observing band. Single-wavelength responses and the speckle
-field use the node wavelength. The field size still sets the node count. For a
-band product, extra nodes sample the spectra and speckles without refining the
-coronagraph geometry. A roll changes the position angle of detector
-+y, north through east.
+transformations. For a band-averaged product, planet source images are read
+once per observing band at its centre. Each node weights them by its planet
+flux and gain, with detector terms applied per node for electrons.
+Single-wavelength responses and the speckle field use the node wavelength.
+The field size still sets the node count. For a band product, extra nodes
+sample the spectra and speckles without refining the coronagraph geometry.
+A roll changes the position angle of detector +y, north through east.
 """
 
 from collections.abc import Sequence
 from dataclasses import replace
+from functools import partial
 
 import equinox as eqx
 import jax
@@ -61,6 +63,22 @@ def _source_offsets_lod(wavelength_nm, grid, native, positions):
     return x / lod_arcsec, y / lod_arcsec
 
 
+def _detector_pixels(grid, scale_nm, product_grid):
+    """Express the detector pixels in the aligned axes of a product grid."""
+    return replace(
+        grid.to_lod(scale_nm, product_grid.frame), orientation=product_grid.orientation
+    )
+
+
+def _planet_samples(coro, wavelength_nm, scale_nm, grid, native, positions):
+    """Read all planet images, zeroing each source outside the product domain."""
+    x, y = _source_offsets_lod(scale_nm, grid, native, positions)
+    psfs = coro.source_psfs(
+        wavelength_nm, x, y, grid=_detector_pixels(grid, scale_nm, native)
+    )
+    return jnp.where(psfs.valid[:, None, None], psfs.image.data, 0.0)
+
+
 # Disk sub-samples per source-cell side; see ``_refined``.
 _DISK_SUBSAMPLE = 4
 
@@ -89,8 +107,13 @@ def _node_rates(
     grid,
     positions,
     node,
+    samples,
 ):
-    """Render one node; detector yield never enters this photon calculation.
+    """Render the photon rates at one node.
+
+    For a band-averaged product, ``samples`` holds the planet source images
+    read once per observing band at its centre. This node weights the images
+    by its planet flux and gain. The electron reader applies its detector terms.
 
     ``node`` holds this node's row of ``Scene.sources``: ``star`` (the
     node-effective stellar photon flux density, with its scale), ``planets``
@@ -111,12 +134,7 @@ def _node_rates(
     native = products.source_grid
     gain = instrument.effective_area_m2(wavelength_nm)
 
-    def detector_pixels(product_grid):
-        # Native product axes are aligned with detector axes.
-        return replace(
-            grid.to_lod(scale_nm, product_grid.frame),
-            orientation=product_grid.orientation,
-        )
+    detector_pixels = partial(_detector_pixels, grid, scale_nm)
 
     def onto_detector(image):
         # Native coordinates describe detector axes, so attach the live pointing
@@ -166,14 +184,11 @@ def _node_rates(
 
     planet = jnp.zeros(grid.shape)
     if positions is not None:
-        x, y = _source_offsets_lod(scale_nm, grid, native, positions)
-        phi = node["planets"]
-        psfs = coro.source_psfs(wavelength_nm, x, y, grid=detector_pixels(native))
-        # A source outside the coronagraph's source domain has a zero image
-        # and is flagged for that source alone: it contributes nothing and
-        # leaves every other planet's image as it would be without it.
-        samples = jnp.where(psfs.valid[:, None, None], psfs.image.data, 0.0)
-        planet = gain * jnp.einsum("k,kyx->yx", phi, samples)
+        if samples is None:
+            samples = _planet_samples(
+                coro, wavelength_nm, scale_nm, grid, native, positions
+            )
+        planet = gain * jnp.einsum("k,kyx->yx", node["planets"], samples)
 
     local = jnp.zeros(grid.shape)
     sky_radiance = node["sky_radiance"]
@@ -301,9 +316,18 @@ def _covering_model(models, wavelength_nm):
 
 
 def _node_function(
-    models, scene, instrument, exposure, grid, planets, uniform_sky, band_branches
+    models,
+    scene,
+    instrument,
+    exposure,
+    grid,
+    ephemeris,
+    positions,
+    centers,
+    uniform_sky,
+    band_branches,
 ):
-    """Return node(w, i, j): the rates and pixel support at one node.
+    """Return the checkpointed function for one node's rates and pixel support.
 
     ``w`` is the traced node wavelength and ``(i, j)`` its band and node index
     in the exposure's quadrature. The sources are read once, on the exposure's
@@ -311,11 +335,13 @@ def _node_function(
     count; the result is ``(components, static, speckle)``, the static and
     speckle coverage of :func:`_node_rates`.
 
-    With ``planets`` False no planet is propagated or rendered and the planet
-    term is zero. The local zodi is the scene model's node-effective radiance
-    for the scene's sky frame at the observation time; with ``uniform_sky`` it
-    is one photon s^-1 m^-2 nm^-1 sr^-1 at every wavelength (still absent when
-    the scene has no local zodi).
+    A band-averaged product's planet source images are read once per observing
+    band at its centre and passed into the checkpoint. Each node weights them
+    by its flux and gain, with detector terms applied per node for electrons.
+    With no planet positions the planet term is zero. The local zodi is the
+    scene model's node-effective radiance for its sky frame at observation
+    time. With ``uniform_sky`` it is one photon s^-1 m^-2 nm^-1 sr^-1 at every
+    wavelength (still absent when the scene has no local zodi).
 
     The returned function is wrapped in :func:`jax.checkpoint`, so reverse-mode
     differentiation recomputes one node on the backward pass instead of
@@ -327,10 +353,6 @@ def _node_function(
     system, zodi = scene, scene.local_zodi
     time_d = jnp.asarray(exposure.time_d)
 
-    ephemeris, positions = None, None
-    if planets and system.planets:
-        ephemeris, positions = _planet_positions(system, jnp.atleast_1d(time_d))
-        positions = positions[:, :, 0]
     # A uniform sky reads no zodi, so a model that needs a sightline is not
     # asked for one.
     read = (
@@ -364,14 +386,8 @@ def _node_function(
             node_star=sources.node_star(i, j),
         )
 
-    centers = jnp.asarray(
-        [band.center_nm for band in exposure.quadrature.bands],
-        # A floating dtype keeps a half-integer centre of integer nodes.
-        dtype=jnp.result_type(jnp.asarray(exposure.quadrature.nodes_nm).dtype, float),
-    )
-
     def with_model(model):
-        return lambda w, i, j: _node_rates(
+        return lambda w, i, j, samples=None: _node_rates(
             w,
             centers[i],
             model,
@@ -381,6 +397,7 @@ def _node_function(
             grid,
             positions,
             row(w, i, j),
+            samples,
         )
 
     remat = _identity if jax.config.jax_disable_jit else jax.checkpoint
@@ -390,8 +407,11 @@ def _node_function(
 
     branches = [with_model(m) for m in models]
     if band_branches is not None:
+        indices = jnp.asarray(band_branches)
         return remat(
-            lambda w, i, j: jax.lax.switch(band_branches[i], branches, w, i, j)
+            lambda w, i, j, samples=None: jax.lax.switch(
+                indices[i], branches, w, i, j, samples
+            )
         )
 
     def node(w, i, j):
@@ -565,17 +585,59 @@ def _render(
         model_ids = tuple(dict.fromkeys(band_ids))
         models = tuple(coro.coronagraphs[i] for i in model_ids)
         if coro.band_averaged:
-            band_branches = jnp.asarray([model_ids.index(i) for i in band_ids])
+            band_branches = tuple(model_ids.index(i) for i in band_ids)
     quadrature = exposure.quadrature
     grid = _exposure_grid(instrument, exposure)
-    node = _node_function(
-        models, scene, instrument, exposure, grid, planets, uniform_sky, band_branches
+    ephemeris, positions = None, None
+    if planets and scene.planets:
+        ephemeris, positions = _planet_positions(scene, jnp.atleast_1d(exposure.time_d))
+        positions = positions[:, :, 0]
+    centers = jnp.asarray(
+        [band.center_nm for band in quadrature.bands],
+        # A floating dtype keeps a half-integer centre of integer nodes.
+        dtype=jnp.result_type(jnp.asarray(quadrature.nodes_nm).dtype, float),
     )
+
+    node = _node_function(
+        models,
+        scene,
+        instrument,
+        exposure,
+        grid,
+        ephemeris,
+        positions,
+        centers,
+        uniform_sky,
+        band_branches,
+    )
+    reuse_samples = positions is not None and coro.band_averaged
+
+    def band_samples(i):
+        model = models[0 if band_branches is None else band_branches[i]]
+        center = centers[i]
+        native = model.at_wavelength(center).source_grid
+        return _planet_samples(model, center, center, grid, native, positions)
+
     if kind == "photons":
         shape = quadrature.nodes_nm.shape
         bands, nodes, source = _real_nodes(quadrature)
+        per_band = [band_samples(i) for i in range(shape[0])] if reuse_samples else []
+        # Stacking promotes every band to one dtype, so children that read in
+        # different dtypes keep the per-node read here.
+        samples = (
+            jnp.stack(per_band)
+            if per_band and len({s.dtype for s in per_band}) == 1
+            else None
+        )
+
+        def mapped(indices):
+            w, i, j = indices
+            if samples is None:
+                return node(w, i, j)
+            return node(w, i, j, samples[i])
+
         values, static, speckle = jax.lax.map(
-            lambda x: node(*x),
+            mapped,
             (quadrature.nodes_nm[bands, nodes], bands, nodes),
         )
         # Each padded slot repeats the first real node of its band.
@@ -589,16 +651,16 @@ def _render(
         kept = static if static_beyond_speckle else static & speckle
         return _zero_unsupported(values, kept[:, None]), static, speckle
 
-    # Stream the nodes of each band: only its accumulated rate and one node
-    # image are live.
+    # Stream each band with its accumulated rate, shared PSFs and one node image.
     def render_band(i):
         row = quadrature.band(i)
+        band_node = partial(node, samples=band_samples(i)) if reuse_samples else node
         initial = {name: jnp.zeros(grid.shape) for name in Rates.component_names()}
 
         def step(carry, node_and_weight):
             total, static, speckle = carry
             w, weight, j = node_and_weight
-            components, static_node, speckle_node = node(w, i, j)
+            components, static_node, speckle_node = band_node(w, i, j)
             single = Quadrature(row.bands, w[None, None], weight[None, None])
             photons = Rates(
                 single, "photon", **jax.tree.map(lambda x: x[None, None], components)
@@ -884,9 +946,9 @@ def expected(
     ``exposure.time_d``; ``exposure.plan`` does not enter. The exposure may be
     an argument of JIT, vmap and grad: node wavelengths, weights and roll are
     traced, and one program serves any of their values. Each scan step sends
-    one photon image and its wavelength and weight to the detector, so forward
-    storage is the band accumulator plus one node's images. JAX reverse-mode
-    may retain residuals for differentiation.
+    one photon image and its wavelength and weight to the detector. Forward
+    storage includes the band accumulator, one node's images and any shared
+    planet PSFs for the band. JAX reverse-mode may retain residuals.
 
     ``supported`` of shape (W, ny, nx) is False where any node of the band
     reads beyond a product's data (see :func:`photon_rates`); the band-integrated
