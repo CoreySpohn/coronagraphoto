@@ -491,8 +491,9 @@ def write_scene(path, *, a_au=1.0):
     )
     planet = np.zeros_like(star)
     planet[:, 0] = star[:, 0]
-    planet[:, 9] = 1.0
-    planet[:, 13] = np.sqrt(G_si * (Msun2kg + Mearth2kg) / AU2m) * yr2s / AU2m
+    # A circular orbit of radius a_au: the loader reads these states, not the header A
+    planet[:, 9] = a_au
+    planet[:, 13] = np.sqrt(G_si * (Msun2kg + Mearth2kg) / (a_au * AU2m)) * yr2s / AU2m
     planet[:, 16:] = 1e-10
     fits.HDUList(
         [
