@@ -1497,3 +1497,62 @@ def test_planet_response_keeps_precision_near_a_throughput_drop(two_band_record)
     f = Fraction(separation / step)
     exact = float((1 - f) * Fraction(high) + f * Fraction(low))
     np.testing.assert_allclose(rates.planet, exact, rtol=0, atol=1e-15 * low)
+
+
+@pytest.mark.parametrize("product", ["band_average", "single_wavelength", "straddling"])
+def test_aperture_reads_each_nodes_product_and_scale(gaussian_observation, product):
+    """Both aperture moments use the analytic Gaussian on each detector pixel.
+
+    The circle weights are inputs. Independent SciPy integrals, multiplied by
+    the covering child's throughput, give the ring and probe fractions to
+    1e-10 of their peak (erf and weighted-sum rounding only).
+    """
+    from conftest import IntegratedGaussianCoronagraph, gaussian_pixels
+
+    from coronagraphoto.aperture import _weights
+
+    coro = None
+    if product == "straddling":
+        blue = IntegratedGaussianCoronagraph(Band(480, 543), False, throughput=0.1)
+        red = IntegratedGaussianCoronagraph(Band(543, 720), False, throughput=0.7)
+        coro = ox.MultiBandCoronagraph((blue, red))
+    _, instrument, exposure = gaussian_observation(product == "band_average", coro=coro)
+    q = exposure.quadrature
+    detector = instrument.detector
+    frame = instrument.coronagraph.frame
+    separation = 0.015
+    response = cp.aperture_response(
+        instrument, q, n_separations=2, n_angles=1, max_separation_arcsec=separation
+    )
+    waves = np.asarray(q.nodes_nm[0])
+    center = q.bands[0].center_nm
+    radius = (
+        _RULE.radius_lod
+        * float(frame.lod_to_arcsec(center))
+        / float(detector.pixel_scale_arcsec)
+    )
+
+    def moments(wave, x_arcsec, y_arcsec):
+        scale_nm = center if product == "band_average" else wave
+        lod = float(frame.lod_to_arcsec(scale_nm))
+        pixels = gaussian_pixels(
+            detector, frame, scale_nm, x_arcsec / lod, y_arcsec / lod, 0.35
+        )
+        amplitude = (0.1 if wave < 543 else 0.7) if coro is not None else 0.3
+        pitch = float(detector.pixel_scale_arcsec)
+        weights = _weights(
+            _RULE, frame, detector.shape, radius, x_arcsec / pitch, y_arcsec / pitch
+        )
+        return [amplitude * np.sum(weights**power * pixels) for power in (1, 2)]
+
+    angle = np.pi * (np.sqrt(5.0) - 1)
+    assert np.all(response.throughput_supported)
+    for k, (x, y) in enumerate(
+        ((0, 0), (separation * np.cos(angle), separation * np.sin(angle)))
+    ):
+        truth = np.asarray([moments(w, x, y) for w in waves]).T
+        np.testing.assert_allclose(
+            response.throughput[:, 0, :, k], truth, atol=1e-10 * truth.max(), rtol=0
+        )
+    probe = moments(waves[len(waves) // 2], separation, 0)[0]
+    np.testing.assert_allclose(response.probe[0], probe, rtol=1e-10, atol=0)

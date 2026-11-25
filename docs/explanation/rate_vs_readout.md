@@ -1,28 +1,25 @@
 # Photon rates, electron rates and observations
 
 `build_exposure(scene, instrument, bands, *, time_d, roll_deg=0.0, plan=None,
-order=4, field_lod=None)` builds the `Exposure` record: observation time, roll,
+order=4, field_lod=None, allow_wide_bands=False)` builds the `Exposure` record: observation time, roll,
 wavelength quadrature, the `Resolution` that reduces each tabulated spectrum of
 the scene to the nodes and the optional frame plan. The star, planet and local-zodi values are not stored: the image path
 asks `scene.sources` for them at each node, given the scene's sky frame and
 `time_d`. `field_lod` is the largest separation, in lambda/D at the band centre,
 at which the response is read. The default, None, takes the field the instrument
 declares, its detector half-diagonal; the nodes of a piece grow with the field.
-The field is measured from the axis and sets the nodes for a response that is
-smooth in wavelength. The per-pixel accuracy of a product read from a table is
-set by how the detector pixels read the table instead: the reconstruction the
-product declares, and whether pixels sample it or table cells are deposited
-onto them, which changes where a pixel equals a table cell. It depends on the
-package and the pixel scale, and a wider field does not usefully reduce it. One
-measured case is the `eac1_aavc_2d` package with 0.25 lambda/D pixels at the
-centre of a 20 percent band, on its 0.25 lambda/D tables: the star leakage map
-is good to 2.9e-3 of its peak per pixel at the default field (1.9e-3 at twice
-the field), to 1e-3 in a 0.7 lambda/D aperture and to 1.3e-4 on the detector
-sum. Other measured cases run from 1e-8 (a smooth test table at 0.45 lambda/D)
-to 1.4e-2 (the same package at 0.40 lambda/D). The image of an off-axis source
-slides about the source, which the default field does not count; on that case,
-with a half-diagonal of 22.6 lambda/D, planets at 3 to 20 lambda/D are held to
-3.4e-5 of their own peak. A caller that reads a smaller field passes it and renders
+A single-wavelength coronagraph response scales with the node wavelength. A
+band-averaged product already includes chromatic blur. Its star, planet, sky
+and disk response uses the same angular scale at every node of the observing
+band, set by that band's centre. Additional nodes sample source spectra,
+instrument efficiency and the speckle field. If the observing band is wider
+than the product, the rendered image contains only the product's blur. The build refuses
+fractional widths above 1.25 times the product's fractional width and gives
+accepted tiles. Passing `allow_wide_bands=True` accepts the product's blur at
+one scale, following the count-rate recipe of Stark and Krist (2019),
+"Standardized Coronagraph Parameters for Input into Yield Calculations".
+
+A caller that reads a smaller field passes it and renders
 fewer nodes; with 0 each piece holds exactly `order` nodes. The image routes
 render the real nodes of each band only, so a band with fewer nodes than the
 widest costs no padded renders.
@@ -88,9 +85,10 @@ interval; a disk that declares no breaks (an analytic exozodi law) adds none.
 `planet_source_support(scene, instrument, exposure)` returns a `(W, K, T)`
 boolean: whether each planet at each time lies inside the source domain of the
 coronagraph component the renderer selects for each band, read at the band
-center. The renderer admits each planet at each node, so the flag describes the
-center only: a planet's separation in lambda/D changes across a band, and the
-nodes of a band that crosses a component boundary read different components.
+center. For single-wavelength products a planet's separation in lambda/D
+changes across the band, and nodes on opposite sides of a component boundary
+read different components. For band averages one child covers the entire
+observing band and the planet keeps its band-centre separation.
 
 At each node, native coronagraph products are converted with their `Frame`
 and resampled with `optixstuff.grids.resample`, honouring each input Image's

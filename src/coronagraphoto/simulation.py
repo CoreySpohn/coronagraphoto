@@ -6,8 +6,11 @@ selection are static; the wavelength nodes and weights, the roll and the epoch
 are traced leaves, so one compiled program serves any node values and any roll
 (a new node count or band count is a new array shape and compiles once).
 Scenes, instruments and exposures can all be arguments of JAX
-transformations. Every node is rendered through resampling operators built
-from the traced lambda/D scale. A roll changes the position angle of detector
+transformations. Band-averaged coronagraph images have the same geometry at
+every node of an observing band. Single-wavelength responses and the speckle
+field use the node wavelength. The field size still sets the node count. For a
+band product, extra nodes sample the spectra and speckles without refining the
+coronagraph geometry. A roll changes the position angle of detector
 +y, north through east.
 """
 
@@ -78,6 +81,7 @@ def _refined(grid, factor):
 
 def _node_rates(
     wavelength_nm,
+    band_center_nm,
     coro,
     system,
     instrument,
@@ -101,16 +105,16 @@ def _node_rates(
     at an uncovered pixel is not modeled; the caller zeroes it.
     """
     speckle = instrument.speckle
+    # A band average already includes the chromatic blur across its band.
+    scale_nm = coro.scale_wavelength_nm(wavelength_nm, band_center_nm)
     products = coro.at_wavelength(wavelength_nm)
     native = products.source_grid
     gain = instrument.effective_area_m2(wavelength_nm)
 
     def detector_pixels(product_grid):
-        # The detector pixels in a product's lambda/D frame at this node, so
-        # the product integrates once over each detector pixel. Native axes
-        # are detector axes; only the scale changes with wavelength.
+        # Native product axes are aligned with detector axes.
         return replace(
-            grid.to_lod(wavelength_nm, product_grid.frame),
+            grid.to_lod(scale_nm, product_grid.frame),
             orientation=product_grid.orientation,
         )
 
@@ -126,7 +130,7 @@ def _node_rates(
     diameter = system.star.angular_diameter_arcsec(system.dist_pc)
     stellar = coro.stellar_map(
         wavelength_nm,
-        diameter / products.stellar_grid.frame.lod_to_arcsec(wavelength_nm),
+        diameter / products.stellar_grid.frame.lod_to_arcsec(scale_nm),
         grid=detector_pixels(products.stellar_grid),
     )
     leakage = stellar.data
@@ -162,7 +166,7 @@ def _node_rates(
 
     planet = jnp.zeros(grid.shape)
     if positions is not None:
-        x, y = _source_offsets_lod(wavelength_nm, grid, native, positions)
+        x, y = _source_offsets_lod(scale_nm, grid, native, positions)
         phi = node["planets"]
         psfs = coro.source_psfs(wavelength_nm, x, y, grid=detector_pixels(native))
         # A source outside the coronagraph's source domain has a zero image
@@ -206,7 +210,7 @@ def _node_rates(
         radiance = system.photon_radiance(
             wavelength_nm,
             time_d,
-            grid=replace(fine.to_arcsec(wavelength_nm), orientation=grid.orientation),
+            grid=replace(fine.to_arcsec(scale_nm), orientation=grid.orientation),
             star=node["node_star"],
         )
         scene = integrate_footprints(
@@ -245,14 +249,20 @@ def _node_rates(
 def _band_ids(instrument, scene, quadrature):
     """Select, on the host, which coronagraph models the program needs.
 
-    Band selection is structure, not a traced value: the program holds one
-    branch per model the concrete nodes fall in (every model when the nodes are
-    traced) and picks among them from the traced node wavelength.
+    For averaged products, return the covering child index for each observing
+    band. For single-wavelength products, return the children the real nodes
+    can select, in dispatch order (all children when the nodes are traced).
     """
     coro = instrument.coronagraph
     models = coro.coronagraphs if isinstance(coro, MultiBandCoronagraph) else (coro,)
     nodes = quadrature.nodes_nm
-    if isinstance(coro, MultiBandCoronagraph) and not isinstance(
+    if isinstance(coro, MultiBandCoronagraph) and coro.band_averaged:
+        # One branch per observing band, even when child bandpasses overlap.
+        indices = {id(model): i for i, model in enumerate(models)}
+        ids = tuple(
+            indices[id(coro.coronagraph_for_band(band))] for band in quadrature.bands
+        )
+    elif isinstance(coro, MultiBandCoronagraph) and not isinstance(
         nodes, jax.core.Tracer
     ):
         chosen = [coro.coronagraph_at(float(w)) for w in np.unique(np.asarray(nodes))]
@@ -290,7 +300,9 @@ def _covering_model(models, wavelength_nm):
     return jnp.argmax(covered), jnp.any(covered)
 
 
-def _node_function(models, scene, instrument, exposure, grid, planets, uniform_sky):
+def _node_function(
+    models, scene, instrument, exposure, grid, planets, uniform_sky, band_branches
+):
     """Return node(w, i, j): the rates and pixel support at one node.
 
     ``w`` is the traced node wavelength and ``(i, j)`` its band and node index
@@ -352,9 +364,23 @@ def _node_function(models, scene, instrument, exposure, grid, planets, uniform_s
             node_star=sources.node_star(i, j),
         )
 
+    centers = jnp.asarray(
+        [band.center_nm for band in exposure.quadrature.bands],
+        # A floating dtype keeps a half-integer centre of integer nodes.
+        dtype=jnp.result_type(jnp.asarray(exposure.quadrature.nodes_nm).dtype, float),
+    )
+
     def with_model(model):
         return lambda w, i, j: _node_rates(
-            w, model, system, instrument, time_d, grid, positions, row(w, i, j)
+            w,
+            centers[i],
+            model,
+            system,
+            instrument,
+            time_d,
+            grid,
+            positions,
+            row(w, i, j),
         )
 
     remat = _identity if jax.config.jax_disable_jit else jax.checkpoint
@@ -362,11 +388,15 @@ def _node_function(models, scene, instrument, exposure, grid, planets, uniform_s
     if len(models) == 1:
         return remat(with_model(models[0]))
 
+    branches = [with_model(m) for m in models]
+    if band_branches is not None:
+        return remat(
+            lambda w, i, j: jax.lax.switch(band_branches[i], branches, w, i, j)
+        )
+
     def node(w, i, j):
         model_index, covered = _covering_model(models, w)
-        rates, static, speckle = jax.lax.switch(
-            model_index, [with_model(m) for m in models], w, i, j
-        )
+        rates, static, speckle = jax.lax.switch(model_index, branches, w, i, j)
         # A node outside every declared band has no performance model.
         return (
             jax.tree.map(lambda x: jnp.where(covered, x, jnp.nan), rates),
@@ -385,13 +415,12 @@ def planet_source_support(
     Entry ``[w, k, t]`` is True where planet ``k`` at time ``t`` lies inside
     the source domain of the coronagraph component the renderer selects for
     band ``w``: ``source_psfs(...).valid`` of that component, read at the band
-    center with the renderer's own planet positions, detector orientation at
-    the exposure's roll, component selection (the first component whose
-    bandpass covers the wavelength, among the components the renderer holds
-    for this quadrature, compared in the dtype of the quadrature nodes) and
-    lambda/D conversion. The flag describes the band center only.
-    The renderer admits each planet at each quadrature node: the planet's
-    separation in lambda/D changes across a band, and for a band that crosses a
+    center with the renderer's planet positions, roll and lambda/D conversion.
+    For a band average the renderer selects a component covering the whole
+    band. A single-wavelength product selects the first held component at the
+    center, compared in the dtype of the quadrature nodes.
+    For single-wavelength products the renderer admits each planet at each
+    node: the separation in lambda/D changes across a band, and if it crosses a
     component boundary the nodes on either side read different components. A
     False flag therefore does not guarantee a zero band image, nor a True flag a
     nonzero one, when admission changes inside the band. Times are
@@ -442,7 +471,9 @@ def planet_source_support(
         center = jnp.asarray(band.center_nm, dtype=dtype)
         # The renderer reads a sole held component at every node, as here.
         model = models[0]
-        if len(models) > 1:
+        if model.band_averaged and len(models) > 1:
+            model = models[w]
+        elif len(models) > 1:
             index, covered = _covering_model(models, center)
             if not covered:
                 raise ValueError(
@@ -526,15 +557,19 @@ def _render(
     static support is False when ``static_beyond_speckle``.
     """
     coro = instrument.coronagraph
-    models = (
-        tuple(coro.coronagraphs[i] for i in band_ids)
-        if isinstance(coro, MultiBandCoronagraph)
-        else (coro,)
-    )
+    models = (coro,)
+    band_branches = None
+    if isinstance(coro, MultiBandCoronagraph):
+        # Several observing bands can use the same averaged product. Trace
+        # its renderer only once and select that branch for each of its bands.
+        model_ids = tuple(dict.fromkeys(band_ids))
+        models = tuple(coro.coronagraphs[i] for i in model_ids)
+        if coro.band_averaged:
+            band_branches = jnp.asarray([model_ids.index(i) for i in band_ids])
     quadrature = exposure.quadrature
     grid = _exposure_grid(instrument, exposure)
     node = _node_function(
-        models, scene, instrument, exposure, grid, planets, uniform_sky
+        models, scene, instrument, exposure, grid, planets, uniform_sky, band_branches
     )
     if kind == "photons":
         shape = quadrature.nodes_nm.shape
@@ -702,30 +737,20 @@ def build_exposure(
     plan: FramePlan | None = None,
     order: int = 4,
     field_lod=None,
+    allow_wide_bands: bool = False,
 ) -> Exposure:
     """Build the host-side Exposure for one observation of a scene.
 
     Each band is split at the breaks the instrument, the scene's local zodi
     and its disk declare, and a Gauss-Legendre rule is applied to every piece:
     ``order`` nodes, raised for a piece the diffraction pattern slides across by
-    the detector field (``field_lod``). The field is measured from the axis and
-    sets the nodes for a response that is smooth in wavelength. The per-pixel
-    accuracy of a product read from a table is set by how the detector pixels
-    read the table instead: the reconstruction the product declares, and
-    whether pixels sample it or table cells are deposited onto them, which
-    changes where a pixel equals a table cell. It depends on the package and
-    the pixel scale, and a wider field does not usefully reduce it. One
-    measured case is the ``eac1_aavc_2d`` package with 0.25 lambda/D pixels at
-    the center of a 20 percent band, on its 0.25 lambda/D tables: the star
-    leakage map is good to 2.9e-3 of its peak per pixel at the default field
-    (1.9e-3 at twice the field), to 1e-3 in a 0.7 lambda/D aperture and to 1.3e-4
-    on the detector sum. Other measured cases run from 1e-8 (a smooth test
-    table at 0.45 lambda/D) to 1.4e-2 (the same package at 0.40 lambda/D). The
-    image of an off-axis source slides about the source, which the default
-    field does not count; on that case, with a half-diagonal of 22.6 lambda/D,
-    planets at 3 to 20 lambda/D are held to 3.4e-5 of their own peak. The
-    star, the planets and a tabulated local zodi are not breaks: the exposure also holds
-    the ``Resolution`` that reduces each tabulated spectrum of the scene on the
+    the detector field (``field_lod``). The field sets the node count for both
+    product types. For a band-averaged product, every node uses the observing
+    band's central lambda/D scale. Extra nodes sample the source spectra and
+    speckle field, and do not refine the coronagraph image. For a
+    single-wavelength product the diffraction pattern scales at every node.
+    The star, the planets and a tabulated local zodi supply no breaks. The
+    exposure holds the ``Resolution`` that reduces each tabulated spectrum on the
     nodes, so a band integral of a rough stellar spectrum is exact in the
     spectrum however few nodes the band has. A disk has no such reduction and
     is read at the nodes, so a disk with a tabulated spectrum (an ExoVista
@@ -758,6 +783,10 @@ def build_exposure(
             the diffraction pattern slides across get more nodes, so a caller
             that reads a smaller field passes it here and pays for fewer
             renders; zero gives every piece ``order`` nodes.
+        allow_wide_bands: Allow an observing band wider in fractional width
+            than 1.25 times a band-averaged product. As in the YIP count rate
+            recipe, the image then has only the product's blur at one scale and
+            is under-blurred for the wider band.
 
     Returns:
         The exposure holding the time, roll, wavelength quadrature, its
@@ -769,7 +798,12 @@ def build_exposure(
     # say in the field that sets the node count of a piece.
     disk_breaks = () if scene.disk is None else scene.disk.spectral_breaks_nm()
     quadrature = Quadrature.build(
-        bands, *models, order=order, breaks_nm=disk_breaks, field_lod=field_lod
+        bands,
+        *models,
+        order=order,
+        breaks_nm=disk_breaks,
+        field_lod=field_lod,
+        allow_wide_bands=allow_wide_bands,
     )
     return Exposure(
         time_d=time_d,

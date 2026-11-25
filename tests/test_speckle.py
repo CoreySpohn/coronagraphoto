@@ -531,3 +531,40 @@ def test_masked_field_support_ends_at_its_data():
         )
         under = mask[row, column]
         assert under[strict].all() and not under[no_data].any()
+
+
+class ChromaticRamp(Patch):
+    """Affine speckle density whose amplitude grows linearly with wavelength."""
+
+    def realize(self, *, wavelength_nm, elapsed_s=0.0):
+        """Return the chromatic cell integrals in the field's own frame."""
+        image = super().realize(wavelength_nm=wavelength_nm, elapsed_s=elapsed_s)
+        return replace(image, data=image.data * wavelength_nm / 600.0)
+
+
+def test_band_product_preserves_node_wavelength_for_speckles(gaussian_observation):
+    """Compare the speckle excess to an affine field evaluated at each node.
+
+    Linear reconstruction reproduces the ramp exactly. Its density times the
+    pixel's node-dependent area gives its integral. The 1e-10 peak tolerance
+    covers resampling roundoff and subtraction of the static leakage.
+    """
+    scene, path, exposure = gaussian_observation()
+    frame = Frame(600, 6, "circumscribed")
+    grid = PixelGrid.focal(24, 0.6, frame)
+    x, _ = grid.coordinates()
+    ramp = ChromaticRamp(grid, "linear", 1e-8 * (1 + 0.1 * x) * grid.pixel_area)
+    base = cp.photon_rates(scene, path, exposure)
+    result = cp.photon_rates(scene, replace(path, speckle=ramp), exposure)
+    assert np.all(result.supported)
+    excess = np.asarray(result.star_leakage - base.star_leakage)[0]
+    for got, wave in zip(excess, exposure.quadrature.nodes_nm[0], strict=True):
+        pitch = float(path.detector.pixel_scale_arcsec) / float(
+            frame.lod_to_arcsec(wave)
+        )
+        nx = path.detector.shape[1]
+        centers = (np.arange(nx) - (nx - 1) / 2) * pitch
+        gain = 20 * (0.4 + 0.004 * (float(wave) - 500))
+        truth = gain * 1e6 * 1e-8 * (1 + 0.1 * centers) * pitch**2 * float(wave) / 600
+        truth = np.broadcast_to(truth, got.shape)
+        np.testing.assert_allclose(got, truth, atol=1e-10 * truth.max(), rtol=0)

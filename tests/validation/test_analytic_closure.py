@@ -9,9 +9,9 @@ between the idealized curve read and the image. It is measured here, source by
 source, against separation, and each part of it is tied to a cause by a check
 that varies the cause and predicts the gap from the cause alone.
 
-The instrument is the synthetic Gaussian YIP of the other closure tests (sigma
-0.7 lambda/D, integral 0.3, a circular aperture of radius 0.7 lambda/D) with
-the scene of ``test_calculator_closure``. A second YIP differs only in a
+The instrument uses the single-wavelength Gaussian YIP of the other closure
+tests (sigma and aperture radius 0.7 lambda/D, integral 0.3) with the scene of
+``test_calculator_closure``. A second YIP differs only in a
 stellar leakage that falls with radius, so the leakage curve is not flat.
 Every gap below is ``analytic / image - 1`` of the same rate.
 

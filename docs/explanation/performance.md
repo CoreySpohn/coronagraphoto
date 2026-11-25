@@ -12,16 +12,18 @@ The wavelength nodes and weights, the roll and the epoch are traced array
 leaves of the `Exposure`. The detector shape, grid axes, frame and
 coronagraph band selection are static. Every node is rendered by one
 `lax.scan` (or `lax.map` for `photon_rates`) whose body builds the resampling
-operators from the traced node's lambda/D scale, so the program does not grow
+operators at the observing band centre for a band-averaged product and at
+the node wavelength for a single-wavelength response. The program does not grow
 with the node count and compiles once. A different node value, weight or roll
 reuses it; a different node count, band count, detector shape or
 instrument structure is a new array shape or static configuration and compiles
 once more. There is no reader cache to size or clear: JAX's own
 compilation cache holds the programs.
 
-A coronagraph that dispatches by band (`MultiBandCoronagraph`) adds one
-branch per model that the concrete nodes fall in, selected inside the program
-from the traced node wavelength; traced nodes include every model.
+For band-averaged children, `MultiBandCoronagraph` selects a model covering
+both edges of each observing band. For single-wavelength children it selects
+from the traced node wavelength, with a branch per model that the concrete
+nodes fall in. Traced nodes include every model.
 
 Time, sky-background coordinates, array-valued scene fluxes, detector
 yield/noise parameters, PRNG keys, the roll and the quadrature are runtime

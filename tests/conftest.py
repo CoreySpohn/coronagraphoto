@@ -78,18 +78,23 @@ import numpy as np
 import zodi
 from hwoutils.constants import Mearth2kg, Msun2kg
 from hwoutils.epoch import Epoch
+from jax.scipy.special import erf
 from optixstuff import ConstantThroughput, Detector, Exposure, Instrument, SimplePrimary
 from optixstuff.apertures import Circular
 from optixstuff.coronagraph import (
+    AbstractImagingCoronagraph,
     AbstractSceneCoronagraph,
     AbstractTableCoronagraph,
+    ProductGrids,
     SceneRender,
     SourcePSFs,
 )
 from optixstuff.grids import Frame, Image, Measure, PixelGrid, resample
+from optixstuff.optical_elements import TransmissiveElement
 from optixstuff.performance import PerformanceCurves, SampledProfile
-from optixstuff.spectral import Band, Resolution
+from optixstuff.spectral import Band, Resolution, Transmission
 from orbix.observatory import ecliptic_pointing
+from scipy.special import erf as scipy_erf
 from skyscapes.physical_model import AbstractPhysicalModel, GridPhysicalModel
 from skyscapes.scene import FlatStar, Planet, Scene, Star
 
@@ -137,13 +142,24 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
     uniform_sky_profile: SampledProfile
     bandpass: Band | None = None
     sigma_lod: float = 0.35
+    band_averaged: bool = eqx.field(static=True, default=False)
     chromatic: bool = eqx.field(static=True, default=False)
 
-    def __init__(self, n=40, step=0.25, *, chromatic=False, frame=None, bandpass=None):
+    def __init__(
+        self,
+        n=40,
+        step=0.25,
+        *,
+        chromatic=False,
+        frame=None,
+        bandpass=None,
+        band_averaged=False,
+    ):
         """Build an n x n focal grid with the given lambda/D step."""
         if frame is None:
             frame = Frame(550.0, 6.0, "circumscribed")
         self.bandpass = bandpass
+        self.band_averaged = band_averaged
         self.grid = PixelGrid.focal(n, step, frame)
         self.chromatic = chromatic
         self.sky_trans = Image(
@@ -553,7 +569,7 @@ YIP_PITCH_LOD, YIP_SIGMA_LOD = 0.5, 0.7
 def write_yip(
     path, *, distinct_products=False, stellar_profile=None, reach=3, half_width=6
 ):
-    """Synthetic YIP package with SI-labelled wavelength headers and even centre.
+    """Single-wavelength Gaussian YIP with SI-labelled headers and even centre.
 
     ``stellar_profile`` is an optional function of the radius in lambda/D that
     multiplies the uniform stellar leakage, for a leakage that varies with
@@ -590,8 +606,8 @@ def write_yip(
     metadata = dict(
         inscribed_diameter_m=4.7,
         obscured=0.2,
-        low_nm=500.0,
-        high_nm=600.0,
+        low_nm=550.0,
+        high_nm=550.0,
         n_wavelengths=1,
         n_pointings=3,
     )
@@ -618,3 +634,115 @@ def write_yip(
         headers=headers,
     )
     return str(path)
+
+
+class IntegratedGaussianCoronagraph(AbstractImagingCoronagraph):
+    """Two resolved stellar lobes and a Gaussian planet, integrated on demand."""
+
+    bandpass: Band = eqx.field(static=True)
+    band_averaged: bool = eqx.field(static=True)
+    breaks_nm: tuple = eqx.field(static=True, default=())
+    throughput: float = 0.3
+    grid: PixelGrid = eqx.field(
+        static=True,
+        default=PixelGrid.focal(32, 0.4, Frame(600.0, 6.0, "circumscribed")),
+    )
+
+    @property
+    def frame(self):
+        """The reference frame shared by all three products."""
+        return self.grid.frame
+
+    def spectral_breaks_nm(self):
+        """Include the optional internal breaks in the calibrated interval."""
+        return np.union1d(super().spectral_breaks_nm(), self.breaks_nm)
+
+    def at_wavelength(self, wavelength_nm):
+        """All products cover the same square in lambda/D."""
+        return ProductGrids(self.grid, self.grid, self.grid)
+
+    @staticmethod
+    def _gaussian(grid, cx, cy, sigma):
+        """Unit-flux Gaussian integrated over the axis-aligned pixel rectangles."""
+        x, y = grid.coordinates()
+
+        def axis(delta, pitch):
+            width = jnp.sqrt(2.0) * sigma
+            return (
+                erf((delta + pitch / 2) / width) - erf((delta - pitch / 2) / width)
+            ) / 2
+
+        return axis(x - cx, grid.basis[0][0]) * axis(y - cy, grid.basis[1][1])
+
+    def stellar_map(self, wavelength_nm, stellar_diameter_lod, *, grid=None):
+        """Leakage lobes broaden in quadrature with stellar diameter."""
+        grid = self.grid if grid is None else grid
+        width = stellar_diameter_lod / 2
+        data = self._gaussian(grid, -0.6, 0.45, jnp.hypot(0.28, width))
+        data += 0.6 * self._gaussian(grid, 0.8, -0.35, jnp.hypot(0.42, width))
+        return Image(1e-8 * data, grid, (), Measure.integral(), "stellar_flux_fraction")
+
+    def source_psfs(self, wavelength_nm, x_lod, y_lod, *, grid=None):
+        """Integrate one off-axis Gaussian per source."""
+        grid = self.grid if grid is None else grid
+        x, y = (jnp.atleast_1d(v)[:, None, None] for v in (x_lod, y_lod))
+        data = self.throughput * self._gaussian(grid, x, y, 0.35)
+        image = Image(
+            data, grid, ("source",), Measure.integral(), "stellar_flux_fraction"
+        )
+        return SourcePSFs(image, jnp.ones(x.shape[0], dtype=bool))
+
+    def uniform_sky_map(self, wavelength_nm, *, grid):
+        """Constant dimensionless transmission."""
+        return Image(
+            jnp.full(grid.shape, 0.3), grid, (), Measure.intensive(), "transmission"
+        )
+
+
+@pytest.fixture
+def gaussian_observation():
+    """Build a 540 nm observation with a resolved star and sloping gain and QE."""
+    from coronagraphoto import build_exposure
+
+    def build(band_averaged=True, *, coro=None):
+        band = Band(520, 560)
+        if coro is None:
+            coro = IntegratedGaussianCoronagraph(
+                Band(480, 720), band_averaged, (543.0,)
+            )
+        instrument = Instrument(
+            SimplePrimary(circumscribed_diameter_m=6.0, collecting_area_m2=20.0),
+            (TransmissiveElement(Transmission([500, 600], [0.4, 0.8])),),
+            coro,
+            Detector(
+                pixel_scale_arcsec=0.008,
+                shape=(12, 12),
+                qe_curve=([500, 600], [0.9, 0.7]),
+            ),
+        )
+        scene = make_system(
+            star=FlatStar(1e6, fixed_diameter_arcsec=0.013),
+            smooth_planet=True,
+            contrast=1e-7,
+            separation_arcsec=0.02,
+        )
+        exposure = build_exposure(
+            scene, instrument, (band,), time_d=0.0, order=2, field_lod=0.0
+        )
+        return scene, instrument, exposure
+
+    return build
+
+
+def gaussian_pixels(detector, frame, wavelength_nm, x_lod, y_lod, sigma_lod):
+    """Independent unit-flux Gaussian from detector edges and the normal CDF."""
+    pitch = float(detector.pixel_scale_arcsec) / float(
+        frame.lod_to_arcsec(wavelength_nm)
+    )
+    ny, nx = detector.shape
+
+    def probabilities(n, center):
+        edges = (np.arange(n + 1) - n / 2) * pitch
+        return np.diff(scipy_erf((edges - center) / (np.sqrt(2) * sigma_lod))) / 2
+
+    return np.outer(probabilities(ny, y_lod), probabilities(nx, x_lod))

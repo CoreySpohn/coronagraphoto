@@ -949,3 +949,169 @@ def test_star_support_matches_the_footprint_read(reconstruction, pitch_lod, dete
         )
     assert supported.any() and not supported.all()
     assert np.all(leakage[supported] > 0)
+
+
+@pytest.mark.parametrize(
+    "band_averaged", [True, False], ids=["band_center", "per_node"]
+)
+def test_stellar_and_planet_images_follow_product_scale(
+    gaussian_observation, band_averaged
+):
+    """Compare node images and streamed counts to independent Gaussian integrals.
+
+    The scene supplies the planet's sky position. Fluxes, gain and QE are
+    analytic. SciPy and JAX evaluate the same erf integrals, so 1e-10 of each
+    component peak allows only erf and floating-point summation error.
+    """
+    from conftest import gaussian_pixels
+
+    import coronagraphoto as cp
+
+    scene, path, exposure = gaussian_observation(band_averaged)
+    q = exposure.quadrature
+    assert len(q.pieces[0]) == 2
+    band = q.bands[0]
+    frame = path.coronagraph.frame
+    assert band.center_nm == 0.9 * frame.reference_wavelength_nm
+    waves = np.asarray(q.nodes_nm[0])
+    east, north = np.asarray(scene.positions(np.array([0.0])))[:, 0, 0]
+
+    def images(scale_nm):
+        lod = float(frame.lod_to_arcsec(scale_nm))
+
+        def gaussian(x, y, sigma):
+            return gaussian_pixels(path.detector, frame, scale_nm, x, y, sigma)
+
+        diameter = 0.013 / lod
+        star = gaussian(-0.6, 0.45, np.hypot(0.28, diameter / 2))
+        star += 0.6 * gaussian(0.8, -0.35, np.hypot(0.42, diameter / 2))
+        planet = gaussian(-east / lod, north / lod, 0.35)
+        return np.stack([1e6 * 1e-8 * star, 1e6 * 1e-7 * 0.3 * planet])
+
+    photons = cp.photon_rates(scene, path, exposure)
+    electrons = cp.expected(scene, path, exposure)
+    assert np.all(photons.supported)
+    gain = 20 * (0.4 + 0.004 * (waves - 500))
+    eta = 0.9 - 0.002 * (waves - 500)
+    truth = np.stack([images(band.center_nm if band_averaged else w) for w in waves])
+    truth *= gain[:, None, None, None]
+    integral = np.einsum("q,qcyx->cyx", q.weights()[0] * eta, truth)
+    for k, field in enumerate(("star_leakage", "planet")):
+        for got, want in (
+            (getattr(photons, field)[0], truth[:, k]),
+            (getattr(electrons, field)[0], integral[k]),
+        ):
+            np.testing.assert_allclose(got, want, atol=1e-10 * want.max(), rtol=0)
+    if not band_averaged:
+        fixed = images(band.center_nm) * np.sum(np.asarray(q.weights()[0]) * eta * gain)
+        difference = np.max(np.abs(fixed - integral), axis=(1, 2)) / integral.max(
+            axis=(1, 2)
+        )
+        # Center scaling changes the star by 1.40e-3 and the planet by 1.08e-3 of peak.
+        assert np.all(difference > 1e-5)
+
+
+def test_build_exposure_refuses_underblurred_band(gaussian_observation):
+    """The exact width ratio 1.3 exceeds 1.25, so only an explicit opt-in builds."""
+    from optixstuff.spectral import Band
+
+    import coronagraphoto as cp
+
+    scene, instrument, _ = gaussian_observation()
+    band = Band(444, 756)
+    with pytest.raises(ValueError, match="nm"):
+        cp.build_exposure(scene, instrument, (band,), time_d=0)
+    exposure = cp.build_exposure(
+        scene, instrument, (band,), time_d=0, allow_wide_bands=True
+    )
+    assert exposure.quadrature.bands == (band,)
+
+
+def test_single_wavelength_product_changes_angular_image_at_two_nodes(
+    gaussian_observation,
+):
+    """Two one-node exposures have different normalized stellar image shapes.
+
+    Two separated lobes at fixed lambda/D offsets move on an angular detector.
+    A 1e-5 peak difference is well above x64 erf and normalization roundoff.
+    """
+    from conftest import exposure_for
+    from optixstuff.spectral import Quadrature
+
+    import coronagraphoto as cp
+
+    scene, instrument, exposure = gaussian_observation(False)
+    q = exposure.quadrature
+    images = []
+    for j in (0, -1):
+        one = Quadrature(q.bands, q.nodes_nm[:, [j]], np.ones((1, 1)))
+        image = np.asarray(
+            cp.expected(scene, instrument, exposure_for(scene, one)).star_leakage
+        )
+        images.append(image / image.max())
+    assert np.max(np.abs(images[0] - images[1])) > 1e-5
+
+
+def test_each_observing_band_uses_a_child_covering_both_edges(gaussian_observation):
+    """Overlapping products give two band images with known Gaussian integrals.
+
+    The first interval covers only the narrower observation. Each child's
+    throughput multiplies a SciPy Gaussian integral at the observing centre
+    and the node photon density. The 1e-10 peak tolerance allows erf and
+    x64 roundoff.
+    """
+    from conftest import IntegratedGaussianCoronagraph, gaussian_pixels
+    from optixstuff import MultiBandCoronagraph
+    from optixstuff.spectral import Band
+
+    import coronagraphoto as cp
+
+    partial = IntegratedGaussianCoronagraph(Band(510, 545), True, throughput=0.1)
+    wide = IntegratedGaussianCoronagraph(Band(515, 580), True, throughput=0.7)
+    scene, path, _ = gaussian_observation(coro=MultiBandCoronagraph((partial, wide)))
+    bands = (Band(520, 560), Band(524, 532))
+    exposure = cp.build_exposure(scene, path, bands, time_d=0.0, order=2, field_lod=0.0)
+    photons = cp.photon_rates(scene, path, exposure)
+    east, north = np.asarray(scene.positions(np.array([0.0])))[:, 0, 0]
+    for i, (band, throughput) in enumerate(zip(bands, (0.7, 0.1), strict=True)):
+        lod = float(wide.frame.lod_to_arcsec(band.center_nm))
+        pixels = gaussian_pixels(
+            path.detector, wide.frame, band.center_nm, -east / lod, north / lod, 0.35
+        )
+        real = np.asarray(exposure.quadrature.active[i])
+        waves = np.asarray(exposure.quadrature.nodes_nm[i])[real]
+        gain = 20 * (0.4 + 0.004 * (waves - 500))
+        density = (1e6 * 1e-7 * throughput * gain[:, None, None]) * pixels
+        np.testing.assert_allclose(
+            photons.planet[i, real], density, atol=1e-10 * density.max(), rtol=0
+        )
+
+
+def test_integer_nodes_keep_the_fractional_band_centre(gaussian_observation):
+    """Integer and floating nodes of equal value give identical images.
+
+    The band 520-561 nm has its centre at 540.5 nm; a band product read at a
+    truncated 540 nm changes the stellar image by 1.3e-3 of its peak. Both
+    exposures evaluate the same closed form, so 1e-12 of the peak allows only
+    roundoff.
+    """
+    from conftest import exposure_for
+    from optixstuff.spectral import Band, Quadrature
+
+    import coronagraphoto as cp
+
+    scene, instrument, _ = gaussian_observation()
+    band = Band(520, 561)
+    images = [
+        np.asarray(
+            cp.photon_rates(
+                scene,
+                instrument,
+                exposure_for(scene, Quadrature((band,), nodes, [[20.5, 20.5]])),
+            ).star_leakage
+        )
+        for nodes in (np.array([[530, 551]]), np.array([[530.0, 551.0]]))
+    ]
+    np.testing.assert_allclose(
+        images[0], images[1], atol=1e-12 * images[1].max(), rtol=0
+    )

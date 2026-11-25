@@ -179,7 +179,9 @@ def _weights(rule, frame, shape, radius_pix, dx_pix, dy_pix):
 
 
 @eqx.filter_jit
-def _ring_moments(model, detector, wavelengths_nm, x_arcsec, y_arcsec, weights):
+def _ring_moments(
+    model, detector, wavelengths_nm, band_center_nm, x_arcsec, y_arcsec, weights
+):
     """Aperture fractions (Q, 2, A) of A sources at each node of one band.
 
     Also returns the (Q, A) flags of sources inside the source domain. A source
@@ -189,9 +191,10 @@ def _ring_moments(model, detector, wavelengths_nm, x_arcsec, y_arcsec, weights):
 
     def node(wavelength_nm):
         native = model.at_wavelength(wavelength_nm).source_grid
-        scale = native.frame.lod_to_arcsec(wavelength_nm)
+        scale_nm = model.scale_wavelength_nm(wavelength_nm, band_center_nm)
+        scale = native.frame.lod_to_arcsec(scale_nm)
         pixels = replace(
-            grid.to_lod(wavelength_nm, native.frame), orientation=native.orientation
+            grid.to_lod(scale_nm, native.frame), orientation=native.orientation
         )
         psfs = model.source_psfs(
             wavelength_nm, x_arcsec / scale, y_arcsec / scale, grid=pixels
@@ -214,7 +217,7 @@ def _band_models(instrument, quadrature, rule):
     models, frames, radii = [], [], []
     for band in quadrature.bands:
         model = (
-            coro.coronagraph_at(band.center_nm)
+            coro.coronagraph_for_band(band)
             if isinstance(coro, MultiBandCoronagraph)
             else coro
         )
@@ -229,20 +232,41 @@ def _band_models(instrument, quadrature, rule):
     return models, frames, radii
 
 
+def _node_model(coro, band_model, wavelength_nm):
+    """Select a child per node only for dispatched single-wavelength products."""
+    if isinstance(coro, MultiBandCoronagraph) and not coro.band_averaged:
+        return coro.coronagraph_at(float(wavelength_nm))
+    return band_model
+
+
+def _node_groups(coro, band_model, nodes_nm):
+    """Group consecutive real nodes that read the same child."""
+    groups = []
+    for wave in np.asarray(nodes_nm):
+        child = _node_model(coro, band_model, wave)
+        if not groups or child is not groups[-1][0]:
+            groups.append((child, []))
+        groups[-1][1].append(wave)
+    return [(child, np.asarray(nodes)) for child, nodes in groups]
+
+
 def _probe_index(supported_row):
     """Index of the middle supported separation, or None."""
     inside = np.flatnonzero(np.asarray(supported_row))
     return None if inside.size == 0 else int(inside[inside.size // 2])
 
 
-def _probe(model, instrument, rule, frame, radius, nodes_nm, supported, step):
+def _probe(
+    model, instrument, rule, frame, radius, nodes_nm, band_center_nm, supported, step
+):
     """Aperture fraction of one source on the +x axis at the middle node of a band.
 
     ``nodes_nm`` are the band's real nodes, ``supported`` their ``(Q_real, K)``
     ring table and ``step`` its separation spacing; together they fix the
     source, so the build and the check measure the same one.
     """
-    k = _probe_index(supported[len(nodes_nm) // 2])
+    mid = len(nodes_nm) // 2
+    k = _probe_index(supported[mid])
     if k is None:
         return np.nan
     detector = instrument.detector
@@ -256,9 +280,10 @@ def _probe(model, instrument, rule, frame, radius, nodes_nm, supported, step):
         0.0,
     )
     moments, _ = _ring_moments(
-        model,
+        _node_model(instrument.coronagraph, model, nodes_nm[mid]),
         detector,
-        nodes_nm[len(nodes_nm) // 2 :][:1],
+        nodes_nm[mid : mid + 1],
+        np.asarray(band_center_nm, dtype=jnp.result_type(nodes_nm.dtype, float)),
         np.array([separation]),
         np.array([0.0]),
         weights[None],
@@ -328,6 +353,7 @@ def _compare_response(instrument, quadrature, response):
             frame,
             float(response.radius_pix[w]),
             nodes[w, : counts[w]],
+            quadrature.bands[w].center_nm,
             np.asarray(response.throughput_supported[w, : counts[w]]),
             response.separation_step_arcsec,
         )
@@ -358,7 +384,10 @@ def aperture_response(
     ``max_separation_arcsec`` (by default the largest separation whose
     aperture stays on the detector), ``n_angles`` to a ring. Each source
     is imaged on the detector pixels by ``coronagraph.source_psfs`` and summed
-    in an aperture centred on it.
+    in an aperture centred on it. A band-averaged product uses the observing
+    band's centre for every image. For single-wavelength children a node reads
+    its covering child at the node scale. The aperture keeps the radius and
+    frame of the band-centre child.
 
     ``quadrature`` must be the one the exposures will carry, for example
     ``coronagraphoto.build_exposure(...).quadrature``. Only a
@@ -407,6 +436,10 @@ def aperture_response(
         for a, b in np.ndindex(2, 2):
             kernel = _weights(rule, frame, (size, size), radius, b / 2, a / 2)
             kernels[:, w, a, b] = kernel, kernel**2
+        center_nm = np.asarray(
+            quadrature.bands[w].center_nm, dtype=jnp.result_type(nodes.dtype, float)
+        )
+        groups = _node_groups(instrument.coronagraph, model, nodes[w, : counts[w]])
         for k, separation in enumerate(separations):
             angle = 2 * np.pi * (np.arange(n_angles) + (k * _GOLDEN) % 1) / n_angles
             x, y = separation * np.cos(angle), separation * np.sin(angle)
@@ -417,13 +450,15 @@ def aperture_response(
                 ]
             )
             # Only the real nodes are imaged; a padded slot repeats the first.
-            moments, inside = _ring_moments(
-                model, detector, nodes[w, : counts[w]], x, y, weights
-            )
-            moments = np.asarray(moments)[slots[w]]
+            reads = [
+                _ring_moments(child, detector, waves, center_nm, x, y, weights)
+                for child, waves in groups
+            ]
+            moments = np.concatenate([result[0] for result in reads])[slots[w]]
+            inside = np.concatenate([result[1] for result in reads])[slots[w]]
             throughput[:, w, :, k] = moments.mean(axis=-1).T
             ring_std[w, :, k] = moments[:, 0].std(axis=-1)
-            ring_supported[w, :, k] = np.asarray(inside)[slots[w]].all(axis=-1)
+            ring_supported[w, :, k] = inside.all(axis=-1)
     probe = [
         _probe(
             model,
@@ -432,6 +467,7 @@ def aperture_response(
             frame,
             radius,
             nodes[w, : counts[w]],
+            quadrature.bands[w].center_nm,
             ring_supported[w, : counts[w]],
             separations[1],
         )
