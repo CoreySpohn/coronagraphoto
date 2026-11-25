@@ -1,6 +1,5 @@
 """Shared pytest fixtures and data utilities for coronagraphoto tests."""
 
-# Precision is configured before importing the numerical model classes.
 # ruff: noqa: E402
 
 import importlib.util
@@ -14,9 +13,6 @@ import jax
 import pytest
 from hypothesis import settings
 
-# Keep lazily cached dependency tables and evaluation arrays at one precision.
-jax.config.update("jax_enable_x64", True)
-
 # Released hwoutils versions may not include the optional budget plugin yet.
 pytest_plugins = []
 if importlib.util.find_spec("hwoutils.testbudget") is not None:
@@ -27,13 +23,6 @@ if importlib.util.find_spec("hwoutils.internal_refs") is not None:
 settings.register_profile("quick", max_examples=25, deadline=None)
 settings.register_profile("nightly", max_examples=200, deadline=None)
 settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "quick"))
-
-
-@pytest.fixture(scope="module")
-def exovista_precision():
-    """Preserve precision when constructing imported orbital states."""
-    with jax.enable_x64(True):
-        yield
 
 
 # ---------------------------------------------------------------------------
