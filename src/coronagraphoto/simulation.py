@@ -24,6 +24,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.leaves import require_tree
+from hwoutils.numerics import COARSEST
+from hwoutils.precision import float_dtype
 from optixstuff import Exposure, FramePlan, Instrument, Rates
 from optixstuff.coronagraph import (
     AbstractImagingCoronagraph,
@@ -40,7 +42,7 @@ from optixstuff.grids import (
     integrate_footprints,
     resample,
 )
-from optixstuff.spectral import Band, Quadrature, Resolution
+from optixstuff.spectral import Band, Quadrature, Resolution, merge_tolerance_nm
 from skyscapes import Scene
 
 
@@ -280,8 +282,7 @@ def _band_ids(instrument, scene, quadrature):
     elif isinstance(coro, MultiBandCoronagraph) and not isinstance(
         nodes, jax.core.Tracer
     ):
-        chosen = [coro.coronagraph_at(float(w)) for w in np.unique(np.asarray(nodes))]
-        ids = tuple(i for i, m in enumerate(models) if any(m is c for c in chosen))
+        ids = _node_child_ids(models, quadrature)
     else:
         ids = tuple(range(len(models)))
     for i in ids:
@@ -304,15 +305,50 @@ def _planet_positions(system, times):
     return ephemeris, system.positions(times, ephemeris=ephemeris)
 
 
-def _covering_model(models, wavelength_nm):
-    """Return the first covering model index and whether any model covers."""
-    covered = jnp.stack(
-        [
-            (m.bandpass.low_nm <= wavelength_nm) & (wavelength_nm <= m.bandpass.high_nm)
-            for m in models
-        ]
+def _covering_models(models, wavelength_nm, xp):
+    """Compare inclusive band edges on the common float32 wavelength grid.
+
+    Expand the host edges by the spectral merge tolerance. Comparing at the
+    coarsest precision lets concrete and traced nodes make the same choice.
+    The original wavelength still supplies the radiometric read.
+    """
+    edges = np.array(
+        [(m.bandpass.low_nm, m.bandpass.high_nm) for m in models], dtype=np.float64
     )
-    return jnp.argmax(covered), jnp.any(covered)
+    direction = np.array([1, -1], dtype=COARSEST)
+    expanded = edges - direction * merge_tolerance_nm(edges)
+    limits = expanded.astype(COARSEST)
+    # Round each threshold inward so the common grid adds no extra slack.
+    limits = np.where(
+        direction * (limits - expanded) < 0,
+        np.nextafter(limits, direction * np.inf),
+        limits,
+    )
+    wave = xp.asarray(wavelength_nm, dtype=COARSEST)
+    return (limits[:, 0] <= wave) & (wave <= limits[:, 1])
+
+
+def _host_child_index(models, wavelength_nm):
+    """Select the first child covering a concrete node or band center."""
+    covered = np.flatnonzero(_covering_models(models, wavelength_nm, np))
+    if not covered.size:
+        raise ValueError(f"No coronagraph bandpass covers {wavelength_nm} nm")
+    return int(covered[0])
+
+
+def _node_child_ids(models, quadrature):
+    """Select real nodes' children on the host, in dispatch order."""
+    rows = np.asarray(quadrature.nodes_nm)
+    real = np.concatenate(
+        [row[:n] for row, n in zip(rows, _real_counts(quadrature), strict=True)]
+    )
+    selected = {_host_child_index(models, w) for w in np.unique(real)}
+    return tuple(i for i in range(len(models)) if i in selected)
+
+
+def _band_center_dtype(nodes):
+    """Floating working precision for a band center, even with integer nodes."""
+    return nodes.dtype if jnp.issubdtype(nodes.dtype, jnp.floating) else float_dtype()
 
 
 def _node_function(
@@ -415,8 +451,9 @@ def _node_function(
         )
 
     def node(w, i, j):
-        model_index, covered = _covering_model(models, w)
-        rates, static, speckle = jax.lax.switch(model_index, branches, w, i, j)
+        covering = _covering_models(models, w, jnp)
+        covered = jnp.any(covering)
+        rates, static, speckle = jax.lax.switch(jnp.argmax(covering), branches, w, i, j)
         # A node outside every declared band has no performance model.
         return (
             jax.tree.map(lambda x: jnp.where(covered, x, jnp.nan), rates),
@@ -437,8 +474,9 @@ def planet_source_support(
     band ``w``: ``source_psfs(...).valid`` of that component, read at the band
     center with the renderer's planet positions, roll and lambda/D conversion.
     For a band average the renderer selects a component covering the whole
-    band. A single-wavelength product selects the first held component at the
-    center, compared in the dtype of the quadrature nodes.
+    band. For single-wavelength products, the sole component held for the
+    real nodes is used directly. When several are held, the first component
+    covering the center is selected using the spectral merge tolerance.
     For single-wavelength products the renderer admits each planet at each
     node: the separation in lambda/D changes across a band, and if it crosses a
     component boundary the nodes on either side read different components. A
@@ -477,9 +515,9 @@ def planet_source_support(
     support = np.zeros((len(quadrature.bands), n_planets, n_times), dtype=bool)
     if not n_planets:
         return support
-    # The renderer reads each node in the dtype of the quadrature nodes, so the
-    # center is compared and converted in that dtype too.
-    dtype = jnp.asarray(quadrature.nodes_nm).dtype
+    # Evaluate the center in the same floating dtype as the renderer. Child
+    # selection uses the shared structural edge comparison on the host.
+    dtype = _band_center_dtype(quadrature.nodes_nm)
     coro = instrument.coronagraph
     # The components the renderer holds for this quadrature, in dispatch order.
     models = (
@@ -494,12 +532,7 @@ def planet_source_support(
         if model.band_averaged and len(models) > 1:
             model = models[w]
         elif len(models) > 1:
-            index, covered = _covering_model(models, center)
-            if not covered:
-                raise ValueError(
-                    f"No coronagraph bandpass covers band center {band.center_nm} nm"
-                )
-            model = models[int(index)]
+            model = models[_host_child_index(models, band.center_nm)]
         native = model.at_wavelength(center).source_grid
         x, y = _source_offsets_lod(center, grid, native, positions)
         valid = model.source_psfs(center, x.ravel(), y.ravel()).valid
@@ -595,7 +628,7 @@ def _render(
     centers = jnp.asarray(
         [band.center_nm for band in quadrature.bands],
         # A floating dtype keeps a half-integer centre of integer nodes.
-        dtype=jnp.result_type(jnp.asarray(quadrature.nodes_nm).dtype, float),
+        dtype=_band_center_dtype(quadrature.nodes_nm),
     )
 
     node = _node_function(

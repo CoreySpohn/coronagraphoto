@@ -14,6 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import exposure_for, make_path, make_system, with_zodi
+from hwoutils.numerics import roundoff
 from numpy.polynomial.legendre import leggauss
 from optixstuff.grids import PixelGrid, SkyOrientation
 from optixstuff.optical_elements import AbstractUniformElement
@@ -206,9 +207,9 @@ def test_image_path_star_and_planet_are_the_node_sum_of_independent_renders():
     reads: ``(1 / w_k)`` times the integral of the source times the Lagrange
     polynomial of node ``k``, eight Gauss points on every cell between the
     merged knots of the star and the planet; the node value of a one-node band
-    is its band mean from the same helper. Tolerance 1e-10 of the peak pixel,
-    ``atol`` only, basis floating point on a few dozen terms (measured about
-    1e-16).
+    is its band mean from the same helper. The peak-scaled roundoff bound
+    covers 64 operations for node interpolation, source and response
+    products, and an addition per node on each route.
 
     The test cannot see a response that is wrong in the same way at every node,
     since the one-node renders share it. That needs an anchor of the response
@@ -246,7 +247,12 @@ def test_image_path_star_and_planet_are_the_node_sum_of_independent_renders():
         image = np.asarray(getattr(got, name))[0]
         assert np.max(np.abs(expected)) > 0
         np.testing.assert_allclose(
-            image, expected, rtol=0, atol=1e-10 * np.max(np.abs(expected))
+            image,
+            expected,
+            rtol=0,
+            atol=roundoff(
+                np.max(np.abs(expected)), n_ops=64 + 2 * weights.size, dtype=image.dtype
+            ),
         )
 
 
@@ -315,8 +321,9 @@ def test_image_path_local_zodi_is_the_exact_table_integral():
     a pixel's band-integrated zodi is a constant times the integral of the zodi
     table times the cubic. The constant is fixed by the same render with a flat
     table; truth is the closed-form integral of each table (eight Gauss points
-    on every cell, exact for a linear table times a cubic). Tolerance 1e-10,
-    basis floating point on a few dozen terms (the rule is exact to rounding).
+    on every cell, exact for a linear table times a cubic). The ratio allows
+    64 operations for table interpolation, radiometry and division, plus
+    both node reductions.
     A point sample at the four nodes misses by order 1e-1 on this table.
     """
     instrument = _instrument()
@@ -326,13 +333,20 @@ def test_image_path_local_zodi_is_the_exact_table_integral():
     for name, zodi in (("rough", rough), ("flat", flat)):
         scene = _rough_scene(zodi)
         exposure = cp.build_exposure(scene, instrument, (_BAND,), time_d=0.0)
-        result[name] = float(
+        result[name] = np.asarray(
             cp.photon_rates(scene, instrument, exposure).integrate().local_zodi[0, 4, 4]
         )
     truth = _band_integral(wave, np.asarray(rough.radiance_phot_per_s_m2_nm_sr), _cubic)
     flat_truth = _band_integral(wave, np.full(76, 1e12), _cubic)
     np.testing.assert_allclose(
-        result["rough"] / result["flat"], truth / flat_truth, rtol=1e-10
+        result["rough"] / result["flat"],
+        truth / flat_truth,
+        atol=0,
+        rtol=roundoff(
+            1,
+            n_ops=64 + 2 * exposure.quadrature.nodes_nm.size,
+            dtype=result["rough"].dtype,
+        ),
     )
     assert abs(truth / flat_truth - 1) > 0.05, "the table should differ from flat"
 
@@ -343,7 +357,8 @@ def test_aperture_record_zodi_read_is_the_exact_table_integral():
 
     The record holds the response to a uniform sky and the exposure's resolution;
     a read multiplies it by the table's node-effective radiance at the read
-    time. Same truth and constant as the image-path row, 1e-10 relative.
+    time. The ratio allows 64 rounding operations for node table interpolation,
+    response products and division, plus both node reductions.
     """
     instrument = _instrument()
     rough, wave = _zodi(1e12 * _lines(76, 5))
@@ -362,11 +377,18 @@ def test_aperture_record_zodi_read_is_the_exact_table_integral():
         record = cp.aperture_record(scene, instrument, exposure, response)
         read = cp.aperture_rates(record, 0.0, 0.0, contrast=1e-10, time_d=0.0)
         assert bool(read.supported.all())
-        result[name] = float(read.integrate().local_zodi[0])
+        result[name] = np.asarray(read.integrate().local_zodi[0])
     truth = _band_integral(wave, np.asarray(rough.radiance_phot_per_s_m2_nm_sr), _cubic)
     flat_truth = _band_integral(wave, np.full(76, 1e12), _cubic)
     np.testing.assert_allclose(
-        result["rough"] / result["flat"], truth / flat_truth, rtol=1e-10
+        result["rough"] / result["flat"],
+        truth / flat_truth,
+        atol=0,
+        rtol=roundoff(
+            1,
+            n_ops=64 + 2 * exposure.quadrature.nodes_nm.size,
+            dtype=result["rough"].dtype,
+        ),
     )
 
 
@@ -473,9 +495,10 @@ def test_each_node_carries_its_own_star_value():
     Truth: the per-node ratio of the star leakage of a tilted, line-rich star to
     that of a flat star, rendered on the same four nodes, equals the ratio of the
     scene's node-effective star values (the instrument and coronagraph factors
-    cancel node by node). Tolerance 1e-10 relative, basis floating point on a
-    product of two reads. The tilt makes the four values differ by more than a
-    factor of 3, and reversing the node rows changes the ratios by order one
+    cancel node by node). The 32-operation relative bound covers source
+    calibration, radiometric products and the two divisions. The tilt makes
+    the four values differ by more than a factor of 3. Reversing the node
+    rows changes the ratios by order one
     (the band-summed leakage is nearly blind to the pairing, so the test reads
     the node-resolved record).
     """
@@ -495,5 +518,6 @@ def test_each_node_carries_its_own_star_value():
     np.testing.assert_allclose(
         leak["tilted"] / leak["flat"],
         leak["tilted_star"] / leak["flat_star"],
-        rtol=1e-10,
+        rtol=roundoff(1, n_ops=32, dtype=leak["flat"].dtype),
+        atol=0,
     )

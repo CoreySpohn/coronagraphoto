@@ -5,8 +5,9 @@ import jax
 import numpy as np
 import optixstuff as ox
 from conftest import make_path, make_system
+from hwoutils.constants import arcsec2rad, c, h, k_B, nm2m
+from hwoutils.numerics import roundoff
 from optixstuff.spectral import Band
-from scipy import constants
 
 import coronagraphoto as cp
 
@@ -24,20 +25,26 @@ def _warm(instrument, temperature_K, emissivity):
 
 def _pixel_rate(instrument, nodes_nm, temperature_K, emissivity):
     """Per-pixel rate in photons/s/nm from primitives (Planck, area, pixel)."""
-    wavelength_m = np.asarray(nodes_nm) * 1e-9
-    x = constants.h * constants.c / (wavelength_m * constants.k * temperature_K)
-    radiance = 2 * constants.c / wavelength_m**4 / np.expm1(x) * 1e-9
-    pixel_sr = np.deg2rad(instrument.detector.pixel_scale_arcsec / 3600.0) ** 2
-    return emissivity * radiance * instrument.primary.collecting_area_m2 * pixel_sr
+    wavelength_m = np.asarray(nodes_nm, dtype=np.float64) * nm2m
+    x = h * c / (wavelength_m * k_B * temperature_K)
+    radiance = 2 * c / wavelength_m**4 / np.expm1(x) * nm2m
+    pixel_sr = (float(instrument.detector.pixel_scale_arcsec) * arcsec2rad) ** 2
+    return emissivity * radiance * float(
+        instrument.primary.collecting_area_m2
+    ) * pixel_sr, x
 
 
 def test_thermal_image_is_the_uniform_closed_form():
     """Fails if the rendered thermal image departs from the per-pixel rate.
 
     Basis: Planck photon radiance, emissivity, geometric collecting area and
-    pixel solid angle from primitives, float64, rtol 1e-12 (an exponential and
-    a four-factor product). The image must be uniform, carry no throughput
-    (the path has throughput 0.4), and add to the electron rates and the
+    pixel solid angle from host float64 primitives. The relative roundoff
+    bound allows two roundings in the exponential argument, amplified by
+    its magnitude, and 24 operations for Planck and radiometric products.
+    The hot read allows one product and the node accumulations. Comparing
+    totals also allows each component addition at the unsubtracted scale.
+    The image must be uniform, carry no throughput (the path has throughput
+    0.4), and add to the electron rates and the
     drawn frame. Without warm emission every field is an exact zero.
     """
     # The planet table covers the 1400 to 1500 nm band; a band that leaves a
@@ -50,13 +57,14 @@ def test_thermal_image_is_the_uniform_closed_form():
     )
     rates = cp.photon_rates(scene, instrument, exposure)
     nodes = np.asarray(exposure.quadrature.nodes_nm)
-    expected = _pixel_rate(instrument, nodes, 290.0, 0.5)
+    expected, exponent = _pixel_rate(instrument, nodes, 290.0, 0.5)
     assert rates.thermal.shape == (*nodes.shape, 16, 16)
     assert nodes.shape[1] > 4, "the detector field adds nodes at the default"
     np.testing.assert_allclose(
         rates.thermal,
         np.broadcast_to(expected[..., None, None], rates.thermal.shape),
-        rtol=1e-12,
+        rtol=roundoff(1, n_ops=2 * exponent.max() + 24, dtype=rates.thermal.dtype),
+        atol=0,
     )
     assert np.all(expected > 0)
     cold_rates = cp.photon_rates(scene, cold, exposure)
@@ -71,10 +79,20 @@ def test_thermal_image_is_the_uniform_closed_form():
     electrons = cp.expected(scene, hot, visible)
     reference = hot.detector.electrons(cp.photon_rates(scene, hot, visible))
     assert float(electrons.thermal.min()) > 0.0
-    np.testing.assert_allclose(electrons.thermal, reference.thermal, rtol=1e-12)
-    without = cp.expected(scene, cold, visible)
+    n_ops = 1 + 2 * visible.quadrature.nodes_nm.size
     np.testing.assert_allclose(
-        electrons.total() - without.total(), electrons.thermal, rtol=1e-9
+        electrons.thermal,
+        reference.thermal,
+        rtol=roundoff(1, n_ops=n_ops, dtype=electrons.thermal.dtype),
+        atol=0,
+    )
+    without = cp.expected(scene, cold, visible)
+    scale = np.max(np.abs(electrons.total())) + np.max(np.abs(without.total()))
+    np.testing.assert_allclose(
+        electrons.total() - without.total(),
+        electrons.thermal,
+        rtol=0,
+        atol=roundoff(scale, n_ops=len(electrons.component_names()) + 1),
     )
     drawn = cp.observe(jax.random.key(0), scene, hot, visible)
     assert drawn.data.shape == (1, 16, 16)

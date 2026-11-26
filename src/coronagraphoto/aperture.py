@@ -36,6 +36,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.numerics import COARSEST
 from jax.typing import ArrayLike
 from jaxtyping import Array
 from optixstuff import Exposure, Instrument, Rates
@@ -46,7 +47,12 @@ from optixstuff.spectral import Quadrature, Resolution
 from orbix.system import SkyFrame
 from skyscapes import AbstractLocalZodi, Scene
 
-from coronagraphoto.simulation import _real_counts, _run
+from coronagraphoto.simulation import (
+    _band_center_dtype,
+    _host_child_index,
+    _real_counts,
+    _run,
+)
 
 # Successive rings start a golden-ratio fraction of the angular step apart, so
 # the rings together sample every pixel phase and no azimuth is favoured.
@@ -94,6 +100,33 @@ class ApertureResponse(eqx.Module):
     throughput_supported: Array
     kernels: Array
     probe: Array
+    _separation_limit_words: Array | None = None
+
+
+class AperturePosition(eqx.Module):
+    """Sky coordinates and ring interpolation prepared for one separation grid.
+
+    Build with :meth:`ApertureRecord.prepare_position` before passing host
+    coordinates through a JAX transformation. All leaves share the broadcast
+    shape of the sky coordinates and can be mapped together with ``jax.vmap``.
+
+    Attributes:
+        east_arcsec: East offsets from the star [arcsec].
+        north_arcsec: North offsets from the star [arcsec].
+        lower_ring: Index of the lower contributing ring.
+        near_upper: Whether the upper ring is the nearer knot.
+        fraction: Distance from the nearer knot as a fraction of the ring step.
+        between_rings: Whether the position lies between two tabulated rings.
+        in_table: Whether the separation lies inside the tabulated range.
+    """
+
+    east_arcsec: Array
+    north_arcsec: Array
+    lower_ring: Array
+    near_upper: Array
+    fraction: Array
+    between_rings: Array
+    in_table: Array
 
 
 class ApertureRecord(eqx.Module):
@@ -168,6 +201,48 @@ class ApertureRecord(eqx.Module):
     sky_frame: SkyFrame
     resolution: Resolution
     reads: tuple[str, ...] = eqx.field(static=True)
+    _separation_limit_words: Array | None = None
+
+    def prepare_position(
+        self, east_arcsec: ArrayLike, north_arcsec: ArrayLike
+    ) -> AperturePosition:
+        """Condition a host position or batch for reads on this record's ring grid.
+
+        Supply the original offsets in arcsec. The range and contributing rings
+        are decided in binary64 and the distance from the nearer knot is formed
+        before conversion to the record precision. Pass the result as the
+        position argument of :func:`aperture_rates`, including under JIT.
+
+        Args:
+            east_arcsec: East offsets from the star [arcsec], host values.
+            north_arcsec: North offsets from the star [arcsec], host values.
+
+        Returns:
+            The prepared position, with leaves of the broadcast input shape.
+        """
+        step = self.separation_step_arcsec
+        last = self.planet_response.shape[-1] - 1
+        limit = _separation_limit(step, self._separation_limit_words, last)
+        east, north = np.broadcast_arrays(
+            np.asarray(east_arcsec, dtype=np.float64),
+            np.asarray(north_arcsec, dtype=np.float64),
+        )
+        separation = np.hypot(east, north)
+        ring, upper, between, inside = _ring_segment(
+            separation, limit / last, limit, last, np
+        )
+        fraction = _ring_fraction(
+            separation, ring, upper, inside, limit / last, limit, last, np
+        )
+        return AperturePosition(
+            jnp.asarray(east, dtype=step.dtype),
+            jnp.asarray(north, dtype=step.dtype),
+            jnp.asarray(ring),
+            jnp.asarray(upper),
+            jnp.asarray(fraction, dtype=step.dtype),
+            jnp.asarray(between),
+            jnp.asarray(inside),
+        )
 
 
 def _weights(rule, frame, shape, radius_pix, dx_pix, dy_pix):
@@ -235,7 +310,7 @@ def _band_models(instrument, quadrature, rule):
 def _node_model(coro, band_model, wavelength_nm):
     """Select a child per node only for dispatched single-wavelength products."""
     if isinstance(coro, MultiBandCoronagraph) and not coro.band_averaged:
-        return coro.coronagraph_at(float(wavelength_nm))
+        return coro.coronagraphs[_host_child_index(coro.coronagraphs, wavelength_nm)]
     return band_model
 
 
@@ -257,20 +332,29 @@ def _probe_index(supported_row):
 
 
 def _probe(
-    model, instrument, rule, frame, radius, nodes_nm, band_center_nm, supported, step
+    model,
+    instrument,
+    rule,
+    frame,
+    radius,
+    nodes_nm,
+    band_center_nm,
+    supported,
+    step,
+    limit,
 ):
     """Aperture fraction of one source on the +x axis at the middle node of a band.
 
     ``nodes_nm`` are the band's real nodes, ``supported`` their ``(Q_real, K)``
-    ring table and ``step`` its separation spacing; together they fix the
-    source, so the build and the check measure the same one.
+    ring table. The host spacing and endpoint fix the source so that the
+    build and check measure the same one.
     """
     mid = len(nodes_nm) // 2
     k = _probe_index(supported[mid])
     if k is None:
         return np.nan
     detector = instrument.detector
-    separation = k * float(step)
+    separation = limit if k == supported.shape[-1] - 1 else k * float(step)
     weights = _weights(
         rule,
         frame,
@@ -283,7 +367,7 @@ def _probe(
         _node_model(instrument.coronagraph, model, nodes_nm[mid]),
         detector,
         nodes_nm[mid : mid + 1],
-        np.asarray(band_center_nm, dtype=jnp.result_type(nodes_nm.dtype, float)),
+        np.asarray(band_center_nm, dtype=_band_center_dtype(nodes_nm)),
         np.array([separation]),
         np.array([0.0]),
         weights[None],
@@ -326,6 +410,17 @@ def _check_response(instrument, quadrature, response):
         _compare_response(instrument, quadrature, response)
 
 
+def _separation_limit(step, words, last):
+    """Recover the unrounded host endpoint of a concrete separation grid."""
+    pitch = float(step)
+    if words is not None:
+        limit = float(np.asarray(words).view(np.float64)[0])
+        # An explicitly replaced pitch supersedes the original build geometry.
+        if float(np.asarray(limit / last, dtype=step.dtype)) == pitch:
+            return limit
+    return last * pitch
+
+
 def _compare_response(instrument, quadrature, response):
     nodes, built = (
         np.asarray(quadrature.nodes_nm),
@@ -344,6 +439,10 @@ def _compare_response(instrument, quadrature, response):
             f"{np.asarray(response.radius_pix).tolist()} pixels, this instrument's "
             f"is {radii}"
         )
+    last = response.throughput.shape[-1] - 1
+    limit = _separation_limit(
+        response.separation_step_arcsec, response._separation_limit_words, last
+    )
     for w, (model, frame) in enumerate(zip(models, frames, strict=True)):
         expected = float(response.probe[w])
         measured = _probe(
@@ -355,7 +454,8 @@ def _compare_response(instrument, quadrature, response):
             nodes[w, : counts[w]],
             quadrature.bands[w].center_nm,
             np.asarray(response.throughput_supported[w, : counts[w]]),
-            response.separation_step_arcsec,
+            limit / last,
+            limit,
         )
         if not np.isclose(measured, expected, rtol=1e-4, atol=1e-7, equal_nan=True):
             raise ValueError(
@@ -422,7 +522,9 @@ def aperture_response(
         max_separation_arcsec = (min(grid.shape) / 2 - 1 - max(radii)) * scale
     if max_separation_arcsec <= 0:
         raise ValueError("the aperture does not fit on the detector")
-    separations = np.linspace(0.0, max_separation_arcsec, n_separations)
+    separations = np.linspace(
+        0.0, max_separation_arcsec, n_separations, dtype=np.float64
+    )
 
     nodes = quadrature.nodes_nm
     slots = _padded_slots(quadrature)
@@ -437,7 +539,7 @@ def aperture_response(
             kernel = _weights(rule, frame, (size, size), radius, b / 2, a / 2)
             kernels[:, w, a, b] = kernel, kernel**2
         center_nm = np.asarray(
-            quadrature.bands[w].center_nm, dtype=jnp.result_type(nodes.dtype, float)
+            quadrature.bands[w].center_nm, dtype=_band_center_dtype(nodes)
         )
         groups = _node_groups(instrument.coronagraph, model, nodes[w, : counts[w]])
         for k, separation in enumerate(separations):
@@ -470,6 +572,7 @@ def aperture_response(
             quadrature.bands[w].center_nm,
             ring_supported[w, : counts[w]],
             separations[1],
+            separations[-1],
         )
         for w, (model, frame, radius) in enumerate(
             zip(models, frames, radii, strict=True)
@@ -485,6 +588,9 @@ def aperture_response(
         jnp.asarray(ring_supported),
         jnp.asarray(kernels),
         jnp.asarray(probe),
+        # Store the host endpoint in integer words so batching and canonical
+        # precision casts retain it without creating a wide float leaf.
+        jnp.asarray(separations[-1:].view(np.uint32)),
     )
 
 
@@ -652,6 +758,7 @@ def aperture_record(
         scene.local_zodi,
         scene.sky_frame,
         exposure.resolution,
+        _separation_limit_words=response._separation_limit_words,
         reads=(
             "star",
             "dynamics.frame",
@@ -665,26 +772,65 @@ def aperture_record(
     )
 
 
-def _linear(table, position, *, weighted=False):
+def _linear(table, position):
     """Read the last axis of a table at a fractional index.
 
     Returns the value and whether the position lies inside the table. The
     read clamps to the table, so the value is finite and its gradient exact
     everywhere; outside the table it is the edge's linear continuation and the
-    caller replaces it. ``weighted`` forms the value as a weighted sum of the
-    two endpoints, which keeps full relative precision where the table falls
-    by orders of magnitude between neighbours; the default difference form is
-    cheaper and fine for smooth tables.
+    caller replaces it.
     """
     last = table.shape[-1] - 1
     k = jnp.clip(jnp.floor(position), 0, last - 1).astype(int)
     pair = jax.lax.dynamic_slice_in_dim(table, k, 2, axis=-1)
     fraction = position - k
-    if weighted:
-        value = (1 - fraction) * pair[..., 0] + fraction * pair[..., 1]
-    else:
-        value = pair[..., 0] + fraction * (pair[..., 1] - pair[..., 0])
+    value = pair[..., 0] + fraction * (pair[..., 1] - pair[..., 0])
     return value, (position >= 0) & (position <= last)
+
+
+def _ring_segment(separation, pitch, limit, last, xp):
+    """Select the contributing rings using a single decision resolution."""
+    inside = separation <= limit
+    distance = xp.where(inside, separation, 0)
+    lower = xp.clip(xp.floor(distance / pitch), 0, last - 1).astype(np.int32)
+    # A quotient just below an integer can round onto the next knot.
+    lower -= (lower.astype(distance.dtype) * pitch > distance).astype(np.int32)
+    lo = lower.astype(distance.dtype) * pitch
+    hi = xp.where(lower + 1 == last, limit, (lower + 1).astype(distance.dtype) * pitch)
+    upper = hi - distance < distance - lo
+    between = (lo < distance) & (distance < hi)
+    return lower, upper, between, inside
+
+
+def _ring_fraction(separation, lower, upper, inside, pitch, limit, last, xp):
+    """Distance from the nearer knot in units of its interval, at working precision."""
+    lo = lower.astype(separation.dtype) * pitch
+    hi = xp.where(
+        lower + 1 == last, limit, (lower + 1).astype(separation.dtype) * pitch
+    )
+    offset = xp.where(upper, hi - separation, separation - lo)
+    # A point admitted at decision resolution can lie just beyond the knot at
+    # working precision. Clamp there while retaining resolved interior offsets.
+    return xp.where(inside & (offset >= 0), offset / (hi - lo), 0)
+
+
+def _array_position(record, east, north):
+    """Decide on float32 inputs and knots, then interpolate at working precision."""
+    step = record.separation_step_arcsec
+    east, north = (
+        jnp.asarray(east, dtype=step.dtype),
+        jnp.asarray(north, dtype=step.dtype),
+    )
+    last = record.planet_response.shape[-1] - 1
+    pitch = step.astype(COARSEST)
+    distance = jnp.hypot(east.astype(COARSEST), north.astype(COARSEST))
+    ring, upper, between, inside = _ring_segment(
+        distance, pitch, last * pitch, last, jnp
+    )
+    fraction = _ring_fraction(
+        jnp.hypot(east, north), ring, upper, inside, step, last * step, last, jnp
+    )
+    return AperturePosition(east, north, ring, upper, fraction, between, inside)
 
 
 def _bilinear(table, row, column):
@@ -707,8 +853,8 @@ def _bilinear(table, row, column):
 
 def aperture_rates(
     record: ApertureRecord,
-    east_arcsec: ArrayLike,
-    north_arcsec: ArrayLike,
+    east_arcsec: ArrayLike | AperturePosition,
+    north_arcsec: ArrayLike | None = None,
     *,
     contrast: ArrayLike | None = None,
     planet: ArrayLike | None = None,
@@ -724,6 +870,14 @@ def aperture_rates(
     Each is scalar or broadcasts to (W, Q). A scene read should pass its
     node-effective planet flux density, ``Sources.planets``. The aperture is
     centered on the planet.
+
+    Concrete host sky coordinates are differenced from the nearest ring
+    knots before narrowing to the record precision. To retain this resolution
+    for compiled or batched reads, pass ``record.prepare_position(east, north)``
+    in place of the two coordinates. Prepare it on the host for the same ring
+    grid. Raw JAX coordinates select rings and exact knots on a shared float32
+    grid for admission. Between two supported rings, the interpolated rate
+    retains the offset resolved at record precision.
 
     ``time_d`` is the observation time in days from the record's epoch. It
     sets the local zodi: the record's zodi model is evaluated for the record's
@@ -758,7 +912,7 @@ def aperture_rates(
 
     Args:
         record: The aperture record built for the target and exposure.
-        east_arcsec: Planet offset east of the star, in arcsec.
+        east_arcsec: Planet offset east of the star in arcsec, or a prepared position.
         north_arcsec: Planet offset north of the star, in arcsec.
         contrast: Planet-to-star hypothesis relative to ``record.star``, scalar
             or broadcastable to (W, Q). Mutually exclusive with ``planet``.
@@ -774,8 +928,21 @@ def aperture_rates(
     """
     if (contrast is None) == (planet is None):
         raise ValueError("give exactly one of contrast and planet")
-    east, north = jnp.asarray(east_arcsec), jnp.asarray(north_arcsec)
-    separation = jnp.hypot(east, north)
+    if isinstance(east_arcsec, AperturePosition):
+        if north_arcsec is not None:
+            raise ValueError("omit north_arcsec with a prepared position")
+        position = east_arcsec
+    elif north_arcsec is None:
+        raise ValueError("give both east_arcsec and north_arcsec")
+    elif (
+        not isinstance(east_arcsec, jax.Array)
+        and not isinstance(north_arcsec, jax.Array)
+        and _concrete(record.separation_step_arcsec, record._separation_limit_words)
+    ):
+        position = record.prepare_position(east_arcsec, north_arcsec)
+    else:
+        position = _array_position(record, east_arcsec, north_arcsec)
+    east, north = position.east_arcsec, position.north_arcsec
     ny, nx = record.n_pix.shape[-2] // 2, record.n_pix.shape[-1] // 2
 
     def lattice_index(roll):
@@ -797,8 +964,16 @@ def aperture_rates(
         local_zodi = local_zodi * record.local_zodi.node_radiance(
             record.quadrature, record.resolution, record.sky_frame, time_d
         )
-    position = separation / record.separation_step_arcsec
-    planet_response, in_table = _linear(record.planet_response, position, weighted=True)
+    ring = position.lower_ring
+    pair = jax.lax.dynamic_slice_in_dim(record.planet_response, ring, 2, axis=-1)
+    near = jnp.where(position.near_upper, pair[..., 1], pair[..., 0])
+    far = jnp.where(position.near_upper, pair[..., 0], pair[..., 1])
+    ring_mask = jax.lax.dynamic_slice_in_dim(
+        record.planet_unsupported, ring, 2, axis=-1
+    )
+    # A supported knot beside a missing ring reads only its own value.
+    fraction = jnp.where(jnp.any(ring_mask != 0, axis=-1), 0, position.fraction)
+    planet_response = near + fraction * (far - near)
     selected = jnp.asarray(planet if contrast is None else contrast)
     name = "planet" if contrast is None else "contrast"
     try:
@@ -815,14 +990,16 @@ def aperture_rates(
     if contrast is not None:
         selected = record.star.astype(dtype) * selected
     planet = selected * planet_response
-    bad_ring, _ = _linear(record.planet_unsupported, position)
+    bad_ring = (
+        (~position.near_upper | position.between_rings) & (ring_mask[..., 0] != 0)
+    ) | ((position.near_upper | position.between_rings) & (ring_mask[..., 1] != 0))
     supported = (
         inside_here
         & inside_fixed
-        & in_table
+        & position.in_table
         & (bad_here == 0)
         & (bad_fixed == 0)
-        & jnp.all(bad_ring == 0, axis=-1)
+        & ~jnp.any(bad_ring, axis=-1)
     )
 
     def zero(x):

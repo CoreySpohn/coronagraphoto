@@ -1,6 +1,8 @@
 """Aperture response, record and read against closed forms and image sums."""
 
 import copy
+from dataclasses import replace
+from fractions import Fraction
 
 import equinox as eqx
 import ineedvalidation as vv
@@ -18,8 +20,10 @@ from conftest import (
     with_zodi,
     write_yip,
 )
-from hwoutils.constants import Rsun2m
+from hwoutils.constants import Rsun2m, arcsec2rad, c, h, k_B, nm2m
 from hwoutils.conversions import photons_per_nm_per_m2_to_jy
+from hwoutils.numerics import eps, roundoff, sum_roundoff
+from hwoutils.testing import precision_pair
 from optixstuff import (
     ConstantThroughput,
     Detector,
@@ -29,7 +33,7 @@ from optixstuff import (
 )
 from optixstuff.apertures import Circular, HalfMaximum
 from optixstuff.grids import Frame, Image, Measure, PixelGrid, SkyOrientation
-from optixstuff.spectral import Band
+from optixstuff.spectral import Band, Quadrature
 from skyscapes import AYOZodi, LeinertZodi
 from skyscapes.physical_model import BlackbodyPhysicalModel, GridPhysicalModel
 from skyscapes.scene import BlackbodyStar, FlatStar, Planet, Star
@@ -81,7 +85,9 @@ def _image_weights(instrument, x_arcsec, y_arcsec):
         Measure.integral(),
         "stellar_flux_fraction",
     )
-    return _RULE.weights(ones, (float(x_arcsec) / scale, float(y_arcsec) / scale))
+    return np.asarray(
+        _RULE.weights(ones, (float(x_arcsec) / scale, float(y_arcsec) / scale))
+    )
 
 
 @pytest.fixture(scope="module")
@@ -127,20 +133,33 @@ def test_worked_example_closed_form(plateau):
     square lambda/D at node lambda, 19% apart between the outer nodes.
     Basis: exact areas for the rates, within 3e-2 relative: the sharp edges of
     the manufactured fields ring under band-limited resampling onto 0.3
-    lambda/D pixels, measured at up to 2.1e-2. The pixel count is exact.
+    lambda/D pixels, measured at up to 2.1e-2. The radius allows six
+    operations for angular conversion and division. Pixel count allows the
+    propagation through the square, plus the aperture-weight reduction depth.
     """
     _, _, exposure, response, record = plateau
     nodes = np.asarray(exposure.quadrature.nodes_nm)
     area = np.pi * (0.7 * 550.0 / nodes) ** 2
     rates = cp.aperture_rates(record, *_offsets(0.03, 40.0), contrast=1e-10, time_d=0.0)
     incident = 1e6 * 40 * 0.4
-    np.testing.assert_allclose(response.radius_pix, [0.7 / 0.3], rtol=1e-12)
+    np.testing.assert_allclose(
+        response.radius_pix,
+        [0.7 / 0.3],
+        rtol=roundoff(1, n_ops=6, dtype=response.radius_pix.dtype),
+        atol=0,
+    )
     np.testing.assert_allclose(
         rates.planet, 1e-10 * incident * 0.3 / 16 * area, rtol=3e-2
     )
     np.testing.assert_allclose(rates.star_leakage, incident * 1e-9 * area, rtol=3e-2)
     n_pix = np.pi * (0.7 / 0.3) ** 2
-    np.testing.assert_allclose(rates.n_pix, [n_pix], rtol=1e-12)
+    np.testing.assert_allclose(
+        rates.n_pix,
+        [n_pix],
+        rtol=0,
+        atol=roundoff(n_pix, n_ops=16, dtype=rates.n_pix.dtype)
+        + sum_roundoff(n_pix, response.kernels.shape[-1] ** 2, dtype=rates.n_pix.dtype),
+    )
     assert 0.5 * n_pix < float(rates.variance.n_pix[0]) < n_pix
     # A flat field under weights w**2 keeps the ratio of the two weight sums.
     np.testing.assert_allclose(
@@ -163,7 +182,9 @@ def test_background_lattice_matches_image_sums(sloped):
     sum depend on where the aperture sits. Planets are placed on half-pixel
     lattice positions, where the record holds the sum itself, and read at a
     roll the record was not built for. Basis: the same exact pixel weights on
-    both sides; 1e-9 relative allows float64 rounding of the convolution.
+    both sides. The relative bound covers each dot product's reduction
+    depth, plus 32 arithmetic steps for rotation, lattice coordinates,
+    powers of the weights and the bilinear read.
     """
     scene, instrument, exposure, _, record = sloped
     photons = cp.photon_rates(scene, instrument, exposure)
@@ -181,14 +202,22 @@ def test_background_lattice_matches_image_sums(sloped):
             roll_deg=roll,
         )
         weights = _image_weights(instrument, x, y)
+        dtype = photons.star_leakage.dtype
+        rtol = float(
+            roundoff(1, n_ops=32, dtype=dtype)
+            + sum_roundoff(2.0, weights.size, dtype=dtype)
+        )
         for moment, power in ((rates, 1), (rates.variance, 2)):
             np.testing.assert_allclose(
                 moment.star_leakage,
-                jnp.einsum("wqyx,yx->wq", photons.star_leakage, weights**power),
-                rtol=1e-9,
+                np.einsum(
+                    "wqyx,yx->wq", np.asarray(photons.star_leakage), weights**power
+                ),
+                rtol=rtol,
+                atol=0,
             )
             np.testing.assert_allclose(
-                moment.n_pix, [float((weights**power).sum())], rtol=1e-9
+                moment.n_pix, [float((weights**power).sum())], rtol=rtol, atol=0
             )
     # The slope is seen: two positions differ by far more than the tolerance.
     first, second = (
@@ -208,7 +237,9 @@ def test_planet_table_matches_image_sums(sloped):
     from one planet only by pixel phase. Basis: the measured ring scatter of
     the response, three standard deviations, plus the linear-interpolation
     error bounded by one eighth of the largest second difference of the
-    neighbouring knots.
+    neighbouring knots. Host float64 weights and accumulation keep the
+    image sum independent of the render lane. The scale identities allow
+    four operations for the flux, throughput and contrast products.
     """
     scene, instrument, exposure, response, record = sloped
     photons = cp.photon_rates(scene, instrument, exposure)
@@ -228,9 +259,9 @@ def test_planet_table_matches_image_sums(sloped):
     scatter = np.asarray(response.throughput_ring_std[0])[:, knot : knot + 2].max(-1)
     curvature = abs(np.diff(table[:, knot - 1 : knot + 3], n=2, axis=-1)).max(-1) / 8
     tolerance = (3 * scatter + curvature) / table[:, knot : knot + 2].min(-1)
-    truth = jnp.einsum("wqyx,yx->wq", photons.planet, weights)
+    truth = np.einsum("wqyx,yx->wq", np.asarray(photons.planet), weights)
     assert np.all(tolerance < 0.05)
-    assert np.all(abs(np.asarray(rates.planet / truth)[0] - 1) <= tolerance)
+    assert np.all(abs((np.asarray(rates.planet) / truth)[0] - 1) <= tolerance)
     # Contrast factors out of the planet and touches nothing else.
     doubled = cp.aperture_rates(
         record, *_offsets(separation, 90.0), contrast=2e-10, time_d=0.0
@@ -238,7 +269,12 @@ def test_planet_table_matches_image_sums(sloped):
     single = cp.aperture_rates(
         record, *_offsets(separation, 90.0), contrast=1e-10, time_d=0.0
     )
-    np.testing.assert_allclose(doubled.planet, 2 * single.planet, rtol=1e-14)
+    np.testing.assert_allclose(
+        doubled.planet,
+        2 * single.planet,
+        rtol=roundoff(1, n_ops=4, dtype=single.planet.dtype),
+        atol=0,
+    )
     np.testing.assert_array_equal(doubled.star_leakage, single.star_leakage)
     per_node = cp.aperture_rates(
         record,
@@ -246,7 +282,12 @@ def test_planet_table_matches_image_sums(sloped):
         contrast=jnp.full((1, 4), 1e-10),
         time_d=0.0,
     )
-    np.testing.assert_allclose(per_node.planet, single.planet, rtol=1e-14)
+    np.testing.assert_allclose(
+        per_node.planet,
+        single.planet,
+        rtol=roundoff(1, n_ops=4, dtype=single.planet.dtype),
+        atol=0,
+    )
 
 
 @vv.case("aperture-photon-budget", "code-verification")
@@ -257,7 +298,9 @@ def test_read_geometry_on_a_hand_made_record(plateau):
     which bilinear interpolation reproduces exactly, so every read returns
     where it looked. The expected detector position is written out for
     detector +y at position angle ``roll`` and east to the left at zero roll:
-    x = -(E cos r - N sin r), y = E sin r + N cos r. Basis: exact, 1e-12.
+    x = -(E cos r - N sin r), y = E sin r + N cos r. The algebra allows
+    24 steps of roundoff for the angle conversions, rotation, pixel offset
+    and bilinear interpolation.
     """
     record = plateau[4]
     shape = record.n_pix.shape[-2:]
@@ -271,6 +314,7 @@ def test_read_geometry_on_a_hand_made_record(plateau):
         record,
         (tables[0], tables[1], tables[0]),
     )
+    rtol = roundoff(1, n_ops=24, dtype=record.star_leakage.dtype)
     pitch, centre = float(record.pixel_scale_arcsec), (shape[0] / 2 - 1) / 2
 
     def expected(separation, angle, roll):
@@ -285,9 +329,9 @@ def test_read_geometry_on_a_hand_made_record(plateau):
         record, *_offsets(separation, angle), contrast=1e-10, time_d=0.0
     )
     column, row = expected(separation, angle, built)
-    np.testing.assert_allclose(rates.star_leakage, column, rtol=1e-12)
-    np.testing.assert_allclose(rates.local_zodi, row, rtol=1e-12)
-    np.testing.assert_allclose(rates.exozodi, column, rtol=1e-12)
+    np.testing.assert_allclose(rates.star_leakage, column, rtol=rtol, atol=0)
+    np.testing.assert_allclose(rates.local_zodi, row, rtol=rtol, atol=0)
+    np.testing.assert_allclose(rates.exozodi, column, rtol=rtol, atol=0)
     # East is to the left and north is up at zero roll.
     assert built == 0.0 and column < centre < row
     rolled = cp.aperture_rates(
@@ -295,11 +339,16 @@ def test_read_geometry_on_a_hand_made_record(plateau):
     )
     new_column, new_row = expected(separation, angle, 115.0)
     assert abs(new_column - column) > 1 and abs(new_row - row) > 1
-    np.testing.assert_allclose(rolled.star_leakage, new_column, rtol=1e-12)
-    np.testing.assert_allclose(rolled.local_zodi, new_row, rtol=1e-12)
+    np.testing.assert_allclose(rolled.star_leakage, new_column, rtol=rtol, atol=0)
+    np.testing.assert_allclose(rolled.local_zodi, new_row, rtol=rtol, atol=0)
     # The exozodi stays with the sky position it was rendered at.
-    np.testing.assert_allclose(rolled.exozodi, column, rtol=1e-12)
-    np.testing.assert_allclose(rolled.planet, rates.planet, rtol=1e-14)
+    np.testing.assert_allclose(rolled.exozodi, column, rtol=rtol, atol=0)
+    np.testing.assert_allclose(
+        rolled.planet,
+        rates.planet,
+        rtol=roundoff(1, n_ops=4, dtype=rates.planet.dtype),
+        atol=0,
+    )
 
 
 @vv.case("aperture-photon-budget", "code-verification")
@@ -314,7 +363,10 @@ def test_local_zodi_follows_the_read_time(sloped):
     read multiplies after it. A record rebuilt at day 137 and the radiance
     ratio of the two sightlines pin the contract: one record serves any time.
     Basis: floating-point. Against the image sum the difference is the
-    rounding of the aperture sum, measured 4e-15 relative and held to 1e-12.
+    rounding of two aperture reductions and 32 operations for weighting,
+    the position read and radiance scaling. The radiance ratio and JIT
+    comparisons each allow 32 operations for radiance interpolation,
+    scaling and division.
     The rebuilt record holds the same uniform-sky table, so its read must be
     bit-identical in every term.
     """
@@ -345,6 +397,8 @@ def test_local_zodi_follows_the_read_time(sloped):
     late, reference = read(built, 137.0), read(rebuilt, 137.0)
     photons = cp.photon_rates(scene, instrument, exposures[1])
     weights = _image_weights(instrument, x, y)
+    rtol = roundoff(1, n_ops=32, dtype=late.local_zodi.dtype)
+    sum_rtol = rtol + sum_roundoff(2.0, weights.size, dtype=late.local_zodi.dtype)
     for moment, expected, power in (
         (late, reference, 1),
         (late.variance, reference.variance, 2),
@@ -352,8 +406,9 @@ def test_local_zodi_follows_the_read_time(sloped):
         assert np.all(moment.local_zodi > 0)
         np.testing.assert_allclose(
             moment.local_zodi,
-            jnp.einsum("wqyx,yx->wq", photons.local_zodi, weights**power),
-            rtol=1e-12,
+            np.einsum("wqyx,yx->wq", np.asarray(photons.local_zodi), weights**power),
+            rtol=sum_rtol,
+            atol=0,
         )
         for name in ("planet", "star_leakage", "local_zodi", "exozodi", "n_pix"):
             np.testing.assert_array_equal(
@@ -365,25 +420,25 @@ def test_local_zodi_follows_the_read_time(sloped):
     early = read(built, 0.0)
     assert np.all(abs(radiance[1] / radiance[0] - 1) > 0.5)
     np.testing.assert_allclose(
-        late.local_zodi / early.local_zodi, radiance[1] / radiance[0], rtol=1e-13
+        late.local_zodi / early.local_zodi, radiance[1] / radiance[0], rtol=rtol, atol=0
     )
     # One record serves a batch of times under one compiled program.
     batched = jax.jit(jax.vmap(lambda t: read(built, t).local_zodi))(
         jnp.array([0.0, 137.0])
     )
     np.testing.assert_allclose(
-        batched, jnp.stack([early.local_zodi, late.local_zodi]), rtol=1e-13
+        batched, jnp.stack([early.local_zodi, late.local_zodi]), rtol=rtol, atol=0
     )
 
 
 @vv.case("aperture-photon-budget", "code-verification")
-def test_read_under_jax_transformations(sloped):
+def test_read_under_jax_transformations(sloped, precision):
     """Fails if a batched, compiled or differentiated read departs from a plain one.
 
-    Basis: vmap and jit equal eager reads to a 1e-13 relative rounding
-    allowance. The read is piecewise bilinear, so within one lattice cell a
-    central difference of step 1e-7 arcsec has no truncation error and the
-    1e-6 relative tolerance covers its rounding.
+    Basis: vmap and JIT equal eager reads within 96 rounding steps for
+    coordinate rotation, interpolation of both moments and S/N reduction.
+    Central differences use float64, with the existing step and error
+    bounds for separation and contrast.
     """
     record, detector = sloped[4], sloped[1].detector
 
@@ -403,16 +458,23 @@ def test_read_under_jax_transformations(sloped):
         [read(*args) for args in zip(separations, angles, contrasts, strict=True)]
     )
     assert np.all(np.isfinite(looped))
-    np.testing.assert_allclose(batched, looped, rtol=1e-13)
+    np.testing.assert_allclose(
+        batched, looped, rtol=roundoff(1, n_ops=96, dtype=batched.dtype), atol=0
+    )
+
+    derivative = jax.grad(read, argnums=(0, 2))
+    for gradient in (derivative, jax.jit(derivative)):
+        slope, by_contrast = gradient(0.04, 200.0, 3e-10)
+        assert np.isfinite(slope) and slope != 0
+        assert np.isfinite(by_contrast) and by_contrast > 0
+    if precision == np.float32:
+        return
 
     step = 1e-7
-    slope = jax.grad(read)(0.04, 200.0, 3e-10)
     difference = (read(0.04 + step, 200.0, 3e-10) - read(0.04 - step, 200.0, 3e-10)) / (
         2 * step
     )
-    assert slope != 0
     np.testing.assert_allclose(slope, difference, rtol=1e-6)
-    by_contrast = jax.grad(read, argnums=2)(0.04, 200.0, 3e-10)
     difference = (read(0.04, 200.0, 3.03e-10) - read(0.04, 200.0, 2.97e-10)) / 6e-12
     np.testing.assert_allclose(by_contrast, difference, rtol=1e-4)
 
@@ -643,22 +705,23 @@ def _pixel_thermal_rate(instrument, nodes_nm, temperature_K, emissivity):
     meter of wavelength, converted to per nanometer, times the emissivity, the
     geometric collecting area and the pixel solid angle.
     """
-    from scipy import constants
-
-    wavelength_m = np.asarray(nodes_nm) * 1e-9
-    x = constants.h * constants.c / (wavelength_m * constants.k * temperature_K)
-    radiance = 2 * constants.c / wavelength_m**4 / np.expm1(x) * 1e-9
-    pixel_sr = np.deg2rad(instrument.detector.pixel_scale_arcsec / 3600.0) ** 2
-    return emissivity * radiance * instrument.primary.collecting_area_m2 * pixel_sr
+    wavelength_m = np.asarray(nodes_nm, dtype=np.float64) * nm2m
+    x = h * c / (wavelength_m * k_B * temperature_K)
+    radiance = 2 * c / wavelength_m**4 / np.expm1(x) * nm2m
+    pixel_sr = (float(instrument.detector.pixel_scale_arcsec) * arcsec2rad) ** 2
+    return emissivity * radiance * float(
+        instrument.primary.collecting_area_m2
+    ) * pixel_sr, x
 
 
 def test_thermal_record_and_scene_read(plateau):
     """Fails if the record drops, double counts or misshapes warm emission.
 
     Basis: the per-pixel rate from primitives times the aperture pixel count,
-    for the mean and the squared-weight records, at rtol 1e-12 in float64
-    (a Planck exponential and a four-factor product); the scalar read and the
-    scene read equal exactly; an invalid planet reads zero; an instrument
+    for both aperture moments. The relative floor allows two rounding steps
+    in the exponential's argument, amplified by its magnitude, and 24 for
+    the prefactor, radiance and aperture multiplication. The scalar and scene
+    reads agree exactly, an invalid planet reads zero; an instrument
     without warm emission reads exact zeros.
     """
     _, cold, exposure, response, _ = plateau
@@ -678,9 +741,12 @@ def test_thermal_record_and_scene_read(plateau):
     )
     scene = eqx.tree_at(lambda s: s.valid, scene, jnp.array([True, False]))
     record = cp.aperture_record(scene, instrument, exposure, response)
-    pixel = _pixel_thermal_rate(instrument, record.quadrature.nodes_nm, 290.0, 0.5)
+    pixel, exponent = _pixel_thermal_rate(
+        instrument, record.quadrature.nodes_nm, 290.0, 0.5
+    )
+    rtol = roundoff(1, n_ops=2 * exponent.max() + 24, dtype=record.thermal.dtype)
     assert record.thermal.shape == (1, 4)
-    np.testing.assert_allclose(record.thermal, pixel, rtol=1e-12)
+    np.testing.assert_allclose(record.thermal, pixel, rtol=rtol, atol=0)
     times = jnp.array([0.0, 30.0, 90.0])
     rates = cp.scene_aperture_rates(record, scene, times)
     assert rates.thermal.shape == (1, 4, 2, 3)
@@ -691,12 +757,13 @@ def test_thermal_record_and_scene_read(plateau):
             record, east[0, t], north[0, t], contrast=1e-10, time_d=time
         )
         np.testing.assert_allclose(
-            single.thermal, pixel * single.n_pix[:, None], rtol=1e-12
+            single.thermal, pixel * np.asarray(single.n_pix[:, None]), rtol=rtol, atol=0
         )
         np.testing.assert_allclose(
             single.variance.thermal,
-            pixel * single.variance.n_pix[:, None],
-            rtol=1e-12,
+            pixel * np.asarray(single.variance.n_pix[:, None]),
+            rtol=rtol,
+            atol=0,
         )
         np.testing.assert_array_equal(rates.thermal[..., 0, t], single.thermal)
         np.testing.assert_array_equal(
@@ -809,7 +876,8 @@ def test_records_of_two_targets_stack_and_read_under_vmap(sloped):
 
     Basis: two targets of one shape differ only in sky position, so their
     records stack leaf by leaf and one ``vmap`` over the stack equals the two
-    separate reads to a 1e-13 relative rounding allowance. The local zodi
+    separate reads within 64 rounding steps for the position, bilinear
+    background reads and local-zodi coordinates and interpolation. The local zodi
     follows the pointing, so the two reads must also differ.
     """
     scene, instrument, exposure, response, _ = sloped
@@ -834,7 +902,10 @@ def test_records_of_two_targets_stack_and_read_under_vmap(sloped):
         single = read(record)
         for name in ("planet", "star_leakage", "local_zodi", "exozodi", "n_pix"):
             np.testing.assert_allclose(
-                getattr(together, name)[i], getattr(single, name), rtol=1e-13
+                getattr(together, name)[i],
+                getattr(single, name),
+                rtol=roundoff(1, n_ops=64, dtype=getattr(single, name).dtype),
+                atol=0,
             )
     zodi = np.asarray(together.local_zodi)
     assert np.all(abs(zodi[0] / zodi[1] - 1) > 0.01)
@@ -1054,7 +1125,7 @@ def test_curves_and_record_routes_agree_on_the_flag_across_the_stamp_edge():
     )
     record = cp.aperture_record(scene, instrument, exposure, response)
     curves = instrument.coronagraph.curves()
-    sources = scene.sources(exposure.quadrature, exposure.resolution, 0.0)
+    sources = scene.sources(exposure.quadrature, exposure.resolution, jnp.array([0.0]))
 
     def flags(east_lod, north_lod):
         east, north = east_lod * scale, north_lod * scale
@@ -1355,7 +1426,7 @@ def test_planet_flux_and_contrast_node_axes(unit_response):
         lambda r: r.throughput, response, jnp.ones_like(response.throughput)
     )
     record = cp.aperture_record(scene, instrument, exposure, response)
-    sources = scene.sources(exposure.quadrature, exposure.resolution, 0.0)
+    sources = scene.sources(exposure.quadrature, exposure.resolution, jnp.array([0.0]))
     assert sources.star.shape[:2] == (2, 4)
     east, north = scene.positions(jnp.array([0.0]))
     kwargs = dict(time_d=0.0)
@@ -1447,25 +1518,38 @@ def test_planet_input_with_an_extra_axis_is_refused(two_band_record, keyword):
 
 @vv.case("aperture-photon-budget", "code-verification")
 @pytest.mark.medium(reason="Two-band response build and x64 compilation take over 5 s")
-@pytest.mark.float64_only(reason="mixed inputs promote to a float64 response")
-def test_contrast_read_promotes_to_the_response_dtype(two_band_record):
-    """Truth: float32 star and contrast are promoted before the float64 response.
+def test_contrast_read_promotes_to_the_response_dtype(two_band_record, precision):
+    """Truth: float32 star and contrast use the response's working precision.
 
     Floating-point basis: the product of the float32 values taken exactly in
-    float64, rtol=1e-14, atol=0; rounding the product to float32 first
-    differs by 5e-8 relative.
+    float64 with four rounding steps for the products. The float64 lane
+    also compares the narrowed response and coordinates with the wide
+    read, allowing 24 steps for coordinate and ring interpolation.
     """
     record, east, north = two_band_record
     star = (record.star * (1 + 1 / 3)).astype(jnp.float32)
     contrast = jnp.full(record.star.shape, 1.1e-10 / 3, dtype=jnp.float32)
     record = eqx.tree_at(lambda r: r.star, record, star)
-    assert record.planet_response.dtype == jnp.float64
+    assert record.planet_response.dtype == precision
     expected = np.asarray(star, np.float64) * np.asarray(contrast, np.float64)
     for read in (cp.aperture_rates, jax.jit(cp.aperture_rates)):
         rates = read(record, east, north, contrast=contrast, time_d=0.0)
         unit = cp.aperture_rates(record, east, north, planet=1.0, time_d=0.0)
+        assert rates.planet.dtype == precision
         np.testing.assert_allclose(
-            rates.planet, expected * unit.planet, rtol=1e-14, atol=0
+            rates.planet,
+            expected * np.asarray(unit.planet),
+            rtol=roundoff(1, n_ops=4, dtype=precision),
+            atol=0,
+        )
+    if precision == np.float64:
+        precision_pair(
+            lambda rec, e, n, c: (
+                cp.aperture_rates(rec, e, n, contrast=c, time_d=0.0).planet
+            ),
+            (record, east, north, contrast),
+            bound=24 * eps(np.float32),
+            scale=0,
         )
 
 
@@ -1476,11 +1560,11 @@ def test_planet_response_keeps_precision_near_a_throughput_drop(two_band_record)
 
     Floating-point basis: the throughput falls from 0.41 to 8.7e-10 between
     the rings; the read just inside the outer ring is compared with the exact
-    rational interpolation of the stored endpoints, atol=1e-15 times the outer
-    ring rate (the difference form loses 1e-9 relative here).
+    rational interpolation of the binary64 inputs. Six rounding steps
+    allow narrowing the endpoint values and offset, a difference, multiply
+    and addition. Admission at the exact host endpoint and just beyond it is
+    Boolean and both lanes must retain the small inside offset.
     """
-    from fractions import Fraction
-
     record, _, _ = two_band_record
     high, low = 0.41, 8.7e-10
     table = jnp.stack(
@@ -1491,13 +1575,108 @@ def test_planet_response_keeps_precision_near_a_throughput_drop(two_band_record)
         record,
         jnp.broadcast_to(table, record.planet_response.shape),
     )
-    step = float(record.separation_step_arcsec)
-    separation = (1 - 1e-9) * step
-    rates = cp.aperture_rates(record, separation, 0.0, planet=1.0, time_d=0.0)
-    assert rates.supported.all()
-    f = Fraction(separation / step)
+    step = 0.04  # The response fixture's host endpoint, rounded down in float32.
+    inside = step * (1 - 1e-9)
+    outside = step * (1 + 1e-9)
+    east = np.array([inside, step, outside])
+    f = Fraction(inside) / Fraction(step)
     exact = float((1 - f) * Fraction(high) + f * Fraction(low))
-    np.testing.assert_allclose(rates.planet, exact, rtol=0, atol=1e-15 * low)
+
+    def check(flux, supported):
+        np.testing.assert_array_equal(supported[:2], True)
+        np.testing.assert_array_equal(supported[2], False)
+        np.testing.assert_allclose(
+            flux[0], exact, rtol=0, atol=roundoff(exact, n_ops=6, dtype=flux.dtype)
+        )
+        np.testing.assert_array_equal(flux[1], np.asarray(low, dtype=flux.dtype))
+        np.testing.assert_array_equal(flux[2], 0)
+
+    def read(record, *coordinates):
+        rates = cp.aperture_rates(record, *coordinates, planet=1.0, time_d=0.0)
+        return rates.planet, rates.supported
+
+    host_reads = [read(record, x, 0.0) for x in east]
+    flux, supported = zip(*host_reads, strict=True)
+    check(np.stack(flux), np.stack(supported))
+    positions = record.prepare_position(east, 0.0)
+    missing_inner = eqx.tree_at(
+        lambda r: r.planet_unsupported,
+        record,
+        record.planet_unsupported.at[..., 0].set(1),
+    )
+    batch = jax.vmap(read, in_axes=(None, 0))
+    for evaluate in (batch, jax.jit(batch)):
+        check(*evaluate(record, positions))
+        flux, supported = evaluate(missing_inner, positions)
+        np.testing.assert_array_equal(supported[0], False)
+        np.testing.assert_array_equal(supported[1], True)
+        np.testing.assert_array_equal(flux[0], 0)
+
+    # Raw JAX arguments on either side of the edge round to the same
+    # decision coordinate. The next float32 value outside must be rejected.
+    adjacent = np.nextafter(np.float32(step), np.float32(np.inf))
+    raw = jnp.asarray([*east, adjacent])
+    raw_fraction = Fraction(float(raw[0])) / Fraction(
+        float(record.separation_step_arcsec)
+    )
+    raw_truth = float(
+        (1 - raw_fraction) * Fraction(high) + raw_fraction * Fraction(low)
+    )
+    batch = jax.vmap(read, in_axes=(None, 0, None))
+    for evaluate in (batch, jax.jit(batch)):
+        flux, supported = evaluate(record, raw, 0.0)
+        np.testing.assert_allclose(
+            flux[0],
+            raw_truth,
+            rtol=0,
+            atol=roundoff(raw_truth, n_ops=6, dtype=flux.dtype),
+        )
+        np.testing.assert_array_equal(flux[1:3], np.asarray(low, dtype=flux.dtype))
+        np.testing.assert_array_equal(flux[3], 0)
+        np.testing.assert_array_equal(supported[:3], True)
+        np.testing.assert_array_equal(supported[3], False)
+        flux, supported = evaluate(missing_inner, raw, 0.0)
+        np.testing.assert_array_equal(supported[:3], True)
+        np.testing.assert_array_equal(flux[:3], np.asarray(low, dtype=flux.dtype))
+
+
+def test_aperture_geometry_uses_the_child_at_the_band_center():
+    """The 545 nm aperture uses the first child irrespective of other bands."""
+    blue = Frame(550.0, 6.0, "circumscribed")
+    red = Frame(550.0, 4.0, "inscribed")
+    children = tuple(
+        GaussianCoronagraph(n=24, bandpass=Band(lo, hi), frame=frame)
+        for lo, hi, frame in ((500, 550, blue), (550, 600, red), (600, 650, red))
+    )
+    instrument = replace(
+        make_path(n=24),
+        primary=SimplePrimary(
+            circumscribed_diameter_m=6.0,
+            inscribed_diameter_m=4.0,
+            collecting_area_m2=20.0,
+        ),
+        coronagraph=ox.MultiBandCoronagraph(children),
+    )
+    first = Band(530.0, 560.0)
+    for bands, waves in (
+        ((first,), [[555.0]]),
+        ((first, Band(610.0, 630.0)), [[555.0], [620.0]]),
+    ):
+        q = Quadrature(bands, jnp.array(waves), jnp.ones((len(bands), 1)))
+        response = cp.aperture_response(
+            instrument,
+            q,
+            rule=_RULE,
+            n_separations=2,
+            n_angles=1,
+            max_separation_arcsec=0.03,
+        )
+        radius = _RULE.radius_lod * float(blue.lod_to_arcsec(545.0))
+        radius /= float(instrument.detector.pixel_scale_arcsec)
+        np.testing.assert_array_equal(
+            response.radius_pix[0], np.asarray(radius, dtype=response.radius_pix.dtype)
+        )
+        np.testing.assert_array_equal(response.throughput_supported[0], True)
 
 
 @pytest.mark.parametrize("product", ["band_average", "single_wavelength", "straddling"])
@@ -1505,8 +1684,10 @@ def test_aperture_reads_each_nodes_product_and_scale(gaussian_observation, produ
     """Both aperture moments use the analytic Gaussian on each detector pixel.
 
     The circle weights are inputs. Independent SciPy integrals, multiplied by
-    the covering child's throughput, give the ring and probe fractions to
-    1e-10 of their peak (erf and weighted-sum rounding only).
+    the covering child's throughput, give the ring and probe fractions.
+    The peak-scaled bound covers 128 operations for detector geometry,
+    four erf endpoints, their differences and the aperture products,
+    plus the weighted-sum reduction depth.
     """
     from conftest import IntegratedGaussianCoronagraph, gaussian_pixels
 
@@ -1546,6 +1727,10 @@ def test_aperture_reads_each_nodes_product_and_scale(gaussian_observation, produ
         )
         return [amplitude * np.sum(weights**power * pixels) for power in (1, 2)]
 
+    dtype = response.throughput.dtype
+    rtol = roundoff(1, n_ops=128, dtype=dtype) + sum_roundoff(
+        1.0, np.prod(detector.shape), dtype=dtype
+    )
     angle = np.pi * (np.sqrt(5.0) - 1)
     assert np.all(response.throughput_supported)
     for k, (x, y) in enumerate(
@@ -1553,7 +1738,7 @@ def test_aperture_reads_each_nodes_product_and_scale(gaussian_observation, produ
     ):
         truth = np.asarray([moments(w, x, y) for w in waves]).T
         np.testing.assert_allclose(
-            response.throughput[:, 0, :, k], truth, atol=1e-10 * truth.max(), rtol=0
+            response.throughput[:, 0, :, k], truth, atol=rtol * truth.max(), rtol=0
         )
     probe = moments(waves[len(waves) // 2], separation, 0)[0]
-    np.testing.assert_allclose(response.probe[0], probe, rtol=1e-10, atol=0)
+    np.testing.assert_allclose(response.probe[0], probe, rtol=0, atol=rtol * abs(probe))
