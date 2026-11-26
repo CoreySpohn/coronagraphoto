@@ -51,6 +51,14 @@ x32 a field with a nonzero `epoch_d` is refused, and the ways out are to enable
 x64, to move the scene epoch to the observation so that `epoch_d` is zero, or to
 anchor the field at zero.
 
+## Precision
+
+For an AB magnitude 5 star and a planet at 0.05 arcsec on a 48 × 48 detector
+at zero roll (1600 nodes over 500–600 nm), the float32 `expected` image agreed
+with float64 to 1.46 × 10⁻⁶ of the float64 image peak at the worst pixel
+and the detector-summed planet electron rate agreed to 5.11 × 10⁻⁷ of its
+float64 value, so use float64 when you need finer agreement.
+
 ## Image orientation and roll
 
 `exposure.roll_deg` is shared by the detector grid, planet placement and disk

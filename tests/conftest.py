@@ -162,17 +162,23 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
             interpolation="linear",
         )
 
+    def _sample_dtype(self, *values):
+        """Use the stored transmission precision when given only host scalars."""
+        dtype, weak = jax.dtypes.result_type(*values, 0.0, return_weak_type_flag=True)
+        return self.sky_trans.data.dtype if weak else dtype
+
     def _native_source_psfs(self, x_lod, y_lod):
         """Integrate the sampled Gaussian with its stated native pixel area."""
-        x, y = self.grid.coordinates()
+        x, y = self.grid.coordinates(dtype=x_lod.dtype)
         r2 = (x[None] - jnp.atleast_1d(x_lod)[:, None, None]) ** 2 + (
             y[None] - jnp.atleast_1d(y_lod)[:, None, None]
         ) ** 2
+        sigma = jnp.asarray(self.sigma_lod, dtype=x_lod.dtype)
         data = (
             0.3
             * self.grid.pixel_area
-            / (2 * np.pi * self.sigma_lod**2)
-            * jnp.exp(-r2 / (2 * self.sigma_lod**2))
+            / (2 * np.pi * sigma**2)
+            * jnp.exp(-r2 / (2 * sigma**2))
         )
         image = Image(
             data, self.grid, ("source",), Measure.integral(), "stellar_flux_fraction"
@@ -182,7 +188,11 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
     def _native_stellar_map(self, stellar_diameter_lod):
         """Uniform leakage density with a resolved-diameter response."""
         return Image(
-            jnp.full(self.grid.shape, 1e-9 * self.grid.pixel_area)
+            jnp.full(
+                self.grid.shape,
+                1e-9 * self.grid.pixel_area,
+                dtype=stellar_diameter_lod.dtype,
+            )
             * (1 + stellar_diameter_lod**2),
             self.grid,
             (),
@@ -190,8 +200,17 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
             "stellar_flux_fraction",
         )
 
+    def stellar_map(self, wavelength_nm, stellar_diameter_lod, *, grid=None):
+        """Sample leakage at the precision of the wavelength and diameter."""
+        dtype = self._sample_dtype(wavelength_nm, stellar_diameter_lod)
+        diameter = jnp.asarray(stellar_diameter_lod, dtype=dtype)
+        return super().stellar_map(wavelength_nm, diameter, grid=grid)
+
     def source_psfs(self, wavelength_nm, x_lod, y_lod, *, grid=None):
         """Optional chromatic throughput used by the worked example."""
+        dtype = self._sample_dtype(wavelength_nm, x_lod, y_lod)
+        wavelength_nm = jnp.asarray(wavelength_nm, dtype=dtype)
+        x_lod, y_lod = jnp.asarray(x_lod, dtype=dtype), jnp.asarray(y_lod, dtype=dtype)
         result = super().source_psfs(wavelength_nm, x_lod, y_lod, grid=grid)
         factor = 1 + 0.002 * (wavelength_nm - 550) if self.chromatic else 1.0
         return SourcePSFs(
@@ -246,7 +265,7 @@ class GaussianSceneCoronagraph(GaussianCoronagraph, AbstractSceneCoronagraph):
     def __init__(self, n=40, step=0.25, *, chromatic=False):
         """Prepare a full set of native Gaussian source responses."""
         super().__init__(n, step, chromatic=chromatic)
-        x, y = self.grid.coordinates()
+        x, y = self.grid.coordinates(dtype=self.sky_trans.data.dtype)
         psfs = self.source_psfs(550.0, x.ravel(), y.ravel(), grid=None)
         self.operator = _GaussianSceneOperator(
             psfs.image.data.reshape(n, n, n, n), psfs.valid.reshape(n, n)
@@ -425,11 +444,11 @@ class PlateauCoronagraph(GaussianSceneCoronagraph):
 
     def _native_source_psfs(self, x_lod, y_lod):
         """Separable square with the trapezoidal convention on its boundary."""
-        x, y = self.grid.coordinates()
+        x, y = self.grid.coordinates(dtype=x_lod.dtype)
         dx = jnp.abs(x[None] - jnp.atleast_1d(x_lod)[:, None, None])
         dy = jnp.abs(y[None] - jnp.atleast_1d(y_lod)[:, None, None])
-        wx = jnp.where(dx < 2.0, 1.0, jnp.where(dx == 2.0, 0.5, 0.0))
-        wy = jnp.where(dy < 2.0, 1.0, jnp.where(dy == 2.0, 0.5, 0.0))
+        wx = (dx < 2.0).astype(dx.dtype) + 0.5 * (dx == 2.0).astype(dx.dtype)
+        wy = (dy < 2.0).astype(dy.dtype) + 0.5 * (dy == 2.0).astype(dy.dtype)
         image = Image(
             0.3 / 16 * self.grid.pixel_area * wx * wy,
             self.grid,

@@ -4,11 +4,12 @@ from dataclasses import replace
 from inspect import unwrap
 
 import equinox as eqx
+import ineedvalidation as vv
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import exposure_for, make_path, make_system, with_zodi
+from conftest import exposure_for, make_path, make_system, with_zodi, worked_setup
 from hwoutils.leaves import canonical
 from hwoutils.testing import assert_precision_closed, precision_pair, ulps
 from optixstuff import Detector, FramePlan, IdealDetector
@@ -306,6 +307,44 @@ def test_render_precision_closed(render_problem, entry, monkeypatch, request):
 
     read, args = _render_case(entry, request.getfixturevalue("closed_render_problem"))
     assert_precision_closed(eqx.filter_jit(read), *canonical(args, precision="float32"))
+
+
+@vv.case(
+    "image-radiometry",
+    "code-verification",
+    basis="spike",
+    srq="total electron-rate image and detector-summed planet electron rate",
+)
+@pytest.mark.float64_only(reason="precision_pair needs x64")
+@pytest.mark.medium(reason="render the 1600-node worked spectrum at both precisions")
+@pytest.mark.parametrize(("quantity", "bound"), [("image", 4.4e-6), ("planet", 1.6e-6)])
+def test_worked_expected_precision(quantity, bound):
+    """Measure the float32 error for the AB=5 star and planet at 0.05 arcsec.
+
+    At zero roll, the 48x48 detector integrates 1600 nodes over 500-600 nm.
+    The largest pixel difference was 1.46e-6 of the float64 image peak.
+    The summed planet rate differed by 5.11e-7 of its float64 value.
+    Three times each measurement, rounded up to two significant figures,
+    gives bounds of 4.4e-6 and 1.6e-6 respectively.
+
+    Fails if float32 rendering loses pixel or planet photometric precision.
+    """
+    scene, instrument = worked_setup()
+    quadrature = Quadrature.build((Band(500, 600),), scene, instrument)
+    args = canonical(
+        (scene, instrument, exposure_for(scene, quadrature)), precision="float64"
+    )
+
+    def render(scene, instrument, exposure):
+        dtype = exposure.quadrature.weights_nm.dtype
+        rates = cp.expected(scene, instrument, exposure)
+        value = rates.total() if quantity == "image" else rates.planet.sum()
+        assert value.dtype == dtype
+        assert value.max() > 0
+        return value
+
+    # The default scale is the float64 peak of the single output leaf.
+    precision_pair(render, args, bound=bound, scale=None if quantity == "image" else 0)
 
 
 class _PoissonWidening(AssertionError):
