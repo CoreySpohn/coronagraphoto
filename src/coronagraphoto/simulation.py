@@ -25,7 +25,6 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.leaves import require_tree
 from hwoutils.numerics import COARSEST
-from hwoutils.precision import float_dtype
 from optixstuff import Exposure, FramePlan, Instrument, Rates
 from optixstuff.coronagraph import (
     AbstractImagingCoronagraph,
@@ -78,7 +77,7 @@ def _planet_samples(coro, wavelength_nm, scale_nm, grid, native, positions):
     psfs = coro.source_psfs(
         wavelength_nm, x, y, grid=_detector_pixels(grid, scale_nm, native)
     )
-    return jnp.where(psfs.valid[:, None, None], psfs.image.data, 0.0)
+    return jnp.where(psfs.valid[:, None, None], psfs.image.data, 0)
 
 
 # Disk sub-samples per source-cell side; see ``_refined``.
@@ -182,9 +181,10 @@ def _node_rates(
         )
     # A guard on the star plus the signed speckle excess: a star read alone is
     # positive wherever it is supported, so this binds only on an excess.
-    leakage = gain * phi_star * jnp.maximum(leakage, 0.0)
+    leakage = gain * phi_star * jnp.maximum(leakage, 0)
 
-    planet = jnp.zeros(grid.shape)
+    zero = jnp.zeros_like(leakage)
+    planet = zero
     if positions is not None:
         if samples is None:
             samples = _planet_samples(
@@ -192,7 +192,7 @@ def _node_rates(
             )
         planet = gain * jnp.einsum("k,kyx->yx", node["planets"], samples)
 
-    local = jnp.zeros(grid.shape)
+    local = zero
     sky_radiance = node["sky_radiance"]
     if sky_radiance is not None:
         sky_map = coro.uniform_sky_map(
@@ -214,7 +214,7 @@ def _node_rates(
             measure=sky_map.measure,
         )
 
-    disk = jnp.zeros(grid.shape)
+    disk = zero
     if system.disk is not None:
         # The scene operator places each source cell's flux at the cell centre,
         # so it needs the cell integral of the disk, not a midpoint sample.
@@ -238,20 +238,26 @@ def _node_rates(
         supported = supported & coverage(native, detector_pixels(native))
     # The warm telescope radiates uniformly: no coronagraph factor, system
     # throughput, flux scale or sky transmission, only the pixel solid angle.
-    thermal = (
-        Image(
-            jnp.broadcast_to(
-                instrument.thermal_photon_rate_per_sr(wavelength_nm), grid.shape
-            ),
-            grid,
-            (),
-            Measure.density("sr"),
-            "ph s^-1 nm^-1",
+    # A native cold instrument needs no radiance read. Honor custom models.
+    thermal = zero
+    if (
+        instrument.warm_emission is not None
+        or type(instrument).thermal_photon_rate_per_sr
+        is not Instrument.thermal_photon_rate_per_sr
+    ):
+        thermal = (
+            Image(
+                jnp.broadcast_to(
+                    instrument.thermal_photon_rate_per_sr(wavelength_nm), grid.shape
+                ),
+                grid,
+                (),
+                Measure.density("sr"),
+                "ph s^-1 nm^-1",
+            )
+            .integrated()
+            .data
         )
-        .integrated()
-        .data
-    )
-    zero = jnp.zeros(grid.shape)
     components = dict(
         planet=planet,
         star_leakage=leakage,
@@ -346,9 +352,14 @@ def _node_child_ids(models, quadrature):
     return tuple(i for i in range(len(models)) if i in selected)
 
 
-def _band_center_dtype(nodes):
+def _band_center_dtype(quadrature, instrument):
     """Floating working precision for a band center, even with integer nodes."""
-    return nodes.dtype if jnp.issubdtype(nodes.dtype, jnp.floating) else float_dtype()
+    floating = (
+        values
+        for values in (quadrature.nodes_nm, quadrature.weights_nm)
+        if jnp.issubdtype(values.dtype, jnp.floating)
+    )
+    return jnp.result_type(instrument.flux_scale, *floating)
 
 
 def _node_function(
@@ -412,7 +423,7 @@ def _node_function(
         if zodi is None:
             sky = None
         elif uniform_sky:
-            sky = jnp.ones_like(w)
+            sky = jnp.ones_like(w, dtype=centers.dtype)
         else:
             sky = zodi_nodes[i, j]
         return dict(
@@ -456,12 +467,21 @@ def _node_function(
         rates, static, speckle = jax.lax.switch(jnp.argmax(covering), branches, w, i, j)
         # A node outside every declared band has no performance model.
         return (
-            jax.tree.map(lambda x: jnp.where(covered, x, jnp.nan), rates),
+            jax.tree.map(lambda x: jnp.where(covered, x, x.dtype.type(jnp.nan)), rates),
             static,
             speckle,
         )
 
     return remat(node)
+
+
+def _planet_support(model, grid, center, positions):
+    """Read one band's source-domain mask on the detector orientation."""
+    native = model.at_wavelength(center).source_grid
+    x, y = _source_offsets_lod(center, grid, native, positions)
+    return model.source_psfs(center, x.ravel(), y.ravel()).valid.reshape(
+        positions.shape[1:]
+    )
 
 
 def planet_source_support(
@@ -517,7 +537,7 @@ def planet_source_support(
         return support
     # Evaluate the center in the same floating dtype as the renderer. Child
     # selection uses the shared structural edge comparison on the host.
-    dtype = _band_center_dtype(quadrature.nodes_nm)
+    dtype = _band_center_dtype(quadrature, instrument)
     coro = instrument.coronagraph
     # The components the renderer holds for this quadrature, in dispatch order.
     models = (
@@ -533,10 +553,7 @@ def planet_source_support(
             model = models[w]
         elif len(models) > 1:
             model = models[_host_child_index(models, band.center_nm)]
-        native = model.at_wavelength(center).source_grid
-        x, y = _source_offsets_lod(center, grid, native, positions)
-        valid = model.source_psfs(center, x.ravel(), y.ravel()).valid
-        support[w] = np.asarray(valid).reshape(n_planets, n_times)
+        support[w] = np.asarray(_planet_support(model, grid, center, positions))
     return support
 
 
@@ -556,7 +573,7 @@ def _zero_unsupported(values, supported):
     # A NaN from a node outside every declared band is a different failure and
     # stays NaN.
     return {
-        name: jnp.where(supported, x, jnp.where(jnp.isnan(x), x, 0.0))
+        name: jnp.where(supported, x, jnp.where(jnp.isnan(x), x, 0))
         if name in _PRODUCT_TERMS
         else x
         for name, x in values.items()
@@ -628,7 +645,7 @@ def _render(
     centers = jnp.asarray(
         [band.center_nm for band in quadrature.bands],
         # A floating dtype keeps a half-integer centre of integer nodes.
-        dtype=_band_center_dtype(quadrature.nodes_nm),
+        dtype=_band_center_dtype(quadrature, instrument),
     )
 
     node = _node_function(
@@ -689,10 +706,8 @@ def _render(
     def render_band(i):
         row = quadrature.band(i)
         band_node = partial(node, samples=band_samples(i)) if reuse_samples else node
-        initial = {name: jnp.zeros(grid.shape) for name in Rates.component_names()}
 
-        def step(carry, node_and_weight):
-            total, static, speckle = carry
+        def read_node(node_and_weight):
             w, weight, j = node_and_weight
             components, static_node, speckle_node = band_node(w, i, j)
             single = Quadrature(row.bands, w[None, None], weight[None, None])
@@ -700,14 +715,29 @@ def _render(
                 single, "photon", **jax.tree.map(lambda x: x[None, None], components)
             )
             electrons = instrument.detector.electrons(photons)
+            values = {name: getattr(electrons, name)[0] for name in components}
+            return values, static_node, speckle_node
+
+        def step(carry, node_and_weight):
+            total, static, speckle = carry
+            values, static_node, speckle_node = read_node(node_and_weight)
             return (
-                {name: a + getattr(electrons, name)[0] for name, a in total.items()},
+                jax.tree.map(lambda a, b: a + b, total, values),
                 static & static_node,
                 speckle & speckle_node,
             ), None
 
         real = _real_counts(quadrature)[i]
         xs = (row.nodes_nm[0, :real], row.weights()[0, :real], jnp.arange(real))
+        # The detector result sets each carry's dtype. Keep every node in the
+        # same scan so the reduction order and checkpointing stay the same.
+        first = jax.tree.map(lambda x: x[0], xs)
+        template, _, _ = (
+            read_node(first)
+            if jax.config.jax_disable_jit
+            else jax.eval_shape(read_node, first)
+        )
+        initial = jax.tree.map(lambda x: jnp.zeros(x.shape, x.dtype), template)
         everywhere = jnp.ones(grid.shape, bool)
         total, static, speckle = jax.lax.scan(
             step, (initial, everywhere, everywhere), xs
