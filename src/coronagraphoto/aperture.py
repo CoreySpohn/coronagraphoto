@@ -36,7 +36,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.leaves import is_traced
 from hwoutils.numerics import COARSEST
+from hwoutils.precision import like
 from jax.typing import ArrayLike
 from jaxtyping import Array
 from optixstuff import Exposure, Instrument, Rates
@@ -245,16 +247,38 @@ class ApertureRecord(eqx.Module):
         )
 
 
-def _weights(rule, frame, shape, radius_pix, dx_pix, dy_pix):
+def _weights(rule, frame, shape, radius_pix, dx_pix, dy_pix, dtype=None):
     """Coverage of each pixel by the rule's circle, offset from the grid centre."""
     step = rule.radius_lod / radius_pix
     grid = PixelGrid.regular(shape, step, "lod", frame=frame)
-    ones = Image(jnp.ones(shape), grid, (), Measure.integral(), "stellar_flux_fraction")
+    ones = Image(
+        jnp.ones(shape, dtype=dtype),
+        grid,
+        (),
+        Measure.integral(),
+        "stellar_flux_fraction",
+    )
     return np.asarray(rule.weights(ones, (dx_pix * step, dy_pix * step)))
 
 
-@eqx.filter_jit
 def _ring_moments(
+    model, detector, wavelengths_nm, band_center_nm, x_arcsec, y_arcsec, weights
+):
+    """Transfer host ring geometry at the wavelength rule's working precision."""
+    center = jnp.asarray(band_center_nm)
+    return _sample_ring(
+        model,
+        detector,
+        wavelengths_nm,
+        center,
+        like(x_arcsec, center),
+        like(y_arcsec, center),
+        like(weights, center),
+    )
+
+
+@eqx.filter_jit
+def _sample_ring(
     model, detector, wavelengths_nm, band_center_nm, x_arcsec, y_arcsec, weights
 ):
     """Aperture fractions (Q, 2, A) of A sources at each node of one band.
@@ -280,7 +304,7 @@ def _ring_moments(
                 for power in (1, 2)
             ]
         )
-        return jnp.where(psfs.valid, moments, 0.0), psfs.valid
+        return jnp.where(psfs.valid, moments, 0), psfs.valid
 
     return jax.lax.map(node, wavelengths_nm)
 
@@ -362,12 +386,13 @@ def _probe(
         radius,
         separation / float(detector.pixel_scale_arcsec),
         0.0,
+        band_center_nm.dtype,
     )
     moments, _ = _ring_moments(
         _node_model(instrument.coronagraph, model, nodes_nm[mid]),
         detector,
         nodes_nm[mid : mid + 1],
-        np.asarray(band_center_nm, dtype=_band_center_dtype(nodes_nm)),
+        band_center_nm,
         np.array([separation]),
         np.array([0.0]),
         weights[None],
@@ -443,6 +468,7 @@ def _compare_response(instrument, quadrature, response):
     limit = _separation_limit(
         response.separation_step_arcsec, response._separation_limit_words, last
     )
+    dtype = _band_center_dtype(quadrature, instrument)
     for w, (model, frame) in enumerate(zip(models, frames, strict=True)):
         expected = float(response.probe[w])
         measured = _probe(
@@ -452,7 +478,7 @@ def _compare_response(instrument, quadrature, response):
             frame,
             float(response.radius_pix[w]),
             nodes[w, : counts[w]],
-            quadrature.bands[w].center_nm,
+            np.asarray(quadrature.bands[w].center_nm, dtype=dtype),
             np.asarray(response.throughput_supported[w, : counts[w]]),
             limit / last,
             limit,
@@ -506,7 +532,7 @@ def aperture_response(
 
     Returns:
         The tables of throughput, ring statistics and pixel weights for this
-        instrument and band set.
+        instrument and band set, stored at the quadrature's working precision.
     """
     if not isinstance(rule, Circular) or rule.centre != "source":
         raise NotImplementedError(
@@ -527,6 +553,7 @@ def aperture_response(
     )
 
     nodes = quadrature.nodes_nm
+    dtype = _band_center_dtype(quadrature, instrument)
     slots = _padded_slots(quadrature)
     counts = _real_counts(quadrature)
     throughput = np.empty((2, *nodes.shape, n_separations))
@@ -536,18 +563,16 @@ def aperture_response(
     kernels = np.empty((2, len(models), 2, 2, size, size))
     for w, (model, frame, radius) in enumerate(zip(models, frames, radii, strict=True)):
         for a, b in np.ndindex(2, 2):
-            kernel = _weights(rule, frame, (size, size), radius, b / 2, a / 2)
+            kernel = _weights(rule, frame, (size, size), radius, b / 2, a / 2, dtype)
             kernels[:, w, a, b] = kernel, kernel**2
-        center_nm = np.asarray(
-            quadrature.bands[w].center_nm, dtype=_band_center_dtype(nodes)
-        )
+        center_nm = np.asarray(quadrature.bands[w].center_nm, dtype=dtype)
         groups = _node_groups(instrument.coronagraph, model, nodes[w, : counts[w]])
         for k, separation in enumerate(separations):
             angle = 2 * np.pi * (np.arange(n_angles) + (k * _GOLDEN) % 1) / n_angles
             x, y = separation * np.cos(angle), separation * np.sin(angle)
             weights = np.stack(
                 [
-                    _weights(rule, frame, grid.shape, radius, dx, dy)
+                    _weights(rule, frame, grid.shape, radius, dx, dy, dtype)
                     for dx, dy in zip(x / scale, y / scale, strict=True)
                 ]
             )
@@ -569,7 +594,7 @@ def aperture_response(
             frame,
             radius,
             nodes[w, : counts[w]],
-            quadrature.bands[w].center_nm,
+            np.asarray(quadrature.bands[w].center_nm, dtype=dtype),
             ring_supported[w, : counts[w]],
             separations[1],
             separations[-1],
@@ -581,13 +606,13 @@ def aperture_response(
     return ApertureResponse(
         rule,
         quadrature,
-        jnp.asarray(radii),
-        jnp.asarray(separations[1]),
-        jnp.asarray(throughput),
-        jnp.asarray(ring_std),
+        jnp.asarray(radii, dtype=dtype),
+        jnp.asarray(separations[1], dtype=dtype),
+        jnp.asarray(throughput, dtype=dtype),
+        jnp.asarray(ring_std, dtype=dtype),
         jnp.asarray(ring_supported),
-        jnp.asarray(kernels),
-        jnp.asarray(probe),
+        jnp.asarray(kernels, dtype=dtype),
+        jnp.asarray(probe, dtype=dtype),
         # Store the host endpoint in integer words so batching and canonical
         # precision casts retain it without creating a wide float leaf.
         jnp.asarray(separations[-1:].view(np.uint32)),
@@ -600,11 +625,13 @@ def _on_detector(radius_pix, ny, nx):
     Shape (W, 2 ny, 2 nx): a band's aperture of ``radius_pix`` pixels at
     detector position (i / 2, j / 2) lies inside the pixel edges.
     """
-    inside = [
-        (jnp.arange(2 * n) / 2 - radius_pix[:, None] >= -0.5)
-        & (jnp.arange(2 * n) / 2 + radius_pix[:, None] <= n - 0.5)
-        for n in (ny, nx)
-    ]
+    # Admission is structural. A host radius and its binary32 representation
+    # must make the same decision at an exactly representable pixel edge.
+    radius = radius_pix.astype(COARSEST)[:, None]
+    inside = []
+    for n in (ny, nx):
+        positions = jnp.arange(2 * n, dtype=COARSEST) / 2
+        inside.append((radius <= positions + 0.5) & (radius <= n - 0.5 - positions))
     return inside[0][:, :, None] & inside[1][:, None, :]
 
 
@@ -615,6 +642,8 @@ def _lattice(maps, kernels, radius_pix):
     """
     n_bands, n_maps, ny, nx = maps.shape
     size = kernels.shape[-1]
+    dtype = jnp.result_type(maps, kernels)
+    maps, kernels = maps.astype(dtype), kernels.astype(dtype)
     bands = []
     for w in range(n_bands):
         # Cross-correlation: output pixel (i, j) under kernel phase (a, b) is
@@ -627,7 +656,7 @@ def _lattice(maps, kernels, radius_pix):
         ).reshape(n_maps, 2, 2, 2, ny, nx)
         sums = sums.transpose(1, 0, 4, 2, 5, 3).reshape(2, n_maps, 2 * ny, 2 * nx)
         inside = _on_detector(radius_pix[w : w + 1], ny, nx)[0]
-        bands.append(jnp.where(inside, sums, 0.0))
+        bands.append(jnp.where(inside, sums, 0))
     return jnp.stack(bands, axis=1)
 
 
@@ -722,13 +751,16 @@ def aperture_record(
         axis=1,
     )
     star_leakage, uniform_sky, exozodi = jnp.moveaxis(background, 2, 0)
+    dtype = response.kernels.dtype
     n_pix = _lattice(
-        jnp.ones((n_bands, 1, *shape)), response.kernels, response.radius_pix
+        jnp.ones((n_bands, 1, *shape), dtype=dtype),
+        response.kernels,
+        response.radius_pix,
     )[:, :, 0]
     # An aperture is unsupported when it leaves the detector or any pixel under
     # it is: the weighted count of unsupported pixels is positive.
     bad = _lattice(
-        (~images.supported).astype(float)[:, None],
+        (~images.supported).astype(dtype)[:, None],
         response.kernels,
         response.radius_pix,
     )[0, :, 0]
@@ -744,7 +776,7 @@ def aperture_record(
     return ApertureRecord(
         quadrature,
         exposure.roll_deg,
-        jnp.asarray(instrument.detector.pixel_scale_arcsec),
+        like(instrument.detector.pixel_scale_arcsec, response.separation_step_arcsec),
         response.separation_step_arcsec,
         gain[None, :, :, None] * response.throughput,
         star,
@@ -752,8 +784,8 @@ def aperture_record(
         uniform_sky,
         exozodi,
         n_pix,
-        unsupported.astype(float),
-        (~response.throughput_supported).astype(float),
+        unsupported.astype(dtype),
+        (~response.throughput_supported).astype(dtype),
         images.thermal[:, :, 0, 0],
         scene.local_zodi,
         scene.sky_frame,
@@ -961,6 +993,8 @@ def aperture_rates(
     bad_here, _ = _bilinear(record.unsupported, *here)
     bad_fixed, _ = _bilinear(record.unsupported, *fixed)
     if record.local_zodi is not None:
+        if type(time_d) in (float, int):
+            time_d = like(time_d, record.roll_deg)
         local_zodi = local_zodi * record.local_zodi.node_radiance(
             record.quadrature, record.resolution, record.sky_frame, time_d
         )
@@ -974,7 +1008,13 @@ def aperture_rates(
     # A supported knot beside a missing ring reads only its own value.
     fraction = jnp.where(jnp.any(ring_mask != 0, axis=-1), 0, position.fraction)
     planet_response = near + fraction * (far - near)
-    selected = jnp.asarray(planet if contrast is None else contrast)
+    selected = planet if contrast is None else contrast
+    # Keep Python numbers weak, and let other array-like objects use JAX's
+    # array conversion before joining their dtype with the response.
+    if not isinstance(selected, (tuple, list, bool, int, float, complex)):
+        selected = jnp.asarray(selected)
+    dtype = jnp.result_type(record.star, planet_response, *jax.tree.leaves(selected))
+    selected = jnp.asarray(selected, dtype=dtype)
     name = "planet" if contrast is None else "contrast"
     try:
         selected = jnp.broadcast_to(selected, record.star.shape)
@@ -983,10 +1023,6 @@ def aperture_rates(
             f"{name} has shape {selected.shape}, which does not broadcast to "
             f"the record's (W, Q) = {record.star.shape}"
         ) from None
-    # Promote to the response's dtype before any product, so a float32 star or
-    # contrast is not rounded to float32 ahead of a float64 response.
-    dtype = jnp.result_type(record.star, selected, planet_response)
-    selected = selected.astype(dtype)
     if contrast is not None:
         selected = record.star.astype(dtype) * selected
     planet = selected * planet_response
@@ -1003,9 +1039,7 @@ def aperture_rates(
     )
 
     def zero(x):
-        return jnp.where(
-            supported.reshape(supported.shape + (1,) * (x.ndim - 1)), x, 0.0
-        )
+        return jnp.where(supported.reshape(supported.shape + (1,) * (x.ndim - 1)), x, 0)
 
     def rates(moment, variance=None):
         return Rates(
@@ -1016,6 +1050,7 @@ def aperture_rates(
             local_zodi=zero(local_zodi[moment]),
             exozodi=zero(exozodi[moment]),
             thermal=zero(record.thermal * n_pix[moment][:, None]),
+            stellar_companions=jnp.zeros((), dtype=planet.dtype),
             n_pix=zero(n_pix[moment]),
             variance=variance,
             supported=supported,
@@ -1056,6 +1091,7 @@ def scene_aperture_rates(
         record: The aperture record built for the scene's target.
         scene: The scene whose planets are read.
         time_d: Observation times, shape (T,), in days from the scene's epoch.
+            Concrete dates keep their host precision for the scene clock.
         roll_deg: Position angle of detector +y, in degrees, as in
             :func:`aperture_rates`. None uses the record's roll.
 
@@ -1063,7 +1099,17 @@ def scene_aperture_rates(
         The rates of every planet at every time in photons/s/nm, with the
         shapes given above.
     """
-    time_d = jnp.asarray(time_d)
+    # The scene owns its sample origin and must subtract it from host dates
+    # before they reach JAX. Lists of traced dates instead follow JAX promotion.
+    if not isinstance(time_d, jax.Array) and not is_traced(time_d):
+        device_dates = any(
+            isinstance(t, jax.Array) or is_traced(t) for t in jax.tree.leaves(time_d)
+        )
+        time_d = (
+            jnp.asarray(time_d)
+            if device_dates or hasattr(time_d, "__jax_array__")
+            else np.asarray(time_d)
+        )
     if time_d.ndim != 1:
         raise ValueError("time_d must have shape (T,)")
     if scene.batch_shape:
@@ -1089,19 +1135,23 @@ def scene_aperture_rates(
             for r in (rates, rates.variance)
         )
 
-    over_times = jax.vmap(read, in_axes=(0, 0, -1, 0), out_axes=-1)
+    times = None if record.local_zodi is None else jnp.asarray(time_d)
+    over_times = jax.vmap(
+        read, in_axes=(0, 0, -1, None if times is None else 0), out_axes=-1
+    )
     mean, variance = jax.vmap(over_times, in_axes=(0, 0, -2, None), out_axes=-2)(
-        east, north, planet, time_d
+        east, north, planet, times
     )
 
     def rates(values, variance=None):
         *fields, n_pix, supported = values
-        fields = [jnp.where(scene.valid[:, None], v, 0.0) for v in fields]
+        fields = [jnp.where(scene.valid[:, None], v, 0) for v in fields]
         return Rates(
             record.quadrature,
             "photon",
             **dict(zip(_READ_FIELDS, fields, strict=True)),
-            n_pix=jnp.where(scene.valid[:, None], n_pix, 0.0),
+            stellar_companions=jnp.zeros((), dtype=fields[0].dtype),
+            n_pix=jnp.where(scene.valid[:, None], n_pix, 0),
             variance=variance,
             supported=supported,
         )
