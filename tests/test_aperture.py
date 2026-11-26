@@ -914,10 +914,16 @@ def test_records_of_two_targets_stack_and_read_under_vmap(sloped):
 def test_record_builds_under_jit_and_jit_vmap_with_the_instrument_closed_over(sloped):
     """Fails if the response guard breaks a jitted record build.
 
-    Basis: exact. The guard measures concrete values at trace time even
-    inside ``jax.jit``, so ``aperture_record`` with the instrument closed
-    over runs under ``jit`` and ``jit(vmap)`` over the scene's pointing, and
-    equals the eager record to a 1e-13 relative rounding allowance.
+    The guard measures concrete values at trace time even inside ``jax.jit``.
+    Basis: floating-point, at each eager result's magnitude. Planet response
+    allows four gain multiplications. Pixel counts sum the kernel weights,
+    and leakage sums their products with the rendered pixels. Allow one
+    rounding step per kernel tap for either convolution order, including
+    separate products or fused multiply-adds. Leakage budgets 32 more steps
+    for the wavelength and pixel coordinate conversions, the bilinear
+    weights and up to nine native-pixel deposits per detector pixel, and
+    scaling the sloped map to photon rates. With no disk, exozodi is exactly
+    zero.
     """
     scene, instrument, exposure, response, _ = sloped
     scene = with_zodi(scene, LeinertZodi())
@@ -934,13 +940,21 @@ def test_record_builds_under_jit_and_jit_vmap_with_the_instrument_closed_over(sl
     eager = [build(ra[i], dec[i]) for i in range(2)]
     jitted = jax.jit(build)(ra[0], dec[0])
     batched = jax.jit(jax.vmap(build))(ra, dec)
-    for name in ("planet_response", "star_leakage", "exozodi", "n_pix"):
+    kernel_taps = response.kernels.shape[-2] * response.kernels.shape[-1]
+    for name, n_ops in (
+        ("planet_response", 4),
+        ("star_leakage", kernel_taps + 32),
+        ("exozodi", 0),
+        ("n_pix", kernel_taps),
+    ):
+        dtype = getattr(eager[0], name).dtype
+        rtol = float(roundoff(1, n_ops=n_ops, dtype=dtype))  # tol: algorithm, roundoff
         np.testing.assert_allclose(
-            getattr(jitted, name), getattr(eager[0], name), rtol=1e-13
+            getattr(jitted, name), getattr(eager[0], name), rtol=rtol, atol=0
         )
         for i in range(2):
             np.testing.assert_allclose(
-                getattr(batched, name)[i], getattr(eager[i], name), rtol=1e-13
+                getattr(batched, name)[i], getattr(eager[i], name), rtol=rtol, atol=0
             )
 
 
