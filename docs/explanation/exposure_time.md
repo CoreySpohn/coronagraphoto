@@ -108,8 +108,9 @@ speckle realization are those of the exposure the record was built from.
 Star leakage, local zodi and the pixel counts are fixed on the detector. The
 exozodi is fixed on the sky. `aperture_rates(..., roll_deg=...)` reads the
 first group where the planet falls at the requested roll and the exozodi where
-it fell at the roll the record was rendered at. `roll_deg` is the position angle of detector +y, as in
-`build_exposure`.
+it fell at `record.pointing.roll_deg`. The record stores the exposure's
+`Pointing` at build time. `roll_deg` is the position angle of detector +y, as
+in `build_exposure`.
 
 ## S/N and exposure time
 

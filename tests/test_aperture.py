@@ -106,6 +106,7 @@ def plateau():
         max_separation_arcsec=0.04,
     )
     record = cp.aperture_record(scene, instrument, exposure, response)
+    assert record.pointing is exposure.pointing
     return scene, instrument, exposure, response, record
 
 
@@ -324,7 +325,7 @@ def test_read_geometry_on_a_hand_made_record(plateau):
         return centre - (e * c - n * s) / pitch, centre + (e * s + n * c) / pitch
 
     separation, angle = 0.031, 70.0
-    built = float(record.roll_deg)
+    built = float(record.pointing.roll_deg)
     rates = cp.aperture_rates(
         record, *_offsets(separation, angle), contrast=1e-10, time_d=0.0
     )

@@ -50,7 +50,7 @@ flowchart LR
 
 The ExoVista loader (`skyscapes.from_exovista`) builds the scene and native
 stored-disk geometry and adds an AYO photon background. Arrays use `(y,x)`, pixel centres
-use `(x,y)`, and the exposure's `roll_deg` describes the observation roll.
+use `(x,y)`, and the exposure's `pointing.roll_deg` describes the observation roll.
 
 The aperture tables are a reduction of the same node images. The background
 terms of one render are summed in a photometric aperture at every half-pixel

@@ -1,9 +1,10 @@
 # Photon rates, electron rates and observations
 
-`build_exposure(scene, instrument, bands, *, time_d, roll_deg=0.0, plan=None,
-order=4, field_lod=None, allow_wide_bands=False)` builds the `Exposure` record: observation time, roll,
-wavelength quadrature, the `Resolution` that reduces each tabulated spectrum of
-the scene to the nodes and the optional frame plan. The star, planet and local-zodi values are not stored: the image path
+`build_exposure(scene, instrument, bands, *, time_d, roll_deg=0.0, offset_mas=None,
+plan=None, order=4, field_lod=None, allow_wide_bands=False)` builds the
+`Exposure` record with observation time, pointing, wavelength quadrature,
+the `Resolution` that reduces each tabulated spectrum of the scene to the
+nodes and the optional frame plan. The star, planet and local-zodi values are not stored: the image path
 asks `scene.sources` for them at each node, given the scene's sky frame and
 `time_d`. `field_lod` is the largest separation, in lambda/D at the band centre,
 at which the response is read. The default, None, takes the field the instrument
@@ -61,14 +62,16 @@ float64 value, so use float64 when you need finer agreement.
 
 ## Image orientation and roll
 
-`exposure.roll_deg` is shared by the detector grid, planet placement and disk
-rendering (internally `SkyOrientation(roll_deg, parity=-1)`). The roll is the
-position angle of detector +y, north through east. At roll zero, +column points west and +row north. At roll 90, north points
-right and east up. The shared grid supplies the geometric centre, including
+`exposure.pointing.roll_deg` is shared by the detector grid, planet placement
+and disk rendering. The roll is the position angle of detector +y, north
+through east. At roll zero, +column points west and +row north. At roll 90,
+north points right and east up. The grid centre is the optical axis, including
 half-integer centres for even arrays.
 
 Planets use the orbit engine's east/north offsets through
-`SkyOrientation.sky_to_detector`. The disk is evaluated directly on that sky grid;
+`Pointing.detector_offsets_arcsec` with parity -1. Rendering requires
+`offset_mas=None`, which places the target on the optical axis. The disk is
+evaluated directly on that sky grid;
 there is no additional image rotation or alternative disk PA conversion.
 Stored disks keep their native sky geometry. Parametric disks use
 `Scene.midplane_position_angle_deg`, also north through east.

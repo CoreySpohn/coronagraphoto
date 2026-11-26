@@ -29,7 +29,7 @@ import numpy as np
 from hwoutils.leaves import require_tree
 from hwoutils.numerics import COARSEST
 from hwoutils.precision import like, precision_of
-from optixstuff import Exposure, FramePlan, Instrument, Rates
+from optixstuff import Exposure, FramePlan, Instrument, Pointing, Rates
 from optixstuff.coronagraph import (
     AbstractImagingCoronagraph,
     AbstractSceneCoronagraph,
@@ -58,12 +58,12 @@ def _detector_grid(instrument, orientation):
 
 def _exposure_grid(instrument, exposure):
     """Read the detector grid at the exposure's roll."""
-    return _detector_grid(instrument, SkyOrientation(exposure.roll_deg))
+    return _detector_grid(instrument, SkyOrientation(exposure.pointing.roll_deg))
 
 
-def _source_offsets_lod(wavelength_nm, grid, native, positions):
+def _source_offsets_lod(wavelength_nm, pointing, native, positions):
     """Convert sky positions to detector offsets in the source product frame."""
-    x, y = grid.orientation.sky_to_detector(positions[0], positions[1])
+    x, y = pointing.detector_offsets_arcsec(positions[0], positions[1])
     lod_arcsec = native.frame.lod_to_arcsec(wavelength_nm)
     return x / lod_arcsec, y / lod_arcsec
 
@@ -75,9 +75,9 @@ def _detector_pixels(grid, scale_nm, product_grid):
     )
 
 
-def _planet_samples(coro, wavelength_nm, scale_nm, grid, native, positions):
+def _planet_samples(coro, wavelength_nm, scale_nm, grid, pointing, native, positions):
     """Read all planet images, zeroing each source outside the product domain."""
-    x, y = _source_offsets_lod(scale_nm, grid, native, positions)
+    x, y = _source_offsets_lod(scale_nm, pointing, native, positions)
     psfs = coro.source_psfs(
         wavelength_nm, x, y, grid=_detector_pixels(grid, scale_nm, native)
     )
@@ -110,6 +110,7 @@ def _node_rates(
     instrument,
     time_d,
     grid,
+    pointing,
     positions,
     node,
     samples,
@@ -193,7 +194,7 @@ def _node_rates(
     if positions is not None:
         if samples is None:
             samples = _planet_samples(
-                coro, wavelength_nm, scale_nm, grid, native, positions
+                coro, wavelength_nm, scale_nm, grid, pointing, native, positions
             )
         planet = gain * jnp.einsum("k,kyx->yx", node["planets"], samples)
 
@@ -459,6 +460,7 @@ def _node_function(
             instrument,
             time_d,
             grid,
+            exposure.pointing,
             positions,
             row(w, i, j),
             samples,
@@ -492,10 +494,10 @@ def _node_function(
     return remat(node)
 
 
-def _planet_support(model, grid, center, positions):
+def _planet_support(model, pointing, center, positions):
     """Read one band's source-domain mask on the detector orientation."""
     native = model.at_wavelength(center).source_grid
-    x, y = _source_offsets_lod(center, grid, native, positions)
+    x, y = _source_offsets_lod(center, pointing, native, positions)
     return model.source_psfs(center, x.ravel(), y.ravel()).valid.reshape(
         positions.shape[1:]
     )
@@ -541,11 +543,11 @@ def planet_source_support(
         and time. A planet-free scene has K equal to zero.
 
     Raises:
+        NotImplementedError: The exposure has an explicit pointing offset.
         ValueError: A band center falls outside every multiband component the
             renderer holds for the quadrature.
     """
     _check_render_inputs(scene, instrument, exposure)
-    grid = _exposure_grid(instrument, exposure)
     quadrature = exposure.quadrature
     centers = _band_centers(quadrature, instrument)
     _, positions = _planet_positions(scene, like(exposure.time_d, centers), centers)
@@ -567,7 +569,9 @@ def planet_source_support(
             model = models[w]
         elif len(models) > 1:
             model = models[_host_child_index(models, quadrature.bands[w].center_nm)]
-        support[w] = np.asarray(_planet_support(model, grid, center, positions))
+        support[w] = np.asarray(
+            _planet_support(model, exposure.pointing, center, positions)
+        )
     return support
 
 
@@ -679,7 +683,9 @@ def _render(
         center = centers[i]
         native = model.at_wavelength(center).source_grid
         scale_nm = model.scale_wavelength_nm(center, center)
-        return _planet_samples(model, center, scale_nm, grid, native, positions)
+        return _planet_samples(
+            model, center, scale_nm, grid, exposure.pointing, native, positions
+        )
 
     if kind == "photons":
         shape = quadrature.nodes_nm.shape
@@ -865,8 +871,17 @@ def _refuse_numpy_leaves(scene):
             ) from None
 
 
+def _require_on_axis(exposure):
+    """Reject explicit pointing offsets before reading any exposure data."""
+    if exposure.pointing.offset_mas is not None:
+        raise NotImplementedError(
+            "coronagraphoto does not yet render pointing offsets; use offset_mas=None"
+        )
+
+
 def _check_render_inputs(scene, instrument, exposure):
-    """Check each render owner's precision before reading the scene."""
+    """Require on-axis pointing and check render precision and scene leaves."""
+    _require_on_axis(exposure)
     precision_of(instrument)
     precision_of(exposure)
     _refuse_numpy_leaves(scene)
@@ -879,6 +894,7 @@ def build_exposure(
     *,
     time_d,
     roll_deg=0.0,
+    offset_mas=None,
     plan: FramePlan | None = None,
     order: int = 4,
     field_lod=None,
@@ -920,6 +936,8 @@ def build_exposure(
         bands: The bands to observe, each split and integrated separately.
         time_d: Observation time in days from the scene's epoch.
         roll_deg: Position angle of detector +y, in degrees.
+        offset_mas: Target position from the optical axis in detector (x, y)
+            milliarcseconds. Rendering requires None (on axis).
         plan: The frame plan, needed only by :func:`observe`. None for none.
         order: Number of quadrature nodes in each piece of a band.
         field_lod: Largest separation, in lambda/D at the band center, at which
@@ -934,8 +952,13 @@ def build_exposure(
             is under-blurred for the wider band.
 
     Returns:
-        The exposure holding the time, roll, wavelength quadrature, its
+        The exposure holding the time, pointing, wavelength quadrature, its
         resolution and the plan.
+
+    Raises:
+        ValueError: An explicit pointing offset has a shape other than (2,), or
+            an observing band exceeds the coverage of a tabulated source.
+        TypeError: The scene contains NumPy leaves.
     """
     _refuse_numpy_leaves(scene)
     models = [m for m in (instrument, scene.local_zodi) if m is not None]
@@ -952,7 +975,7 @@ def build_exposure(
     )
     return Exposure(
         time_d=time_d,
-        roll_deg=roll_deg,
+        pointing=Pointing(roll_deg, offset_mas),
         quadrature=quadrature,
         plan=plan,
         resolution=_resolve(scene, quadrature),
@@ -1005,6 +1028,9 @@ def photon_rates(
     Returns:
         The photon integrands in photons/s/nm/pixel, with the ``supported``
         and ``static_supported`` flags of shape (W, ny, nx).
+
+    Raises:
+        NotImplementedError: The exposure has an explicit pointing offset.
     """
     _check_render_inputs(scene, instrument, exposure)
     return _run(
@@ -1060,6 +1086,9 @@ def expected(
         The expected rates in electrons/s, band integrated, shape (W, ny, nx),
         with the ``supported`` and ``static_supported`` flags of shape
         (W, ny, nx).
+
+    Raises:
+        NotImplementedError: The exposure has an explicit pointing offset.
     """
     _check_render_inputs(scene, instrument, exposure)
     return _run(
@@ -1088,13 +1117,18 @@ def observe(key, scene: Scene, instrument: Instrument, exposure: Exposure) -> Im
 
     Returns:
         The noisy electron image of shape (W, ny, nx), one plane per band.
+
+    Raises:
+        NotImplementedError: The exposure has an explicit pointing offset.
+        ValueError: The exposure has no frame plan.
     """
+    _require_on_axis(exposure)
     if exposure.plan is None:
         raise ValueError("observe needs an exposure built with a FramePlan")
     electrons = expected(scene, instrument, exposure)
     # A traced roll cannot live in static grid metadata, so the returned grid
     # then carries no orientation.
-    roll = exposure.roll_deg
+    roll = exposure.pointing.roll_deg
     orientation = None if isinstance(roll, jax.core.Tracer) else SkyOrientation(roll)
     return Image(
         _draw(instrument.detector, key, electrons, exposure.plan),
