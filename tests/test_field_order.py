@@ -15,6 +15,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import make_path, make_system, with_zodi
+from hwoutils.constants import Rsun2m, c, h, k_B, nm2m
+from hwoutils.numerics import roundoff
 from numpy.polynomial.legendre import leggauss
 from optixstuff import Instrument
 from optixstuff.spectral import Band
@@ -25,7 +27,6 @@ from skyscapes.scene import BlackbodyStar
 import coronagraphoto as cp
 from coronagraphoto import simulation
 
-_RADIUS_M = 6.957e8
 _TEFF_K = 5800.0
 _CENTERS = np.linspace(450.0, 1000.0, 11)
 _BANDS = tuple(Band(0.9 * c, 1.1 * c) for c in _CENTERS)
@@ -52,7 +53,7 @@ def _with_half_width_field(instrument):
 
 
 def _scene():
-    scene = make_system(star=BlackbodyStar(_TEFF_K, _RADIUS_M), smooth_planet=True)
+    scene = make_system(star=BlackbodyStar(_TEFF_K, Rsun2m), smooth_planet=True)
     return with_zodi(scene, AYOZodi())
 
 
@@ -70,7 +71,13 @@ def _fine_rule(band, cells=2000, points=8):
     return nodes.ravel(), (half * weight).ravel()
 
 
-def _worst_corner_error(exposure, scene, instrument, *, count=67):
+def _relative_blackbody(wavelength_nm):
+    """Photon Planck shape, with the common radiance factors cancelled."""
+    exponent = h * c / (k_B * _TEFF_K * nm2m * wavelength_nm)
+    return (550.0 / wavelength_nm) ** 4 / np.expm1(exponent)
+
+
+def _worst_corner_error(exposure, instrument, *, count=67):
     """Worst relative error over the corner pixels, across every band.
 
     The corners are the pixels from the half-width to the half-diagonal of the
@@ -85,11 +92,27 @@ def _worst_corner_error(exposure, scene, instrument, *, count=67):
             instrument.coronagraph.frame.lod_to_arcsec(center)
         )
         seps = np.linspace(_HALF_WIDTH_LOD, _HALF_DIAGONAL_LOD, count) * scale
-        nodes = np.asarray(quadrature.nodes_nm[i])
-        weights = np.asarray(quadrature.weights_nm[i])
-        star = np.asarray(scene.star.photon_flux_density(nodes, 0.0, dist_pc=10.0))
+        # The layout sets the discretization error. Reconstruct its Gauss
+        # nodes on the host and verify separately what the lane actually stores.
+        pieces = [
+            _fine_rule(Band(lo, hi), cells=1, points=n)
+            for lo, hi, n in quadrature.pieces[i]
+        ]
+        nodes, weights = (np.concatenate(parts) for parts in zip(*pieces, strict=True))
+        for actual, reference in (
+            (quadrature.nodes_nm[i], nodes),
+            (quadrature.weights_nm[i], weights),
+        ):
+            np.testing.assert_allclose(
+                actual[: nodes.size],
+                reference,
+                atol=0,
+                rtol=roundoff(1, n_ops=4, dtype=actual.dtype),
+            )
+        np.testing.assert_array_equal(quadrature.weights_nm[i, nodes.size :], 0)
+        star = _relative_blackbody(nodes)
         fine, fine_weights = _fine_rule(band)
-        fine_star = np.asarray(scene.star.photon_flux_density(fine, 0.0, dist_pc=10.0))
+        fine_star = _relative_blackbody(fine)
         for s in seps:
             got = np.sum(weights * star * _airy(s, center, nodes))
             truth = np.sum(fine_weights * fine_star * _airy(s, center, fine))
@@ -104,8 +127,11 @@ def test_the_corner_pixels_are_resolved_at_the_default_field():
     fine Gauss rule (2000 cells of eight points) in each of eleven 20 percent
     bands from 450 to 1000 nm, for 67 pixels from the half-width to the
     half-diagonal of the E8 detector. Tolerance 1e-8 relative at the default.
-    Basis: the smooth star has no source error, so what is left is the node
-    layout, which at the default field holds 1.5e-9 (measured) in that annulus;
+    Basis: evaluate the declared layout and independent blackbody/Airy
+    integrand in host float64 so the discretization check resolves errors
+    below a float32 wavelength ULP. The stored nodes and weights separately
+    allow four rounding steps for the Gauss interval map and storage.
+    The default field holds 1.5e-9 (measured) in that annulus;
     the bound is seven times that. An instrument that declares the half-width
     as its field misses by 1.4e-6 (nodes for 16 lambda/D, pixels at up to
     22.6), and the layout without a field (order 4) misses by 8.0e-1, so the
@@ -119,9 +145,9 @@ def test_the_corner_pixels_are_resolved_at_the_default_field():
     )
     none = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0, field_lod=0.0)
     got = {
-        "default": _worst_corner_error(default, scene, instrument),
-        "half_width": _worst_corner_error(half_width, scene, instrument),
-        "none": _worst_corner_error(none, scene, instrument),
+        "default": _worst_corner_error(default, instrument),
+        "half_width": _worst_corner_error(half_width, instrument),
+        "none": _worst_corner_error(none, instrument),
     }
     assert got["default"] < 1e-8
     assert got["half_width"] > 1e-7, "the half-width field must leave the corners short"

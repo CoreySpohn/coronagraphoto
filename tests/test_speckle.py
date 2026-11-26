@@ -10,6 +10,8 @@ import pytest
 from conftest import centroid, exposure_for, make_path, make_system
 from hwoutils.constants import s2d
 from hwoutils.epoch import Epoch
+from hwoutils.numerics import roundoff
+from hwoutils.precision import PrecisionError
 from optixstuff import AbstractSpeckleField, FramePlan
 from optixstuff.grids import (
     Frame,
@@ -170,7 +172,7 @@ def test_render_converts_scene_time_once_and_refuses_x32(precision):
     star leakage of the zero-anchored halo at ``t * s2d`` d to 4 float64 eps
     (the binary64 subtraction rounds by at most half an ulp of 2.7 d, which
     moves the cosine by under 1e-16 of the halo). Under x32 the anchored render
-    raises ``ValueError`` and the zero-anchored one does not. Fails if the
+    raises ``PrecisionError`` and the zero-anchored one does not. Fails if the
     render passes ``time_d * d2s`` (the epoch is ignored) or forms
     ``(time_d - epoch_d) * d2s`` itself (the x32 render no longer raises).
     """
@@ -192,7 +194,7 @@ def test_render_converts_scene_time_once_and_refuses_x32(precision):
             anchored.star_leakage, zero.star_leakage, rtol=4 * np.finfo(float).eps
         )
     else:
-        with pytest.raises(ValueError, match="epoch_d"):
+        with pytest.raises(PrecisionError, match="epoch_d"):
             render(2.0 + t_s * s2d, Halo(epoch_d=2.0))
 
 
@@ -547,8 +549,9 @@ def test_band_product_preserves_node_wavelength_for_speckles(gaussian_observatio
     """Compare the speckle excess to an affine field evaluated at each node.
 
     Linear reconstruction reproduces the ramp exactly. Its density times the
-    pixel's node-dependent area gives its integral. The 1e-10 peak tolerance
-    covers resampling roundoff and subtraction of the static leakage.
+    pixel's node-dependent area gives its integral. Roundoff permits 128
+    operations at the leakage scale before subtraction, covering the
+    coordinate transforms, resampling and spectral products.
     """
     scene, path, exposure = gaussian_observation()
     frame = Frame(600, 6, "circumscribed")
@@ -568,4 +571,7 @@ def test_band_product_preserves_node_wavelength_for_speckles(gaussian_observatio
         gain = 20 * (0.4 + 0.004 * (float(wave) - 500))
         truth = gain * 1e6 * 1e-8 * (1 + 0.1 * centers) * pitch**2 * float(wave) / 600
         truth = np.broadcast_to(truth, got.shape)
-        np.testing.assert_allclose(got, truth, atol=1e-10 * truth.max(), rtol=0)
+        scale = float(result.star_leakage.max()) + float(base.star_leakage.max())
+        np.testing.assert_allclose(
+            got, truth, rtol=0, atol=roundoff(scale, n_ops=128, dtype=got.dtype)
+        )

@@ -15,6 +15,7 @@ from conftest import (
     with_zodi,
 )
 from hwoutils.constants import arcsec2rad
+from hwoutils.numerics import roundoff
 from optixstuff.apertures import Circular
 from optixstuff.grids import Image, Measure, PixelGrid, SkyOrientation
 from optixstuff.spectral import Band, Quadrature
@@ -38,7 +39,9 @@ def test_aperture_closure_two_samplings():
     Zero-extended band-limited pixel
     integration multiplies each Fourier mode by sinc(frequency*pixel_width).
     The independently integrated separable DFT supplies the disk oracle;
-    256 eps relative allows FFT, contraction and weighted-sum rounding.
+    A 256-operation relative bound includes Fourier integration, source
+    contraction and aperture sums. The independent aperture reduction
+    keeps fractional weights in host float64.
     """
     coro = PlateauCoronagraph(n=32, step=0.25)
     lod_arcsec = float(coro.grid.frame.lod_to_arcsec(550.0))
@@ -89,7 +92,7 @@ def test_aperture_closure_two_samplings():
             Measure.integral(),
             "stellar_flux_fraction",
         )
-        weights = rule.weights(psf, (0.5, 0.0))
+        weights = np.asarray(rule.weights(psf, (0.5, 0.0)))
         # Independent finite-source convolution and exact Fourier pixel integrals.
         delta = (np.arange(32)[:, None] - np.arange(32)[None, :]) * 0.25
         # The disk is a linear reconstruction of its table, zero outside: an
@@ -121,7 +124,7 @@ def test_aperture_closure_two_samplings():
         measured.append(
             np.array(
                 [
-                    float((getattr(rates, name)[0, 0] * weights).sum())
+                    float((np.asarray(getattr(rates, name)[0, 0]) * weights).sum())
                     for name in ("planet", "star_leakage", "local_zodi", "exozodi")
                 ]
             )
@@ -139,7 +142,10 @@ def test_aperture_closure_two_samplings():
     )
     for sample, sample_reference in zip(measured, references, strict=True):
         np.testing.assert_allclose(
-            sample, sample_reference, rtol=256 * np.finfo(float).eps, atol=0
+            sample,
+            sample_reference,
+            rtol=roundoff(1, n_ops=256, dtype=rates.planet.dtype),
+            atol=0,
         )
 
 
@@ -156,8 +162,9 @@ def test_disk_equals_pixel_center_source():
     flux contracts to its point PSF before reconstruction, so the disk equals
     the planet path's point PSFs at those nine pixel centres with those
     weights, both integrating the same zero-extended band-limited density
-    over detector pixels. Equality holds to 1e3 eps of peak. Declaring the
-    point PSF linear would compare different continuous images. A source
+    over detector pixels. A peak-scaled 1000-operation bound covers 16 reconstruction
+    sub-samples per cell, nine PSF contributions and the two DFT reads.
+    Declaring the point PSF linear would compare different images. A source
     shift of half a native pixel differs by >.05 of peak.
     """
 
@@ -214,7 +221,7 @@ def test_disk_equals_pixel_center_source():
     np.testing.assert_allclose(
         b[0, 0],
         np.where(supported, expected, 0.0),
-        atol=1e3 * np.finfo(float).eps * a.max(),
+        atol=roundoff(a.max(), n_ops=1000, dtype=a.dtype),
         rtol=0,
     )
     shifted = path.coronagraph.source_psfs(

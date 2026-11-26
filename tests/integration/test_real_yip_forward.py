@@ -5,6 +5,7 @@ import jax
 import numpy as np
 import pytest
 from conftest import exposure_for, make_path, write_scene, write_yip
+from hwoutils.numerics import roundoff
 from optixstuff import FramePlan
 from optixstuff.spectral import Band, Quadrature
 from skyscapes import from_exovista
@@ -21,10 +22,19 @@ def test_fits_scene_yip_observation(tmp_path):
     positive for a planet inside the synthetic table's source nodes (0.35 AU is
     2.6 lambda/D, the nodes fill a square of half-width 3) and exactly zero
     for one beyond them (1 AU is 21), which the table does not model; draw
-    equality is bitwise because identical keys call one sampler.
+    equality is bitwise because identical keys call one sampler. The epoch
+    position follows the float64 synthetic FITS state, allowing 64 operations
+    at the angular separation scale for orbit conversion and projection.
     """
     scene = from_exovista(
         write_scene(tmp_path / "scene.fits", a_au=0.35), load_disk=False
+    )
+    offsets = scene.positions(np.array([0.0]))[:, 0, 0]
+    np.testing.assert_allclose(
+        offsets,
+        [-0.035, 0.0],
+        rtol=0,
+        atol=roundoff(0.035, n_ops=64, dtype=offsets.dtype),
     )
     coro = open_yip(write_yip(tmp_path / "yip")).prepare()
     path = eqx.tree_at(lambda p: p.coronagraph, make_path(n=24, step=0.5), coro)
@@ -66,10 +76,11 @@ def test_planet_beyond_the_hull_leaves_the_inner_planet_untouched(tmp_path):
 
     Seam anchor yippy to coronagraphoto. An inner planet at 2.6 lambda/D with a
     second planet at 3 times the node hull has the same image as the inner
-    planet alone, to 1e-12 of its peak: the outer planet is flagged invalid
-    for itself and contributes exact zero (before, a wrapped copy of its wing
-    added 6e-9 or the whole image went NaN). Basis: floating-point, one
-    summation in a different order.
+    planet alone within a peak-scaled roundoff allowance. The outer planet
+    is flagged invalid and contributes exact zero. A wrapped copy of its
+    wing used to add 6e-9 or make the image NaN. The bound covers the
+    source sum and two interpolation, Fourier shifting and scaling paths
+    (64 operations).
     """
     import jax.numpy as jnp
     from conftest import make_system
@@ -101,7 +112,9 @@ def test_planet_beyond_the_hull_leaves_the_inner_planet_untouched(tmp_path):
     one = np.asarray(photon_rates(planets([inner]), path, exposure).planet)
     two = np.asarray(photon_rates(planets([inner, outer]), path, exposure).planet)
     assert np.isfinite(two).all() and one.max() > 0
-    np.testing.assert_allclose(two, one, rtol=0, atol=1e-12 * one.max())
+    np.testing.assert_allclose(
+        two, one, rtol=0, atol=roundoff(one.max(), n_ops=64, dtype=one.dtype)
+    )
     valid = coro.source_psfs(
         550.0, jnp.array([2.6, 3 * hull]), jnp.zeros(2), grid=None
     ).valid

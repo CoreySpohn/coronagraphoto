@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import GaussianCoronagraph, centroid, exposure_for, make_path, make_system
+from hwoutils.numerics import roundoff
 from optixstuff import MultiBandCoronagraph
 from optixstuff.grids import Frame, PixelGrid, SkyOrientation
 from optixstuff.spectral import Band, Quadrature
@@ -27,7 +28,11 @@ def rates_at(system, path, quadrature, roll=0):
     [(0.0, 90.0, (1.0, 0.0)), (90.0, 0.0, (-1.0, 0.0)), (30.0, 30.0, (0.0, 1.0))],
 )
 def test_cardinal_centroids(sky_pa, roll, expected):
-    """Fails on parity/sign or half-pixel errors; interpolation bound .02 pixel."""
+    """Fails on parity/sign or half-pixel errors; centroid bound .02 pixel.
+
+    Same-grid grouped image parity allows 64 operations for rotation,
+    PSF deposition, radiometry and the two-source sum, at image peak.
+    """
     path = make_path()
     scale = float(path.detector.pixel_scale_arcsec)
     system = make_system(sky_pa_deg=sky_pa, separation_arcsec=scale)
@@ -108,7 +113,12 @@ def test_cardinal_centroids(sky_pa, roll, expected):
         )
         for image in images:
             # Same-grid interpolation and orbital propagation: roundoff only.
-            np.testing.assert_allclose(image, reference, rtol=1e-10, atol=1e-18)
+            np.testing.assert_allclose(
+                image,
+                reference,
+                rtol=0,
+                atol=roundoff(np.max(np.abs(reference)), n_ops=64, dtype=image.dtype),
+            )
 
 
 @pytest.mark.parametrize("disk_kind", ["stored", "parametric"])

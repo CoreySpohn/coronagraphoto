@@ -1,6 +1,7 @@
 """Per-pixel photon budgets, detector observations and aperture rates."""
 
 from coronagraphoto.aperture import (
+    AperturePosition,
     ApertureRecord,
     ApertureResponse,
     aperture_rates,
@@ -17,6 +18,7 @@ from coronagraphoto.simulation import (
 )
 
 __all__ = [
+    "AperturePosition",
     "ApertureRecord",
     "ApertureResponse",
     "aperture_rates",

@@ -3,12 +3,19 @@
 import numpy as np
 import pytest
 from conftest import GaussianCoronagraph, IntegratedGaussianCoronagraph
+from hwoutils.numerics import roundoff, sum_roundoff
 
 
 @pytest.mark.medium(reason="1600 declared stellar nodes in the worked spectrum")
 @pytest.mark.fail_slow("90s")  # over 30 s on the hosted runner
 def test_worked_example():
-    """Fails if the reader omits a spectral factor; 1e-9 quadrature bound."""
+    """Compare the two rate integrals against independent Gauss quadrature.
+
+    The 1e-9 discretization allowance covers dense stellar interpolation
+    and PSF truncation. Roundoff covers 64 operations per node for stellar
+    conversion, radiometry and the pixel read, plus the depth of the
+    two reductions over nodes and pixels.
+    """
     import coronagraphoto as cp
 
     assert hasattr(cp, "photon_rates"), "the shared photon reader must be public"
@@ -33,7 +40,14 @@ def test_worked_example():
     expected = np.sum(weights * primitive)
     expected_e = np.sum(weights * primitive * 0.9 * (0.80 - 0.002 * (wave - 550)))
     # Gaussian truncation below 1e-15; dense cubic stellar table below 1e-11.
-    np.testing.assert_allclose([actual, electrons], [expected, expected_e], rtol=1e-9)
+    rtol = (
+        1e-9
+        + roundoff(1, n_ops=64, dtype=rates.planet.dtype)
+        + sum_roundoff(1.0, rates.planet.size, dtype=rates.planet.dtype)
+    )
+    np.testing.assert_allclose(
+        [actual, electrons], [expected, expected_e], rtol=rtol, atol=0
+    )
     np.testing.assert_allclose(
         [expected, expected_e], [0.0477819, 0.0346767], atol=5e-8, rtol=0
     )
@@ -45,7 +59,12 @@ def test_worked_example():
 
 @pytest.mark.parametrize("chromatic", [False, True])
 def test_node_yield_once(chromatic):
-    """Fails on double yield or band-mean QE; exact algebra at 32 float64 eps."""
+    """Fails on double yield or band-mean QE.
+
+    The two node integrals allow the scan and reference additions and
+    16 operations for QE evaluation, gain, yield and weight products.
+    The achromatic sum also allows two pairwise pixel reductions.
+    """
     from conftest import exposure_for, worked_setup
     from optixstuff.spectral import Band, Quadrature
 
@@ -75,9 +94,8 @@ def test_node_yield_once(chromatic):
         eta = 0.9 * (0.8 - (0.002 * (wave - 550) if chromatic else 0.0))
         expected += eta * weight * np.asarray(rates.planet[:, k])
         doubled += eta**2 * weight * np.asarray(rates.planet[:, k])
-    np.testing.assert_allclose(
-        actual, expected, rtol=32 * np.finfo(float).eps, atol=1e-18
-    )
+    rtol = roundoff(1, n_ops=16 + 2 * q.nodes_nm.size, dtype=actual.dtype)
+    np.testing.assert_allclose(actual, expected, rtol=rtol, atol=0)
     # Mutation controls on the same observable: >1% and >0.1% respectively.
     assert abs(doubled.sum() / expected.sum() - 1) > 0.01
     band_mean = 0.9 * 0.8 * rates.integrate().planet.sum()
@@ -85,7 +103,10 @@ def test_node_yield_once(chromatic):
         assert abs(float(band_mean) / expected.sum() - 1) > 0.001
     else:
         np.testing.assert_allclose(
-            band_mean, expected.sum(), rtol=32 * np.finfo(float).eps
+            band_mean,
+            expected.sum(),
+            rtol=rtol + sum_roundoff(2.0, actual.size, dtype=actual.dtype),
+            atol=0,
         )
 
 
@@ -355,7 +376,7 @@ def multiband_source_domain():
 
 
 def test_planet_source_support_selects_each_component(
-    multiband_source_domain, precision
+    multiband_source_domain,
 ):
     """Compare admission against the two square half-extents, exactly.
 
@@ -387,33 +408,6 @@ def test_planet_source_support_selects_each_component(
     empty = make_system(planet_groups=(), separation_arcsec=np.empty(0))
     assert cp.planet_source_support(empty, path, outside).shape == (1, 0, 1)
 
-    # In float32 a red edge 1e-5 nm above 550 nm rounds onto 550 nm, so the
-    # renderer's node comparison admits red at a 550 nm node when its other
-    # node holds red as well; the query compares in the node dtype among the
-    # same components, not in the host's float64 over every component.
-    from dataclasses import replace
-
-    import jax.numpy as jnp
-    from conftest import make_path
-    from optixstuff import MultiBandCoronagraph
-
-    if precision == np.float32:
-        red = BoundedGaussianCoronagraph(n=40, bandpass=Band(550.00001, 600.0))
-        blue = BoundedGaussianCoronagraph(n=16, bandpass=Band(500.0, 550.0))
-        shifted = replace(
-            make_path(n=16, detector_n=8),
-            coronagraph=MultiBandCoronagraph((red, blue)),
-        )
-        scene = make_system(separation_arcsec=separation, smooth_planet=True)
-        rule = Quadrature(
-            (Band(540.0, 560.0),), jnp.array([[550.0, 555.0]]), jnp.ones((1, 2))
-        )
-        edge = exposure_for(scene, rule)
-        planet = cp.photon_rates(scene, shifted, edge).planet
-        support = cp.planet_source_support(scene, shifted, edge)
-        assert float(planet[0, 0].sum()) > 0
-        np.testing.assert_array_equal(support[:, 0, 0], [True])
-
     # A rule whose only node is red holds red alone, and the renderer reads a
     # sole held component at every node, so the query reads red at a center
     # (545 nm) that red's bandpass does not cover.
@@ -425,6 +419,79 @@ def test_planet_source_support_selects_each_component(
     np.testing.assert_array_equal(
         cp.planet_source_support(scene, path, sole)[:, 0, 0], [True]
     )
+
+
+@pytest.mark.medium(
+    reason="One- and two-node queries through both the image and aperture tables"
+)
+def test_image_and_aperture_pick_the_same_child_at_a_rounded_edge():
+    """Fails if any read dispatches a rounded edge to the second child.
+
+    The first child owns the shared edge at float32 wavelength resolution.
+    Child admission is exact. Test eager and JIT with both nodes present,
+    then with only the edge node so eager pruning also has to choose red.
+    """
+    from dataclasses import replace
+
+    import equinox as eqx
+    import jax.numpy as jnp
+    from conftest import exposure_for, make_path, make_system
+    from optixstuff import MultiBandCoronagraph
+    from optixstuff.spectral import Band, Quadrature
+
+    import coronagraphoto as cp
+
+    blue = BoundedGaussianCoronagraph(n=16, bandpass=Band(500.0, 550.0))
+    separation = 0.06
+    scene = make_system(separation_arcsec=separation, smooth_planet=True)
+    render = eqx.filter_jit(cp.photon_rates)
+    path = make_path(n=16, detector_n=24)
+    # The first edge rounds onto 550 nm. The second moves by more than
+    # half a float32 ULP but is still inside the wavelength merge allowance.
+    for edge, nodes in ((550.00001, [[550.0, 555.0]]), (550.0001, [[550.0]])):
+        red = BoundedGaussianCoronagraph(n=40, bandpass=Band(edge, 600.0))
+        instrument = replace(path, coronagraph=MultiBandCoronagraph((red, blue)))
+        waves = jnp.array(nodes)
+        q = Quadrature((Band(540.0, 560.0),), waves, jnp.ones_like(waves))
+        exposure = exposure_for(scene, q)
+        response = cp.aperture_response(
+            instrument,
+            q,
+            n_separations=2,
+            n_angles=1,
+            max_separation_arcsec=separation,
+        )
+        np.testing.assert_array_equal(response.throughput_supported[0, :, -1], True)
+        np.testing.assert_array_equal(
+            cp.planet_source_support(scene, instrument, exposure), True
+        )
+        for read in (cp.photon_rates, render):
+            assert np.all(
+                np.asarray(read(scene, instrument, exposure).planet).sum((-2, -1)) > 0
+            )
+
+
+def test_dispatch_includes_exact_merge_limits():
+    """Both inclusive limits and their first excluded neighbors are exact."""
+    import jax
+    import jax.numpy as jnp
+    from optixstuff.spectral import Band
+
+    from coronagraphoto.simulation import _covering_models
+
+    models = (BoundedGaussianCoronagraph(n=16, bandpass=Band(512.0, 600.0)),)
+    low, high = 511.999755859375, 600.0 + 2**-12
+    waves = jnp.array(
+        [
+            np.nextafter(np.float32(low), np.float32(-np.inf)),
+            low,
+            high,
+            np.nextafter(np.float32(high), np.float32(np.inf)),
+        ]
+    )
+    covering = jax.vmap(lambda w: _covering_models(models, w, jnp)[0])
+    for read in (covering, jax.jit(covering)):
+        np.testing.assert_array_equal(read(waves), [False, True, True, False])
 
 
 def test_planet_source_support_uses_band_center_for_crossing_band(
@@ -461,6 +528,8 @@ def test_expected_integrates_declared_response_kink():
 
     Flat local sky and constant yield isolate the spectral integral at the
     central pixel. A single unsplit midpoint would overestimate the area.
+    A 32-operation relative bound covers the sky geometry, filter,
+    radiometry and scan sum.
     """
     import equinox as eqx
     import jax.numpy as jnp
@@ -490,15 +559,19 @@ def test_expected_integrates_declared_response_kink():
     omega = (path.detector.pixel_scale_arcsec * arcsec2rad) ** 2
     expected = 40 * 0.3 * 1e12 * omega * 0.8 * 0.9 * band.width_nm / 2
     np.testing.assert_allclose(
-        image.local_zodi[0, 4, 4], expected, rtol=32 * np.finfo(float).eps, atol=0
+        image.local_zodi[0, 4, 4],
+        expected,
+        rtol=roundoff(1, n_ops=32, dtype=image.local_zodi.dtype),
+        atol=0,
     )
 
 
 def test_source_scales_are_linear_in_the_image_and_live_for_gradients():
     """Fails if a source's flux_scale misses its image or leaks into another.
 
-    Basis: each rate is a product of float64 factors, so a scale multiplies
-    its rates by exactly its factor to 1e-14 relative. The star scale reaches
+    Basis: the two paths allow 32 rounding operations for scale products,
+    weighted interpolation and contraction. The gradient also permits
+    the depth of the forward and backward reductions. The star scale reaches
     the leakage and the planet, the planet scale the planet, the disk scale the
     exozodi and the zodi scale the local zodi. The set is bilinear in star and
     planet, not jointly linear. The leaf is live: the gradient of the rate
@@ -545,7 +618,7 @@ def test_source_scales_are_linear_in_the_image_and_live_for_gradients():
             np.testing.assert_allclose(
                 getattr(scaled, name),
                 factor * getattr(base, name),
-                rtol=1e-14,
+                rtol=roundoff(1, n_ops=32, dtype=getattr(base, name).dtype),
                 atol=0.0,
                 err_msg=f"{scales} on {name}",
             )
@@ -565,9 +638,11 @@ def test_source_scales_are_linear_in_the_image_and_live_for_gradients():
             )
             return getattr(cp.photon_rates(varied, path, exposure), name).sum()
 
-        np.testing.assert_allclose(
-            jax.grad(total)(1.0), float(getattr(base, name).sum()), rtol=1e-12
+        image = getattr(base, name)
+        rtol = roundoff(1, n_ops=32, dtype=image.dtype) + sum_roundoff(
+            2.0, image.size, dtype=image.dtype
         )
+        np.testing.assert_allclose(jax.grad(total)(1.0), image.sum(), rtol=rtol, atol=0)
 
 
 def test_disk_render_does_not_depend_on_detector_extent():
@@ -741,8 +816,8 @@ def test_support_follows_the_deposit_read_on_a_coarse_detector(cells, detector_n
     detector whose pixel is 3 or 2.4 table cells at 550 nm (more than 2 cells
     at the bluer nodes of the band, so they deposit). Truth is the render from
     the wide table, which reads no edge: wherever the narrow render is
-    supported the two agree to 1e-12 relative (identical samples through the
-    same linear read and band integral; the tolerance covers summation order).
+    supported the two allow 32 rounding operations for the two linear
+    footprint reads, plus their node additions in the band integrals.
     With the sampling margin the edge ring is called supported and differs
     there. Odd detectors put a pixel centre on the optical axis; at these
     sizes they are the geometries where the two margins call different pixels
@@ -779,7 +854,12 @@ def test_support_follows_the_deposit_read_on_a_coarse_detector(cells, detector_n
         actual = np.asarray(getattr(narrow, name))[0][supported]
         truth = np.asarray(getattr(wide, name))[0][supported]
         assert np.all(truth > 0)
-        np.testing.assert_allclose(actual, truth, rtol=1e-12, atol=0)
+        np.testing.assert_allclose(
+            actual,
+            truth,
+            rtol=roundoff(1, n_ops=32 + 2 * nodes.size, dtype=actual.dtype),
+            atol=0,
+        )
 
 
 def test_returned_products_carry_the_measure_of_the_read():
@@ -877,11 +957,9 @@ def test_star_support_matches_the_footprint_read(reconstruction, pitch_lod, dete
     2. ``linear`` and ``cubic``: the star term at every supported pixel is
        unchanged when the table is embedded in a wider one whose extra ring
        holds a field 40 times brighter (a finite-reach read does not see it).
-       Truth: finite kernel reach. Tolerance: 64 eps relative, rounding only
-       (the wide read forms its kernel positions from a shifted source center
-       and sums over more columns, measured at most 3.8e-15, at 0.25 lambda/D;
-       a pixel that reads the ring
-       moves by order one). The supported set
+       Truth: finite kernel reach. The 64-operation relative bound covers
+       the two coordinate transforms, separable reconstruction and band
+       integration. A pixel that reads the ring moves by order one. The supported set
        is the one the deposit rule gives, which is contained in the footprint
        read's own set (corners ``m`` cells inside: 0.5 linear, 2 cubic). On
        these detectors it is a ring narrower at 3 cells (36 pixels linear, 28
@@ -940,13 +1018,12 @@ def test_star_support_matches_the_footprint_read(reconstruction, pitch_lod, dete
         np.testing.assert_array_equal(supported, expected(deposit))
         assert not (supported & ~footprint_set).any()
         lost = int(footprint_set.sum() - supported.sum())
-        lost = int(footprint_set.sum() - supported.sum())
         assert lost == _LOST_TO_DEPOSIT.get((reconstruction, pitch_lod), 0)
         _, wide = render(3)
         np.testing.assert_allclose(
             np.asarray(wide.star_leakage)[0][supported],
             leakage[supported],
-            rtol=64 * np.finfo(float).eps,
+            rtol=roundoff(1, n_ops=64, dtype=leakage.dtype),
             atol=0,
         )
     assert supported.any() and not supported.all()
@@ -962,8 +1039,9 @@ def test_stellar_and_planet_images_follow_product_scale(
     """Compare node images and streamed counts to independent Gaussian integrals.
 
     The scene supplies the planet's sky position. Fluxes, gain and QE are
-    analytic. SciPy and JAX evaluate the same erf integrals, so 1e-10 of each
-    component peak allows only erf and floating-point summation error.
+    analytic. The peak-scaled allowance covers 128 operations for geometry,
+    Gaussian endpoint evaluation, differencing and radiometry, plus the
+    sequential additions of the node integrals.
     """
     from conftest import gaussian_pixels
 
@@ -1003,7 +1081,12 @@ def test_stellar_and_planet_images_follow_product_scale(
             (getattr(photons, field)[0], truth[:, k]),
             (getattr(electrons, field)[0], integral[k]),
         ):
-            np.testing.assert_allclose(got, want, atol=1e-10 * want.max(), rtol=0)
+            np.testing.assert_allclose(
+                got,
+                want,
+                atol=roundoff(want.max(), n_ops=128 + q.nodes_nm.size, dtype=got.dtype),
+                rtol=0,
+            )
     if not band_averaged:
         fixed = images(band.center_nm) * np.sum(np.asarray(q.weights()[0]) * eta * gain)
         difference = np.max(np.abs(fixed - integral), axis=(1, 2)) / integral.max(
@@ -1039,8 +1122,9 @@ def test_band_planet_samples_match_per_node_reads(gaussian_observation, quantity
 
     Each reference child converts the observing band's center to its native
     grid at every node. Reusing one read must give the same image and gradient.
-    The floating-point tolerance (rtol 1e-13, atol 0) allows for roundoff
-    in pixel integration and summation over nodes.
+    The peak-scaled 128-operation bound covers pixel geometry, erf
+    integration and the reverse derivative of the two render paths.
+    Node accumulation takes at most one addition for each node per path.
     """
     from dataclasses import replace
 
@@ -1079,7 +1163,16 @@ def test_band_planet_samples_match_per_node_reads(gaussian_observation, quantity
         render = cp.expected if quantity == "electrons" else cp.photon_rates
         actual = render(scene, path, exp).planet
         truth = render(scene, reference, ref_exp).planet
-    np.testing.assert_allclose(actual, truth, rtol=1e-13, atol=0)
+    np.testing.assert_allclose(
+        actual,
+        truth,
+        rtol=0,
+        atol=roundoff(
+            np.max(np.abs(truth)),
+            n_ops=128 + 2 * exp.quadrature.nodes_nm.size,
+            dtype=actual.dtype,
+        ),
+    )
 
 
 def test_band_planet_psf_read_counts(gaussian_observation):
@@ -1181,8 +1274,9 @@ def test_each_observing_band_uses_a_child_covering_both_edges(gaussian_observati
 
     The first interval covers only the narrower observation. Each child's
     throughput multiplies a SciPy Gaussian integral at the observing centre
-    and the node photon density. The 1e-10 peak tolerance allows erf and
-    x64 roundoff.
+    and the node photon density. A 128-operation peak bound covers the
+    coordinate conversion, four erf endpoint reads, differences and
+    the radiometric products.
     """
     from conftest import IntegratedGaussianCoronagraph, gaussian_pixels
     from optixstuff import MultiBandCoronagraph
@@ -1207,7 +1301,10 @@ def test_each_observing_band_uses_a_child_covering_both_edges(gaussian_observati
         gain = 20 * (0.4 + 0.004 * (waves - 500))
         density = (1e6 * 1e-7 * throughput * gain[:, None, None]) * pixels
         np.testing.assert_allclose(
-            photons.planet[i, real], density, atol=1e-10 * density.max(), rtol=0
+            photons.planet[i, real],
+            density,
+            atol=roundoff(density.max(), n_ops=128, dtype=photons.planet.dtype),
+            rtol=0,
         )
 
 

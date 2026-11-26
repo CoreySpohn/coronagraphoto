@@ -10,6 +10,7 @@ from conftest import (
     with_zodi,
 )
 from hwoutils.constants import arcsec2rad
+from hwoutils.numerics import roundoff
 from optixstuff.spectral import Band, Quadrature
 from skyscapes import LeinertZodi
 
@@ -25,6 +26,8 @@ def test_derived_sightline_reaches_pixels():
     the radiance evaluated at ecliptic coordinates computed here from the
     star's RA and Dec and the solar longitude of the exposure time. Three
     times make the geometry live without a large annual image cube.
+    The 64-operation relative bound covers the sky geometry, radiance
+    interpolation, area and throughput products.
     """
     zodi = LeinertZodi()
     path = make_path(n=8, step=0.5)
@@ -52,6 +55,8 @@ def test_derived_sightline_reaches_pixels():
             * float(path.detector.pixel_scale_arcsec) ** 2
             * arcsec2rad**2
         )
-        np.testing.assert_allclose(rate, expected, rtol=64 * np.finfo(float).eps)
+        np.testing.assert_allclose(
+            rate, expected, rtol=roundoff(1, n_ops=64, dtype=rate.dtype), atol=0
+        )
         values.append(float(rate))
     assert np.ptp(values) > 0
