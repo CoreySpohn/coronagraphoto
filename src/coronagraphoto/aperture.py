@@ -38,7 +38,7 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.leaves import is_traced
 from hwoutils.numerics import COARSEST, eps
-from hwoutils.precision import like
+from hwoutils.precision import like, precision_of
 from jax.typing import ArrayLike
 from jaxtyping import Array
 from optixstuff import Exposure, Instrument, Rates
@@ -51,6 +51,7 @@ from skyscapes import AbstractLocalZodi, Scene
 
 from coronagraphoto.simulation import (
     _band_center_dtype,
+    _check_render_inputs,
     _host_child_index,
     _real_counts,
     _run,
@@ -541,6 +542,8 @@ def aperture_response(
         The tables of throughput, ring statistics and pixel weights for this
         instrument and band set, stored at the quadrature's working precision.
     """
+    precision_of(instrument)
+    precision_of(quadrature)
     if not isinstance(rule, Circular) or rule.centre != "source":
         raise NotImplementedError(
             'aperture tables need a Circular rule with centre="source"'
@@ -733,6 +736,7 @@ def aperture_record(
     """
     quadrature = exposure.quadrature
     nodes = quadrature.nodes_nm
+    _check_render_inputs(scene, instrument, exposure)
     _check_response(instrument, quadrature, response)
     images = _run(
         scene, instrument, exposure, "photons", planets=False, uniform_sky=True
@@ -777,7 +781,7 @@ def aperture_record(
     star = scene.star.node_flux_density(
         quadrature,
         exposure.resolution,
-        jnp.atleast_1d(jnp.asarray(exposure.time_d)),
+        jnp.atleast_1d(like(exposure.time_d, response.kernels)),
         dist_pc=scene.dist_pc,
     )[..., 0]
     return ApertureRecord(
@@ -786,7 +790,7 @@ def aperture_record(
         like(instrument.detector.pixel_scale_arcsec, response.separation_step_arcsec),
         response.separation_step_arcsec,
         gain[None, :, :, None] * response.throughput,
-        star,
+        like(star, response.kernels),
         star_leakage,
         uniform_sky,
         exozodi,
@@ -856,10 +860,7 @@ def _ring_fraction(separation, lower, upper, inside, pitch, limit, last, xp):
 def _array_position(record, east, north):
     """Decide on float32 inputs and knots, then interpolate at working precision."""
     step = record.separation_step_arcsec
-    east, north = (
-        jnp.asarray(east, dtype=step.dtype),
-        jnp.asarray(north, dtype=step.dtype),
-    )
+    east, north = like(east, step), like(north, step)
     last = record.planet_response.shape[-1] - 1
     pitch = step.astype(COARSEST)
     distance = jnp.hypot(east.astype(COARSEST), north.astype(COARSEST))
@@ -970,7 +971,13 @@ def aperture_rates(
     if isinstance(east_arcsec, AperturePosition):
         if north_arcsec is not None:
             raise ValueError("omit north_arcsec with a prepared position")
-        position = east_arcsec
+        step = record.separation_step_arcsec
+        position = replace(
+            east_arcsec,
+            east_arcsec=like(east_arcsec.east_arcsec, step),
+            north_arcsec=like(east_arcsec.north_arcsec, step),
+            fraction=like(east_arcsec.fraction, step),
+        )
     elif north_arcsec is None:
         raise ValueError("give both east_arcsec and north_arcsec")
     elif (
@@ -992,7 +999,7 @@ def aperture_rates(
         )
 
     fixed = lattice_index(record.roll_deg)
-    here = fixed if roll_deg is None else lattice_index(roll_deg)
+    here = fixed if roll_deg is None else lattice_index(like(roll_deg, record.roll_deg))
     star_leakage, inside_here = _bilinear(record.star_leakage, *here)
     local_zodi, _ = _bilinear(record.uniform_sky, *here)
     exozodi, inside_fixed = _bilinear(record.exozodi, *fixed)
@@ -1000,11 +1007,13 @@ def aperture_rates(
     bad_here, _ = _bilinear(record.unsupported, *here)
     bad_fixed, _ = _bilinear(record.unsupported, *fixed)
     if record.local_zodi is not None:
-        if type(time_d) in (float, int):
-            time_d = like(time_d, record.roll_deg)
-        local_zodi = local_zodi * record.local_zodi.node_radiance(
-            record.quadrature, record.resolution, record.sky_frame, time_d
+        radiance = record.local_zodi.node_radiance(
+            record.quadrature,
+            record.resolution,
+            record.sky_frame,
+            like(time_d, record.planet_response),
         )
+        local_zodi = local_zodi * like(radiance, record.planet_response)
     ring = position.lower_ring
     pair = jax.lax.dynamic_slice_in_dim(record.planet_response, ring, 2, axis=-1)
     near = jnp.where(position.near_upper, pair[..., 1], pair[..., 0])
@@ -1016,12 +1025,7 @@ def aperture_rates(
     fraction = jnp.where(jnp.any(ring_mask != 0, axis=-1), 0, position.fraction)
     planet_response = near + fraction * (far - near)
     selected = planet if contrast is None else contrast
-    # Keep Python numbers weak, and let other array-like objects use JAX's
-    # array conversion before joining their dtype with the response.
-    if not isinstance(selected, (tuple, list, bool, int, float, complex)):
-        selected = jnp.asarray(selected)
-    dtype = jnp.result_type(record.star, planet_response, *jax.tree.leaves(selected))
-    selected = jnp.asarray(selected, dtype=dtype)
+    selected = like(selected, record.planet_response)
     name = "planet" if contrast is None else "contrast"
     try:
         selected = jnp.broadcast_to(selected, record.star.shape)
@@ -1031,7 +1035,7 @@ def aperture_rates(
             f"the record's (W, Q) = {record.star.shape}"
         ) from None
     if contrast is not None:
-        selected = record.star.astype(dtype) * selected
+        selected = like(record.star, record.planet_response) * selected
     planet = selected * planet_response
     bad_ring = (
         (~position.near_upper | position.between_rings) & (ring_mask[..., 0] != 0)
