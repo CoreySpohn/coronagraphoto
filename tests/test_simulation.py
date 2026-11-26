@@ -115,7 +115,7 @@ def test_node_yield_once(chromatic):
 def test_streaming_jit_and_gradient(precision):
     """Fails on incorrect scan band indexing or broken contrast gradients.
 
-    Scan/eager tolerance 64 eps; central difference h=1e-4 has a 1e-9
+    Scan/eager tolerance 64 eps of the lane dtype; central difference h=1e-4 has a 1e-9
     relative roundoff allowance for the linear contrast response.
     """
     import equinox as eqx
@@ -144,8 +144,8 @@ def test_streaming_jit_and_gradient(precision):
         jax.tree.leaves(compiled),
         strict=True,
     ):
-        np.testing.assert_allclose(a, b, rtol=64 * np.finfo(float).eps, atol=1e-18)
-        np.testing.assert_allclose(a, c, rtol=64 * np.finfo(float).eps, atol=1e-18)
+        np.testing.assert_allclose(a, b, rtol=64 * np.finfo(precision).eps, atol=1e-18)
+        np.testing.assert_allclose(a, c, rtol=64 * np.finfo(precision).eps, atol=1e-18)
 
     def total(scale):
         varied = eqx.tree_at(
