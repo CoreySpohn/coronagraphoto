@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 from conftest import exposure_for, make_path, make_system, with_zodi, worked_setup
 from hwoutils.leaves import canonical
+from hwoutils.precision import PrecisionError
 from hwoutils.testing import assert_precision_closed, precision_pair, ulps
 from optixstuff import Detector, FramePlan, IdealDetector
 from optixstuff.coronagraph import (
@@ -24,6 +25,7 @@ from optixstuff.spectral import Band, Quadrature, Resolution
 from orbix.system import SkyFrame
 from skyscapes import AbstractLocalZodi, PrecomputedZodi, Scene
 from skyscapes._sample_time import SampleOrigin, with_sample_origin
+from skyscapes.disk import AYOExozodi
 from skyscapes.scene import FlatStar, Sources
 
 import coronagraphoto as cp
@@ -307,6 +309,106 @@ def test_render_precision_closed(render_problem, entry, monkeypatch, request):
 
     read, args = _render_case(entry, request.getfixturevalue("closed_render_problem"))
     assert_precision_closed(eqx.filter_jit(read), *canonical(args, precision="float32"))
+
+
+@pytest.mark.float64_only(reason="wide scene and narrow render in one process")
+@pytest.mark.parametrize(
+    "entry",
+    ["expected", "photon_rates", "multiband_photon_rates", "disk", "aperture"],
+)
+def test_wide_scene_narrow_render(render_problem, entry):
+    """Scene rounding may move a tent sample by a few ulps of its peak.
+
+    Allow 32 float32 epsilons of each component's peak for orbit evaluation,
+    the sky rotation, interpolation and the disk or aperture sum.
+    """
+    scene, instrument, exposure, response = render_problem
+    if entry == "disk":
+        scene = make_system(
+            disk=AYOExozodi(level_zodis=3.0),
+            smooth_planet=True,
+            separation_arcsec=0.0125,
+        )
+        instrument = make_path(n=8, step=0.25, detector_n=4, cube=True)
+        exposure = cp.build_exposure(
+            scene, instrument, exposure.quadrature.bands, time_d=0.0, order=2
+        )
+    instrument, exposure, response = canonical(
+        (instrument, exposure, response), precision="float32"
+    )
+
+    def render(scene):
+        if entry == "aperture":
+            record = cp.aperture_record(scene, instrument, exposure, response)
+            assert record.star.dtype == np.float32
+            return cp.scene_aperture_rates(record, scene, np.array([0.0, 0.5]))
+        read, args = _render_case(
+            "photon_rates" if entry == "disk" else entry,
+            (scene, instrument, exposure, response),
+        )
+        return read(*args)
+
+    mixed = render(scene)
+    narrow = render(canonical(scene, precision="float32"))
+    for actual, expected in zip(
+        jax.tree.leaves(mixed), jax.tree.leaves(narrow), strict=True
+    ):
+        if jnp.issubdtype(actual.dtype, jnp.floating):
+            assert actual.dtype == expected.dtype == np.float32
+            np.testing.assert_allclose(
+                actual,
+                expected,
+                rtol=0,
+                atol=float(ulps(32, jnp.max(jnp.abs(expected)))),
+            )
+        else:
+            np.testing.assert_array_equal(actual, expected)
+    if entry == "disk":
+        assert mixed.exozodi.max() > 0
+
+
+@pytest.mark.float64_only(reason="trace the instrument side of a wide scene read")
+def test_wide_scene_node_precision_closed(closed_render_problem, monkeypatch):
+    """Trace the node kernel with the positions and spectra from a wide scene.
+
+    The scene and the width conversions themselves contain float64 arithmetic.
+    The returned kernel, including its pixel geometry, must be float32 throughout.
+    """
+    scene, instrument, exposure, _ = closed_render_problem
+    instrument, exposure = canonical((instrument, exposure), precision="float32")
+    node_function = simulation._node_function
+    checked = []
+
+    def check_node(*args):
+        node = node_function(*args)
+        wavelength = exposure.quadrature.nodes_nm[0, 0]
+        assert_precision_closed(node, wavelength, 0, 0)
+        checked.append(True)
+        return node
+
+    monkeypatch.setattr(simulation, "_node_function", check_node)
+    rates = cp.photon_rates(scene, instrument, exposure)
+    assert checked
+    assert rates.planet.dtype == np.float32
+
+
+@pytest.mark.float64_only(reason="mixed owner requires x64")
+@pytest.mark.parametrize("owner", ["instrument", "exposure"])
+def test_render_refuses_mixed_owner(render_problem, owner):
+    """A single off-precision leaf in either owner names the repair at entry."""
+    scene, instrument, exposure, _ = render_problem
+    if owner == "instrument":
+        instrument = eqx.tree_at(
+            lambda i: i.flux_scale,
+            instrument,
+            instrument.flux_scale.astype(jnp.float32),
+        )
+    else:
+        exposure = eqx.tree_at(
+            lambda e: e.roll_deg, exposure, exposure.roll_deg.astype(jnp.float32)
+        )
+    with pytest.raises(PrecisionError, match="canonical"):
+        cp.expected(scene, instrument, exposure)
 
 
 @vv.case(
@@ -702,5 +804,13 @@ def test_aperture_rates_precision_closed(position_input):
         args = (record, east, north, contrast)
 
     read = eqx.filter_jit(read)
-    assert_precision_closed(read, *canonical(args, precision="float32"))
+    narrow = canonical(args, precision="float32")
+    assert_precision_closed(read, *narrow)
     precision_pair(read, args, bound=float(ulps(32, np.float32(1))))
+    # The offsets and contrast are exactly representable in both widths.
+    mixed = read(narrow[0], *args[1:])
+    for actual, expected in zip(
+        jax.tree.leaves(mixed), jax.tree.leaves(read(*narrow)), strict=True
+    ):
+        assert actual.dtype == expected.dtype
+        np.testing.assert_array_equal(actual, expected)

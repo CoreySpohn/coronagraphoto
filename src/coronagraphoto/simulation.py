@@ -12,6 +12,9 @@ flux and gain, with detector terms applied per node for electrons.
 Single-wavelength responses and the speckle field use the node wavelength.
 The field size still sets the node count. For a band product, extra nodes
 sample the spectra and speckles without refining the coronagraph geometry.
+Scene positions, spectra, angular diameter and disk radiance enter instrument
+calculations at the working precision of the band centers. Each instrument
+and exposure must have a uniform working precision.
 A roll changes the position angle of detector +y, north through east.
 """
 
@@ -25,6 +28,7 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.leaves import require_tree
 from hwoutils.numerics import COARSEST
+from hwoutils.precision import like, precision_of
 from optixstuff import Exposure, FramePlan, Instrument, Rates
 from optixstuff.coronagraph import (
     AbstractImagingCoronagraph,
@@ -120,7 +124,8 @@ def _node_rates(
     node-effective stellar photon flux density, with its scale), ``planets``
     (one node-effective photon flux density per planet), ``sky_radiance`` (the
     local-zodi radiance in photons s^-1 m^-2 nm^-1 sr^-1, or None for no local
-    zodi) and ``node_star``, the star the disk is rendered against. Returns the
+    zodi), ``diameter`` (stellar angular diameter in arcsec) and ``node_star``,
+    the star the disk is rendered against. Returns the
     component images and two booleans (ny, nx) of detector pixels covered at
     this node: the static coverage, the AND of ``coverage`` over every
     coronagraph product the render reads, each with the reach of the read
@@ -146,7 +151,7 @@ def _node_rates(
         return resample(replace(image, grid=product_grid), grid).data
 
     phi_star = node["star"]
-    diameter = system.star.angular_diameter_arcsec(system.dist_pc)
+    diameter = node["diameter"]
     stellar = coro.stellar_map(
         wavelength_nm,
         diameter / products.stellar_grid.frame.lod_to_arcsec(scale_nm),
@@ -230,6 +235,7 @@ def _node_rates(
             grid=replace(fine.to_arcsec(scale_nm), orientation=grid.orientation),
             star=node["node_star"],
         )
+        radiance = replace(radiance, data=like(radiance.data, band_center_nm))
         scene = integrate_footprints(
             replace(radiance.integrated(), grid=fine), footprint_overlap(fine, sources)
         )
@@ -305,10 +311,11 @@ def _identity(fn):
     return fn
 
 
-def _planet_positions(system, times):
+def _planet_positions(system, time_d, ref):
     """Read sky positions and retain the ephemeris for other source reads."""
+    times = jnp.atleast_1d(time_d)
     ephemeris = system.ephemeris(times)
-    return ephemeris, system.positions(times, ephemeris=ephemeris)
+    return ephemeris, like(system.positions(times, ephemeris=ephemeris), ref)
 
 
 def _covering_models(models, wavelength_nm, xp):
@@ -362,6 +369,14 @@ def _band_center_dtype(quadrature, instrument):
     return jnp.result_type(instrument.flux_scale, *floating)
 
 
+def _band_centers(quadrature, instrument):
+    """Band centers in the floating working precision, including for integer nodes."""
+    return jnp.asarray(
+        [band.center_nm for band in quadrature.bands],
+        dtype=_band_center_dtype(quadrature, instrument),
+    )
+
+
 def _node_function(
     models,
     scene,
@@ -370,6 +385,7 @@ def _node_function(
     grid,
     ephemeris,
     positions,
+    time_d,
     centers,
     uniform_sky,
     band_branches,
@@ -398,7 +414,6 @@ def _node_function(
     body even eagerly and eager debugging then loses concrete values.
     """
     system, zodi = scene, scene.local_zodi
-    time_d = jnp.asarray(exposure.time_d)
 
     # A uniform sky reads no zodi, so a model that needs a sightline is not
     # asked for one.
@@ -413,11 +428,12 @@ def _node_function(
         jnp.atleast_1d(time_d),
         ephemeris=ephemeris,
     )
-    star_nodes, planet_nodes, zodi_nodes = (
-        sources.star[..., 0],
-        sources.planets[..., 0],
-        None if zodi is None or uniform_sky else sources.local_zodi[..., 0],
-    )
+    star_nodes = like(sources.star[..., 0], centers)
+    planet_nodes = like(sources.planets[..., 0], centers)
+    zodi_nodes = None
+    if zodi is not None and not uniform_sky:
+        zodi_nodes = like(sources.local_zodi[..., 0], centers)
+    diameter = like(sources.star_diameter_arcsec, centers)
 
     def row(w, i, j):
         if zodi is None:
@@ -430,7 +446,8 @@ def _node_function(
             star=star_nodes[i, j],
             planets=planet_nodes[i, j],
             sky_radiance=sky,
-            node_star=sources.node_star(i, j),
+            diameter=diameter,
+            node_star=sources.node_star(i, j) if system.disk is not None else None,
         )
 
     def with_model(model):
@@ -527,17 +544,15 @@ def planet_source_support(
         ValueError: A band center falls outside every multiband component the
             renderer holds for the quadrature.
     """
-    _refuse_numpy_leaves(scene)
+    _check_render_inputs(scene, instrument, exposure)
     grid = _exposure_grid(instrument, exposure)
     quadrature = exposure.quadrature
-    _, positions = _planet_positions(scene, jnp.atleast_1d(exposure.time_d))
+    centers = _band_centers(quadrature, instrument)
+    _, positions = _planet_positions(scene, like(exposure.time_d, centers), centers)
     _, n_planets, n_times = positions.shape
     support = np.zeros((len(quadrature.bands), n_planets, n_times), dtype=bool)
     if not n_planets:
         return support
-    # Evaluate the center in the same floating dtype as the renderer. Child
-    # selection uses the shared structural edge comparison on the host.
-    dtype = _band_center_dtype(quadrature, instrument)
     coro = instrument.coronagraph
     # The components the renderer holds for this quadrature, in dispatch order.
     models = (
@@ -545,14 +560,13 @@ def planet_source_support(
         if isinstance(coro, MultiBandCoronagraph)
         else (coro,)
     )
-    for w, band in enumerate(quadrature.bands):
-        center = jnp.asarray(band.center_nm, dtype=dtype)
+    for w, center in enumerate(centers):
         # The renderer reads a sole held component at every node, as here.
         model = models[0]
         if model.band_averaged and len(models) > 1:
             model = models[w]
         elif len(models) > 1:
-            model = models[_host_child_index(models, band.center_nm)]
+            model = models[_host_child_index(models, quadrature.bands[w].center_nm)]
         support[w] = np.asarray(_planet_support(model, grid, center, positions))
     return support
 
@@ -638,15 +652,12 @@ def _render(
             band_branches = tuple(model_ids.index(i) for i in band_ids)
     quadrature = exposure.quadrature
     grid = _exposure_grid(instrument, exposure)
+    centers = _band_centers(quadrature, instrument)
+    time_d = like(exposure.time_d, centers)
     ephemeris, positions = None, None
     if planets and scene.planets:
-        ephemeris, positions = _planet_positions(scene, jnp.atleast_1d(exposure.time_d))
+        ephemeris, positions = _planet_positions(scene, time_d, centers)
         positions = positions[:, :, 0]
-    centers = jnp.asarray(
-        [band.center_nm for band in quadrature.bands],
-        # A floating dtype keeps a half-integer centre of integer nodes.
-        dtype=_band_center_dtype(quadrature, instrument),
-    )
 
     node = _node_function(
         models,
@@ -656,6 +667,7 @@ def _render(
         grid,
         ephemeris,
         positions,
+        time_d,
         centers,
         uniform_sky,
         band_branches,
@@ -853,6 +865,13 @@ def _refuse_numpy_leaves(scene):
             ) from None
 
 
+def _check_render_inputs(scene, instrument, exposure):
+    """Check each render owner's precision before reading the scene."""
+    precision_of(instrument)
+    precision_of(exposure)
+    _refuse_numpy_leaves(scene)
+
+
 def build_exposure(
     scene: Scene,
     instrument: Instrument,
@@ -987,7 +1006,7 @@ def photon_rates(
         The photon integrands in photons/s/nm/pixel, with the ``supported``
         and ``static_supported`` flags of shape (W, ny, nx).
     """
-    _refuse_numpy_leaves(scene)
+    _check_render_inputs(scene, instrument, exposure)
     return _run(
         scene,
         instrument,
@@ -1042,7 +1061,7 @@ def expected(
         with the ``supported`` and ``static_supported`` flags of shape
         (W, ny, nx).
     """
-    _refuse_numpy_leaves(scene)
+    _check_render_inputs(scene, instrument, exposure)
     return _run(
         scene,
         instrument,
