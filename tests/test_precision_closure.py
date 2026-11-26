@@ -13,7 +13,7 @@ from conftest import exposure_for, make_path, make_system, with_zodi, worked_set
 from hwoutils.leaves import canonical
 from hwoutils.precision import PrecisionError
 from hwoutils.testing import assert_precision_closed, precision_pair, ulps
-from optixstuff import Detector, FramePlan, IdealDetector
+from optixstuff import Detector, FramePlan, IdealDetector, Pointing
 from optixstuff.coronagraph import (
     AbstractImagingCoronagraph,
     MultiBandCoronagraph,
@@ -232,7 +232,7 @@ def _render_case(entry, problem):
         read = _observation_pair
         if entry == "roll_pair":
             other = scene
-            other_exposure = replace(exposure, roll_deg=jnp.asarray(39.0))
+            other_exposure = replace(exposure, pointing=Pointing(39.0))
         else:
             other = canonical(
                 make_system(
@@ -405,7 +405,9 @@ def test_render_refuses_mixed_owner(render_problem, owner):
         )
     else:
         exposure = eqx.tree_at(
-            lambda e: e.roll_deg, exposure, exposure.roll_deg.astype(jnp.float32)
+            lambda e: e.pointing.roll_deg,
+            exposure,
+            exposure.pointing.roll_deg.astype(jnp.float32),
         )
     with pytest.raises(PrecisionError, match="canonical"):
         cp.expected(scene, instrument, exposure)
@@ -599,18 +601,16 @@ def test_planet_source_support_precision(render_problem):
         result = cp.planet_source_support(*args)
         np.testing.assert_array_equal(result, np.full((1, 1, 1), supported))
         system32, instrument32, exposure32 = canonical(args, precision="float32")
-        grid = simulation._exposure_grid(instrument32, exposure32)
         # Carry roll as a dynamic input rather than closing over the host grid.
         positions = system32.positions(jnp.atleast_1d(exposure32.time_d))
 
-        def support(model, roll, center, positions, grid=grid):
-            oriented = replace(grid, orientation=type(grid.orientation)(roll))
-            return simulation._planet_support(model, oriented, center, positions)
+        def support(model, roll, center, positions):
+            return simulation._planet_support(model, Pointing(roll), center, positions)
 
         support_args = canonical(
             (
                 instrument32.coronagraph,
-                exposure32.roll_deg,
+                exposure32.pointing.roll_deg,
                 jnp.asarray(550.0),
                 positions,
             ),
@@ -631,7 +631,7 @@ def test_integer_node_precision(closed_render_problem):
     nodes = jnp.array([[550, 551]], dtype=jnp.int32)
     weights = jnp.array([[1.5, 1.5]], dtype=jnp.float32)
     exposure = exposure_for(
-        scene, Quadrature(bands, nodes, weights), roll_deg=exposure.roll_deg
+        scene, Quadrature(bands, nodes, weights), roll_deg=exposure.pointing.roll_deg
     )
     scene32, instrument32, exposure32 = canonical(
         (scene, instrument, exposure), precision="float32"
@@ -707,7 +707,7 @@ def _aperture_problem():
     lattice = jnp.linspace(0.5, 1.0, 16).reshape(1, 1, 1, 4, 4)
     return cp.ApertureRecord(
         quadrature=quadrature,
-        roll_deg=jnp.asarray(0.0),
+        pointing=Pointing(0.0),
         pixel_scale_arcsec=jnp.asarray(0.125),
         separation_step_arcsec=jnp.asarray(0.125),
         planet_response=jnp.concatenate((ring_response, ring_response / 2)),

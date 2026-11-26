@@ -70,7 +70,14 @@ import zodi
 from hwoutils.constants import Mearth2kg, Msun2kg
 from hwoutils.epoch import Epoch
 from jax.scipy.special import erf
-from optixstuff import ConstantThroughput, Detector, Exposure, Instrument, SimplePrimary
+from optixstuff import (
+    ConstantThroughput,
+    Detector,
+    Exposure,
+    Instrument,
+    Pointing,
+    SimplePrimary,
+)
 from optixstuff.apertures import Circular
 from optixstuff.coronagraph import (
     AbstractImagingCoronagraph,
@@ -317,7 +324,7 @@ def exposure_for(scene, quadrature, *, time_d=0.0, roll_deg=0.0, plan=None):
     """
     return Exposure(
         time_d=time_d,
-        roll_deg=roll_deg,
+        pointing=Pointing(roll_deg),
         quadrature=quadrature,
         plan=plan,
         resolution=Resolution.build(quadrature, *scene.spectral_tables()),

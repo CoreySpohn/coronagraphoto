@@ -41,7 +41,7 @@ from hwoutils.numerics import COARSEST, eps
 from hwoutils.precision import like, precision_of
 from jax.typing import ArrayLike
 from jaxtyping import Array
-from optixstuff import Exposure, Instrument, Rates
+from optixstuff import Exposure, Instrument, Pointing, Rates
 from optixstuff.apertures import DEFAULT_APERTURE_RULE, Circular
 from optixstuff.coronagraph import AbstractImagingCoronagraph, MultiBandCoronagraph
 from optixstuff.grids import Image, Measure, PixelGrid, SkyOrientation
@@ -146,7 +146,7 @@ class ApertureRecord(eqx.Module):
 
     Attributes:
         quadrature: The exposure's wavelength nodes and weights.
-        roll_deg: Roll the backgrounds were rendered at.
+        pointing: Pointing the backgrounds were rendered at.
         pixel_scale_arcsec: Detector pixel pitch; the lattice pitch is half.
         separation_step_arcsec: Spacing of the planet table's separation axis.
         planet_response: Collecting gain times aperture throughput, multiplying
@@ -188,7 +188,7 @@ class ApertureRecord(eqx.Module):
     """
 
     quadrature: Quadrature
-    roll_deg: Array
+    pointing: Pointing
     pixel_scale_arcsec: Array
     separation_step_arcsec: Array
     planet_response: Array
@@ -680,7 +680,7 @@ def aperture_record(
 
     The star leakage (with the instrument's speckle field, if any), a uniform
     sky of unit radiance and the scene's disk are rendered once by the image
-    path at ``exposure.time_d`` and ``exposure.roll_deg``, without planets,
+    path at ``exposure.time_d`` and ``exposure.pointing``, without planets,
     then summed in the response's aperture at every half-pixel position. Only
     the real nodes of each band are rendered and summed; a padded slot repeats
     the band's first real node.
@@ -725,7 +725,7 @@ def aperture_record(
     Args:
         scene: The target scene, with its star, disk and local zodi.
         instrument: The instrument the exposure is rendered with.
-        exposure: The exposure whose quadrature, ``time_d`` and ``roll_deg``
+        exposure: The exposure whose quadrature, ``time_d`` and ``pointing``
             the star leakage, uniform sky and disk are rendered at.
         response: The aperture tables built for this instrument and for
             ``exposure.quadrature``.
@@ -733,6 +733,10 @@ def aperture_record(
     Returns:
         The tabulated aperture rates in photons/s/nm at the nodes of the
         exposure's quadrature, ready to read with :func:`aperture_rates`.
+
+    Raises:
+        NotImplementedError: The exposure has an explicit pointing offset.
+        ValueError: The response does not match the instrument or quadrature.
     """
     quadrature = exposure.quadrature
     nodes = quadrature.nodes_nm
@@ -786,7 +790,7 @@ def aperture_record(
     )[..., 0]
     return ApertureRecord(
         quadrature,
-        exposure.roll_deg,
+        exposure.pointing,
         like(instrument.detector.pixel_scale_arcsec, response.separation_step_arcsec),
         response.separation_step_arcsec,
         gain[None, :, :, None] * response.throughput,
@@ -998,8 +1002,9 @@ def aperture_rates(
             (nx - 1) + 2 * x / record.pixel_scale_arcsec,
         )
 
-    fixed = lattice_index(record.roll_deg)
-    here = fixed if roll_deg is None else lattice_index(like(roll_deg, record.roll_deg))
+    built_roll = record.pointing.roll_deg
+    fixed = lattice_index(built_roll)
+    here = fixed if roll_deg is None else lattice_index(like(roll_deg, built_roll))
     star_leakage, inside_here = _bilinear(record.star_leakage, *here)
     local_zodi, _ = _bilinear(record.uniform_sky, *here)
     exozodi, inside_fixed = _bilinear(record.exozodi, *fixed)

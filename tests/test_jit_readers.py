@@ -6,11 +6,58 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import make_path, make_system
-from optixstuff import Exposure, FramePlan
+from optixstuff import Exposure, FramePlan, Pointing
 from optixstuff.spectral import Band, Quadrature
 from skyscapes.scene import FlatStar
 
-from coronagraphoto import expected, observe, photon_rates
+from coronagraphoto import (
+    aperture_record,
+    aperture_response,
+    build_exposure,
+    expected,
+    observe,
+    photon_rates,
+)
+
+
+@pytest.mark.parametrize("reader", ["expected", "observe", "aperture_record"])
+@pytest.mark.parametrize("compile_reader", [False, True], ids=["eager", "jit"])
+def test_render_refuses_explicit_pointing_offset(reader, compile_reader):
+    """Even a zero offset array is refused when the exposure is traced."""
+    scene = make_system(star=FlatStar(jnp.asarray(1e6)))
+    path = make_path(n=8, step=0.5)
+    exposure = build_exposure(
+        scene,
+        path,
+        (Band(540.0, 560.0),),
+        time_d=0.0,
+        roll_deg=17.0,
+        offset_mas=(0.0, 0.0),
+        plan=FramePlan(10.0, 1.0),
+        field_lod=0.0,
+    )
+    assert exposure.pointing.roll_deg == 17.0
+    np.testing.assert_array_equal(exposure.pointing.offset_mas, [0.0, 0.0])
+    if reader == "expected":
+
+        def read(e):
+            return expected(scene, path, e)
+    elif reader == "observe":
+        key = jax.random.key(0)
+
+        def read(e):
+            return observe(key, scene, path, e)
+    else:
+        response = aperture_response(
+            path, exposure.quadrature, n_separations=3, n_angles=4
+        )
+
+        def read(e):
+            return aperture_record(scene, path, e, response)
+
+    run = jax.jit(read) if compile_reader else read
+    with pytest.raises(NotImplementedError, match=r"pointing offsets.*offset_mas=None"):
+        run(exposure)
 
 
 def _renders(caplog):
@@ -44,13 +91,17 @@ def test_exposure_argument_matches_closure():
     key = jax.random.key(0)
 
     def read(s, p, key, t):
-        exposure = Exposure(time_d=t, roll_deg=17, quadrature=quadrature, plan=plan)
+        exposure = Exposure(
+            time_d=t, pointing=Pointing(17), quadrature=quadrature, plan=plan
+        )
         return observe(key, s, p, exposure)
 
     time_d = jnp.asarray(0.0)
     argument = eqx.filter_jit(read)(system, path, key, time_d)
     closure = eqx.filter_jit(lambda s, k, t: read(s, path, k, t))(system, key, time_d)
-    exposure = Exposure(time_d=time_d, roll_deg=17, quadrature=quadrature, plan=plan)
+    exposure = Exposure(
+        time_d=time_d, pointing=Pointing(17), quadrature=quadrature, plan=plan
+    )
     whole = eqx.filter_jit(lambda e: observe(key, system, path, e))(exposure)
     # XLA may fuse the closed-over constants differently; agree to a few ULP.
     for other in (closure, whole):
@@ -92,7 +143,9 @@ def test_reader_compiles_once_for_any_values(reader, caplog):
     key, plan = jax.random.key(0), FramePlan(1e6, 1.0)
 
     def args(system, rule, time_d, roll):
-        exposure = Exposure(time_d=time_d, roll_deg=roll, quadrature=rule, plan=plan)
+        exposure = Exposure(
+            time_d=time_d, pointing=Pointing(roll), quadrature=rule, plan=plan
+        )
         if reader is observe:
             return key, system, path, exposure
         return system, path, exposure
@@ -125,7 +178,7 @@ def test_forty_nodes_and_eight_rolls_compile_one_program(caplog):
     wide = Quadrature((band,), nodes[None], np.full((1, 40), 1.5))
     with jax.log_compiles(True), caplog.at_level("WARNING"):
         rates = [
-            expected(scene, path, Exposure(0.0, roll, wide))
+            expected(scene, path, Exposure(0.0, Pointing(roll), wide))
             for roll in np.linspace(0.0, 70.0, 8)
         ]
         jax.block_until_ready(rates)
@@ -154,7 +207,9 @@ def test_roll_and_node_gradients_match_finite_differences():
 
     def scalar(roll, nodes):
         exposure = Exposure(
-            time_d=0.0, roll_deg=roll, quadrature=_with_nodes(quadrature, nodes)
+            time_d=0.0,
+            pointing=Pointing(roll),
+            quadrature=_with_nodes(quadrature, nodes),
         )
         rates = expected(scene, path, exposure)
         return jnp.sum(rates.planet**2) + 1e-3 * jnp.sum(rates.star_leakage**2)
@@ -193,7 +248,7 @@ def test_traced_nodes_select_the_band_model_inside_the_program():
         jnp.array([[495.0, 600.0, 505.0]]),
         jnp.array([[1.0, 1.0, 1.0]]),
     )
-    exposure = Exposure(time_d=0.0, roll_deg=10.0, quadrature=quadrature)
+    exposure = Exposure(time_d=0.0, pointing=Pointing(10.0), quadrature=quadrature)
     eager = photon_rates(scene, path, exposure)
     traced = eqx.filter_jit(lambda e: photon_rates(scene, path, e))(exposure)
     for a, b in zip(jax.tree.leaves(eager), jax.tree.leaves(traced), strict=True):

@@ -41,13 +41,14 @@ from dataclasses import replace
 
 import equinox as eqx
 from coronagraphoto import build_exposure, observe
+from optixstuff import Pointing
 
 exposure = build_exposure(scene, instrument, bands, time_d=0.0, plan=plan)
 
 
 @eqx.filter_jit
 def predict(scene, instrument, key, time_d, roll_deg):
-    at = replace(exposure, time_d=time_d, roll_deg=roll_deg)
+    at = replace(exposure, time_d=time_d, pointing=Pointing(roll_deg))
     return observe(key, scene, instrument, at)
 
 

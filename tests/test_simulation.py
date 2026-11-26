@@ -1111,7 +1111,7 @@ def _weighted_planet_sum(roll, scene, instrument, exposure):
 
     import coronagraphoto as cp
 
-    exposure = eqx.tree_at(lambda e: e.roll_deg, exposure, roll)
+    exposure = eqx.tree_at(lambda e: e.pointing.roll_deg, exposure, roll)
     image = cp.expected(scene, instrument, exposure).planet
     return jnp.sum(image * jnp.arange(image.shape[-1]))
 
@@ -1156,8 +1156,8 @@ def test_band_planet_samples_match_per_node_reads(gaussian_observation, quantity
     )
     if quantity == "roll_gradient":
         grad = jax.grad(_weighted_planet_sum)
-        actual = grad(exp.roll_deg, scene, path, exp)
-        truth = grad(ref_exp.roll_deg, scene, reference, ref_exp)
+        actual = grad(exp.pointing.roll_deg, scene, path, exp)
+        truth = grad(ref_exp.pointing.roll_deg, scene, reference, ref_exp)
         assert abs(truth) > 0
     else:
         render = cp.expected if quantity == "electrons" else cp.photon_rates
@@ -1219,7 +1219,7 @@ def test_band_planet_psf_read_counts(gaussian_observation):
         assert reads == [2] * (1 if averaged else n)
 
         reads.clear()
-        jax.grad(_weighted_planet_sum)(exp.roll_deg, scene, path, exp)
+        jax.grad(_weighted_planet_sum)(exp.pointing.roll_deg, scene, path, exp)
         jax.effects_barrier()
         if averaged:
             assert reads == [2]
