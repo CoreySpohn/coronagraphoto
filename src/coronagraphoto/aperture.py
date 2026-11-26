@@ -37,7 +37,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.leaves import is_traced
-from hwoutils.numerics import COARSEST
+from hwoutils.numerics import COARSEST, eps
 from hwoutils.precision import like
 from jax.typing import ArrayLike
 from jaxtyping import Array
@@ -457,7 +457,11 @@ def _compare_response(instrument, quadrature, response):
         raise ValueError("the response was built for other bands")
     models, frames, radii = _band_models(instrument, quadrature, response.rule)
     counts = _real_counts(quadrature)
-    if not np.allclose(radii, np.asarray(response.radius_pix), rtol=1e-6):
+    # Allow eight float32 epsilons at each stored radius in pixels.
+    radius_rtol = 8 * eps(COARSEST)
+    if not np.allclose(
+        radii, np.asarray(response.radius_pix), rtol=radius_rtol, atol=0
+    ):
         raise ValueError(
             "the response was built for another detector pixel scale or "
             "lambda/D frame: its aperture radius is "
@@ -483,7 +487,10 @@ def _compare_response(instrument, quadrature, response):
             limit / last,
             limit,
         )
-        if not np.isclose(measured, expected, rtol=1e-4, atol=1e-7, equal_nan=True):
+        # Compare to 100 ppm of the probe fraction with roundoff at unit flux.
+        if not np.isclose(
+            measured, expected, rtol=1e-4, atol=eps(COARSEST), equal_nan=True
+        ):
             raise ValueError(
                 f"the response was built for another coronagraph or detector: "
                 f"a source in band {w} puts {measured:.6g} of its light in the "

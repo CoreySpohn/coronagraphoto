@@ -82,6 +82,7 @@ ignore-words-list = "lod"
 [tool.pytest.ini_options]
 addopts = "-p hwoutils.testing.precision"
 default_precision = "float32"
+precision_guard_enforce = true
 filterwarnings = [
   "error",
   # HITRAN HAPI uses non-raw regex strings that Python 3.12 flags at compilation.
