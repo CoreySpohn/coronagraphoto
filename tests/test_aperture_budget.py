@@ -17,8 +17,8 @@ from yippy import open_yip
 import coronagraphoto as cp
 
 
-@pytest.mark.medium(
-    reason="YIP load, one response and 180 timed batches of 40000 reads"
+@pytest.mark.slow(
+    reason="YIP load, 730 compiles and 180 timed batches of 40000 reads, 45-55 s cold"
 )
 def test_record_meets_the_planner_budget(tmp_path):
     """Fails if a read, a per-target build or one exposure outgrows its budget.

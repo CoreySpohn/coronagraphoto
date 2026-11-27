@@ -23,7 +23,7 @@ from conftest import (
 from hwoutils.constants import Rsun2m, arcsec2rad, c, h, k_B, nm2m
 from hwoutils.conversions import photons_per_nm_per_m2_to_jy
 from hwoutils.numerics import eps, roundoff, sum_roundoff
-from hwoutils.testing import precision_pair
+from hwoutils.testing import precision_pair, ulps
 from optixstuff import (
     ConstantThroughput,
     Detector,
@@ -1369,8 +1369,9 @@ def test_zero_star_thermal_planet_flux(unit_response):
 def test_variable_star_constant_planet_flux(unit_response):
     """Truth: a steady three-photon emitter on a star of flux one then two.
 
-    Exact-algebra basis: unit gain and throughput give [3, 3], rtol=1e-12,
-    atol=0 for x64 integration. A build-time stellar factor gives [3, 1.5].
+    Unit gain and throughput give [3, 3]. Allow eight work-dtype roundings
+    at unit relative scale for unit conversion and spectral reduction, with
+    the 1e-12 relative floor for x64. A build-time stellar factor gives [3, 1.5].
     """
     instrument, response = unit_response
     wave = jnp.array([400.0, 700.0])
@@ -1390,16 +1391,17 @@ def test_variable_star_constant_planet_flux(unit_response):
     record = cp.aperture_record(scene, instrument, exposure, response)
     times = jnp.array([0.0, 1.0])
     sources = scene.sources(exposure.quadrature, exposure.resolution, times)
+    rtol = max(1e-12, float(ulps(8, jnp.ones((), dtype=sources.star.dtype))))
     np.testing.assert_allclose(
         sources.star,
         jnp.broadcast_to(jnp.array([1.0, 2.0]), sources.star.shape),
-        rtol=1e-12,
+        rtol=rtol,
         atol=0,
     )
-    np.testing.assert_allclose(sources.planets, 3.0, rtol=1e-12, atol=0)
+    np.testing.assert_allclose(sources.planets, 3.0, rtol=rtol, atol=0)
     rates = cp.scene_aperture_rates(record, scene, times)
     assert rates.supported.all()
-    np.testing.assert_allclose(rates.planet, 3.0, rtol=1e-12, atol=0)
+    np.testing.assert_allclose(rates.planet, 3.0, rtol=rtol, atol=0)
 
 
 @vv.case("aperture-photon-budget", "code-verification")
