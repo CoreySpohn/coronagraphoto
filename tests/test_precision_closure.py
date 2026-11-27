@@ -23,6 +23,7 @@ from optixstuff.coronagraph import (
 from optixstuff.grids import Image, Measure, PixelGrid
 from optixstuff.spectral import Band, Quadrature, Resolution
 from orbix.system import SkyFrame
+from packaging.version import Version
 from skyscapes import AbstractLocalZodi, PrecomputedZodi, Scene
 from skyscapes._sample_time import SampleOrigin, with_sample_origin
 from skyscapes.disk import AYOExozodi
@@ -458,15 +459,16 @@ class _PoissonWidening(AssertionError):
 @pytest.mark.float64_only(reason="float32 sampler traced with x64 available")
 @pytest.mark.parametrize("entry", _DRAWS)
 @pytest.mark.xfail(
+    Version(jax.__version__) < Version("0.12.1"),
     strict=True,
     raises=_PoissonWidening,
     reason="JAX exact Poisson widens its uniform bounds",
 )
 def test_observe_exact_sampler_precision(closed_render_problem, entry, monkeypatch):
-    """Only a float64 diagnostic from the exact sampler call is expected.
+    """Trace the real exact sampler through each image read.
 
-    Fails if the caller widens before or after that dependency or the waiver
-    becomes stale.
+    Fails if the caller widens before or after the sampler, or if the exact
+    sampler widens on JAX 0.12.1 or later.
     """
     scene, instrument, exposure, response = closed_render_problem
     assert int(exposure.plan.n_frames) > 0
