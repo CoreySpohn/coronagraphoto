@@ -27,10 +27,10 @@ def test_unplaced_scene_with_ayo_zodi_renders():
     assert scene.ra_deg is None
     path = make_path(n=8)
     bands = (Band(500.0, 600.0),)
-    images = cp.expected(scene, path, cp.build_exposure(scene, path, bands, time_d=3.0))
-    reference = cp.expected(
-        placed, path, cp.build_exposure(placed, path, bands, time_d=3.0)
-    )
+    event = cp.build_exposure(bands, epoch=scene.epoch, instrument="imager", time_d=3.0)
+    sampling = cp.build_sampling(path, event, scene=scene)
+    images = cp.expected(scene, path, event, sampling=sampling)
+    reference = cp.expected(placed, path, event, sampling=sampling)
     assert float(jnp.sum(images.local_zodi)) > 0
     np.testing.assert_array_equal(images.local_zodi, reference.local_zodi)
 
@@ -39,8 +39,14 @@ def test_unplaced_scene_with_leinert_zodi_names_the_fix():
     """A pointing-dependent model on an unplaced scene fails with a ValueError."""
     scene = _unplaced(with_zodi(make_system(), LeinertZodi()))
     path = make_path(n=8)
-    exposure = cp.build_exposure(scene, path, (Band(500.0, 600.0),), time_d=0.0)
+    exposure = cp.build_exposure(
+        (Band(500.0, 600.0),), epoch=scene.epoch, instrument="imager", time_d=0.0
+    )
+    sampling = cp.build_sampling(path, exposure, scene=scene)
     with pytest.raises(ValueError, match=r"no sky position.*ra_deg"):
-        cp.photon_rates(scene, path, exposure)
+        cp.photon_rates(scene, path, exposure, sampling=sampling)
     placed = with_zodi(make_system(), LeinertZodi())
-    assert cp.photon_rates(placed, path, exposure).local_zodi.shape[-1] == 8
+    assert (
+        cp.photon_rates(placed, path, exposure, sampling=sampling).local_zodi.shape[-1]
+        == 8
+    )

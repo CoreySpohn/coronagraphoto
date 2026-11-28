@@ -11,9 +11,9 @@ from coronagraphoto.aperture import (
 )
 from coronagraphoto.simulation import (
     build_exposure,
+    build_sampling,
     expected,
     observe,
-    observe_data,
     photon_rates,
     planet_source_support,
 )
@@ -26,9 +26,9 @@ __all__ = [
     "aperture_record",
     "aperture_response",
     "build_exposure",
+    "build_sampling",
     "expected",
     "observe",
-    "observe_data",
     "photon_rates",
     "planet_source_support",
     "scene_aperture_rates",

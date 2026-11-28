@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 
+import equinox as eqx
 import jax
 import numpy as np
 import pytest
@@ -10,9 +11,11 @@ from conftest import (
     IntegratedGaussianCoronagraph,
     make_path,
     make_system,
+    with_instrument,
 )
 from hwoutils.numerics import roundoff, sum_roundoff
 from optixstuff import Band, FramePlan, Pointing, stack_exposure_data
+from optixstuff.grids import Measure
 
 import coronagraphoto as cp
 
@@ -36,11 +39,12 @@ def test_worked_example():
 
     system, path = worked_setup()
     bands = (Band(500, 600),)
-    q = Quadrature.build(bands, system, path)
-    scene, exposure = system, exposure_for(system, q)
-    rates = cp.photon_rates(scene, path, exposure)
+    q = Quadrature.build(bands, system, path.select("imager"))
+    scene = system
+    exposure, sampling = exposure_for(system, q)
+    rates = cp.photon_rates(scene, path, exposure, sampling=sampling)
     actual = float(rates.integrate().planet.sum())
-    electrons = float(path.detector.electrons(rates).planet.sum())
+    electrons = float(path.instruments[0].detector.electrons(rates).planet.sum())
     nodes, weights = leggauss(128)
     wave, weights = 550 + 50 * nodes, 50 * weights
     # Conventional 3631 Jy AB zero point and SI Planck constant.
@@ -84,19 +88,20 @@ def test_node_yield_once(chromatic):
     # The yield identity needs a color slope and an interior break.
     system, path = worked_setup(n_wavelengths=7)
     bands = (Band(500, 600),)
-    q = Quadrature.build(bands, system, path)
-    scene, exposure = system, exposure_for(system, q)
-    rates = cp.photon_rates(scene, path, exposure)
+    q = Quadrature.build(bands, system, path.select("imager"))
+    scene = system
+    exposure, sampling = exposure_for(system, q)
+    rates = cp.photon_rates(scene, path, exposure, sampling=sampling)
     if not chromatic:
         import equinox as eqx
         import jax.numpy as jnp
 
         path = eqx.tree_at(
-            lambda p: p.detector._qe_values,
+            lambda p: p.instruments[0].detector._qe_values,
             path,
             jnp.array([0.8, 0.8]),
         )
-    actual = cp.expected(scene, path, exposure).planet
+    actual = cp.expected(scene, path, exposure, sampling=sampling).planet
     expected = np.zeros_like(actual)
     doubled = np.zeros_like(actual)
     for k, (wave, weight) in enumerate(
@@ -140,14 +145,16 @@ def test_streaming_jit_and_gradient(precision):
     # Two bands with unequal node counts exercise zero-weight padding under JIT.
     system, path = worked_setup(n_wavelengths=16)
     bands = (Band(500, 540), Band(550, 600))
-    q = Quadrature.build(bands, system, path)
-    exposure = exposure_for(system, q, time_d=jnp.asarray(0.0), roll_deg=17.0)
+    q = Quadrature.build(bands, system, path.select("imager"))
+    exposure, sampling = exposure_for(system, q, time_d=jnp.asarray(0.0), roll_deg=17.0)
 
     def render(s):
-        return cp.expected(s, path, exposure)
+        return cp.expected(s, path, exposure, sampling=sampling)
 
     eager = render(system)
-    full = path.detector.electrons(cp.photon_rates(system, path, exposure))
+    full = path.instruments[0].detector.electrons(
+        cp.photon_rates(system, path, exposure, sampling=sampling)
+    )
     compiled = eqx.filter_jit(render)(system)
     for a, b, c in zip(
         jax.tree.leaves(eager),
@@ -176,7 +183,7 @@ def test_streaming_jit_and_gradient(precision):
 def _position_grad_setup(knots):
     """Two planets whose sky offsets follow ``a_AU``, on a ``knots``-knot table.
 
-    Returns ``(scene_of, path, exposure)``: ``scene_of(a)`` is the scene with
+    Returns ``(scene_of, path, exposure, sampling)``: ``scene_of(a)`` is the scene with
     the planets' semi-major axes ``a`` in AU (their sky positions scale with
     it), real constants, in the Gaussian coronagraph's field.
     """
@@ -201,12 +208,15 @@ def _position_grad_setup(knots):
         ),
     )
     path = make_path(n=40)
-    exposure = exposure_for(base, Quadrature.build((Band(500.0, 600.0),), base, path))
+    exposure, sampling = exposure_for(
+        base,
+        Quadrature.build((Band(500.0, 600.0),), base, path.select("imager")),
+    )
 
     def scene_of(a):
         return eqx.tree_at(lambda s: s.dynamics.orbits.a_AU, base, a)
 
-    return scene_of, path, exposure
+    return scene_of, path, exposure, sampling
 
 
 def _position_grads(knots):
@@ -220,18 +230,18 @@ def _position_grads(knots):
 
     import coronagraphoto as cp
 
-    scene_of, path, exposure = _position_grad_setup(knots)
+    scene_of, path, exposure, sampling = _position_grad_setup(knots)
     a = jnp.array([0.2, 0.4])
     out = []
     for read in (cp.photon_rates, cp.expected):
 
         def total(x, read=read):
-            return read(scene_of(x), path, exposure).planet.sum()
+            return read(scene_of(x), path, exposure, sampling=sampling).planet.sum()
 
         grad = jax.jit(jax.grad(total))
         temp = grad.lower(a).compile().memory_analysis().temp_size_in_bytes
         out.append((grad(a), temp))
-    return exposure.quadrature.nodes_nm.shape[1], out
+    return sampling.quadrature.nodes_nm.shape[1], out
 
 
 @pytest.mark.slow(
@@ -302,22 +312,20 @@ def test_refused_planet_psf_only_invalidates_lit_source():
     The manufactured grid reaches only 1 lambda/D along each axis, less than
     the planet's north offset. Admission and discarded flux are exact zeros.
     """
-    from dataclasses import replace
-
     from conftest import exposure_for, make_path, make_system
     from optixstuff.spectral import Quadrature
 
     import coronagraphoto as cp
 
-    path = replace(make_path(n=8), coronagraph=BoundedGaussianCoronagraph(n=8))
+    path = with_instrument(make_path(n=8), coronagraph=BoundedGaussianCoronagraph(n=8))
     for contrast in (0.0, 1e-10):
         scene = make_system(contrast=contrast, smooth_planet=True)
-        exposure = exposure_for(scene, Quadrature.monochromatic(550.0))
+        exposure, sampling = exposure_for(scene, Quadrature.monochromatic(550.0))
         np.testing.assert_array_equal(
-            cp.photon_rates(scene, path, exposure).planet, 0.0
+            cp.photon_rates(scene, path, exposure, sampling=sampling).planet, 0.0
         )
         np.testing.assert_array_equal(
-            cp.planet_source_support(scene, path, exposure), False
+            cp.planet_source_support(scene, path, exposure, sampling=sampling), False
         )
 
 
@@ -327,8 +335,6 @@ def test_planet_source_support_uses_exposure_roll_and_times():
     Boolean admission needs no tolerance. The middle planet crosses the square
     boundary between epochs and also changes admission under a zero roll.
     """
-    from dataclasses import replace
-
     import jax.numpy as jnp
     from conftest import FlatContrast, exposure_for, make_path, make_system
     from optixstuff.grids import SkyOrientation
@@ -338,7 +344,7 @@ def test_planet_source_support_uses_exposure_roll_and_times():
     import coronagraphoto as cp
 
     coro = BoundedGaussianCoronagraph(n=16)
-    path = replace(make_path(n=16), coronagraph=coro)
+    path = with_instrument(make_path(n=16), coronagraph=coro)
     separations = coro.frame.lod_to_arcsec(550.0) * jnp.array([1.0, 2.4, 4.0])
     scene = make_system(
         separation_arcsec=separations,
@@ -347,7 +353,7 @@ def test_planet_source_support_uses_exposure_roll_and_times():
     times, roll = jnp.array([0.0, 10.0]), 45.0
     bands = (Band(520.0, 540.0), Band(560.0, 580.0))
     rule = Quadrature.build(bands, order=1)
-    exposure = exposure_for(scene, rule, time_d=times, roll_deg=roll)
+    exposure, sampling = exposure_for(scene, rule, time_d=times, roll_deg=roll)
     east, north = scene.positions(times)
 
     def direct_flags(angle):
@@ -363,21 +369,19 @@ def test_planet_source_support_uses_exposure_roll_and_times():
     truth = direct_flags(roll)
     assert truth[:, 1, 0].all() and not truth[:, 1, 1].any()
     assert not direct_flags(0.0)[:, 1, 0].any()
-    support = cp.planet_source_support(scene, path, exposure)
+    support = cp.planet_source_support(scene, path, exposure, sampling=sampling)
     assert isinstance(support, np.ndarray) and support.dtype == np.bool_
     assert support.shape == (2, 3, 2)
     np.testing.assert_array_equal(support, truth)
 
     empty = make_system(planet_groups=(), separation_arcsec=jnp.empty(0))
-    support = cp.planet_source_support(empty, path, exposure)
+    support = cp.planet_source_support(empty, path, exposure, sampling=sampling)
     assert support.shape == (2, 0, 2) and support.dtype == np.bool_
 
 
 @pytest.fixture
 def multiband_source_domain():
     """A wide red component first in dispatch order and a narrow blue one."""
-    from dataclasses import replace
-
     from conftest import make_path
     from optixstuff import MultiBandCoronagraph
     from optixstuff.spectral import Band
@@ -385,7 +389,7 @@ def multiband_source_domain():
     red = BoundedGaussianCoronagraph(n=40, bandpass=Band(550.0, 600.0))
     blue = BoundedGaussianCoronagraph(n=16, bandpass=Band(500.0, 550.0))
     path = make_path(n=16, detector_n=8)
-    return replace(path, coronagraph=MultiBandCoronagraph((red, blue)))
+    return with_instrument(path, coronagraph=MultiBandCoronagraph((red, blue)))
 
 
 def test_planet_source_support_selects_each_component(
@@ -406,31 +410,39 @@ def test_planet_source_support_selects_each_component(
     bands = (Band(570.0, 580.0), Band(520.0, 530.0))
     separation = 0.06
     scene = make_system(separation_arcsec=separation, smooth_planet=True)
-    exposure = exposure_for(scene, Quadrature.build(bands, path, order=1))
+    exposure, sampling = exposure_for(
+        scene, Quadrature.build(bands, path.select("imager"), order=1)
+    )
     half_extents = np.array([40, 16]) * 0.25 / 2
     wavelengths = np.array([band.center_nm for band in bands])
     offsets = separation / (np.rad2deg(wavelengths * 1e-9 / 6.0) * 3600)
     assert np.all((half_extents[1] < offsets) & (offsets < half_extents[0]))
-    support = cp.planet_source_support(scene, path, exposure)
+    support = cp.planet_source_support(scene, path, exposure, sampling=sampling)
     np.testing.assert_array_equal(support[:, 0, 0], offsets <= half_extents)
 
-    outside = exposure_for(scene, Quadrature.monochromatic(610.0))
+    outside, outside_sampling = exposure_for(scene, Quadrature.monochromatic(610.0))
     with pytest.raises(ValueError, match=r"610.*nm"):
-        cp.planet_source_support(scene, path, outside)
+        cp.planet_source_support(scene, path, outside, sampling=outside_sampling)
     # A planet-free scene has nothing to select a component for.
     empty = make_system(planet_groups=(), separation_arcsec=np.empty(0))
-    assert cp.planet_source_support(empty, path, outside).shape == (1, 0, 1)
+    assert cp.planet_source_support(
+        empty, path, outside, sampling=outside_sampling
+    ).shape == (1, 0, 1)
 
     # A rule whose only node is red holds red alone, and the renderer reads a
     # sole held component at every node, so the query reads red at a center
     # (545 nm) that red's bandpass does not cover.
     scene = make_system(separation_arcsec=separation, smooth_planet=True)
-    sole = exposure_for(
+    sole, sole_sampling = exposure_for(
         scene, Quadrature((Band(530.0, 560.0),), np.array([[558.0]]), np.ones((1, 1)))
     )
-    assert float(cp.photon_rates(scene, path, sole).planet.sum()) > 0
+    assert (
+        float(cp.photon_rates(scene, path, sole, sampling=sole_sampling).planet.sum())
+        > 0
+    )
     np.testing.assert_array_equal(
-        cp.planet_source_support(scene, path, sole)[:, 0, 0], [True]
+        cp.planet_source_support(scene, path, sole, sampling=sole_sampling)[:, 0, 0],
+        [True],
     )
 
 
@@ -444,8 +456,6 @@ def test_image_and_aperture_pick_the_same_child_at_a_rounded_edge():
     Child admission is exact. Test eager and JIT with both nodes present,
     then with only the edge node so eager pruning also has to choose red.
     """
-    from dataclasses import replace
-
     import equinox as eqx
     import jax.numpy as jnp
     from conftest import exposure_for, make_path, make_system
@@ -463,10 +473,12 @@ def test_image_and_aperture_pick_the_same_child_at_a_rounded_edge():
     # half a float32 ULP but is still inside the wavelength merge allowance.
     for edge, nodes in ((550.00001, [[550.0, 555.0]]), (550.0001, [[550.0]])):
         red = BoundedGaussianCoronagraph(n=40, bandpass=Band(edge, 600.0))
-        instrument = replace(path, coronagraph=MultiBandCoronagraph((red, blue)))
+        instrument = with_instrument(
+            path, coronagraph=MultiBandCoronagraph((red, blue))
+        )
         waves = jnp.array(nodes)
         q = Quadrature((Band(540.0, 560.0),), waves, jnp.ones_like(waves))
-        exposure = exposure_for(scene, q)
+        exposure, sampling = exposure_for(scene, q)
         response = cp.aperture_response(
             instrument,
             q,
@@ -476,11 +488,15 @@ def test_image_and_aperture_pick_the_same_child_at_a_rounded_edge():
         )
         np.testing.assert_array_equal(response.throughput_supported[0, :, -1], True)
         np.testing.assert_array_equal(
-            cp.planet_source_support(scene, instrument, exposure), True
+            cp.planet_source_support(scene, instrument, exposure, sampling=sampling),
+            True,
         )
         for read in (cp.photon_rates, render):
             assert np.all(
-                np.asarray(read(scene, instrument, exposure).planet).sum((-2, -1)) > 0
+                np.asarray(
+                    read(scene, instrument, exposure, sampling=sampling).planet
+                ).sum((-2, -1))
+                > 0
             )
 
 
@@ -525,14 +541,17 @@ def test_planet_source_support_uses_band_center_for_crossing_band(
     path = multiband_source_domain
     scene = make_system(separation_arcsec=0.06, smooth_planet=True)
     bands = (Band(520.0, 530.0), Band(540.0, 580.0), Band(570.0, 580.0))
-    exposure = cp.build_exposure(scene, path, bands, time_d=0.0, order=1, field_lod=0.0)
-    assert exposure.quadrature.nodes_nm[1, 0] < 550.0 < bands[1].center_nm
-    rates = cp.photon_rates(scene, path, exposure)
+    exposure = cp.build_exposure(
+        bands, epoch=scene.epoch, instrument="imager", time_d=0.0
+    )
+    sampling = cp.build_sampling(path, exposure, order=1, field_lod=0.0, scene=scene)
+    assert sampling.quadrature.nodes_nm[1, 0] < 550.0 < bands[1].center_nm
+    rates = cp.photon_rates(scene, path, exposure, sampling=sampling)
     planet = np.asarray(rates.integrate().planet)
     np.testing.assert_array_equal(planet[0], 0.0)
     totals = planet.sum(axis=(1, 2))
     assert np.all(totals[1:] > 0)
-    support = cp.planet_source_support(scene, path, exposure)
+    support = cp.planet_source_support(scene, path, exposure, sampling=sampling)
     np.testing.assert_array_equal(support[:, 0, 0], totals > 0, err_msg=f"{totals=}")
 
 
@@ -558,18 +577,21 @@ def test_expected_integrates_declared_response_kink():
     response = Transmission([510.0, 533.0, 590.0], [0.0, 1.0, 0.0])
     system, path = make_system(), make_path(n=8)
     path = eqx.tree_at(
-        lambda p: p.attenuating_elements, path, (TransmissiveElement(response),)
+        lambda p: p.instruments[0].attenuating_elements,
+        path,
+        (TransmissiveElement(response),),
     )
     path = eqx.tree_at(
-        lambda p: p.detector._qe_values,
+        lambda p: p.instruments[0].detector._qe_values,
         path,
         jnp.full(2, 0.8),
     )
     sky = PrecomputedZodi(jnp.array([500.0, 600.0]), jnp.full(2, 1e12))
-    q = Quadrature.build((band,), system, path, sky, order=1)
+    q = Quadrature.build((band,), system, path.select("imager"), sky, order=1)
     scene = with_zodi(system, sky)
-    image = cp.expected(scene, path, exposure_for(scene, q))
-    omega = (path.detector.pixel_scale_arcsec * arcsec2rad) ** 2
+    exposure, sampling = exposure_for(scene, q)
+    image = cp.expected(scene, path, exposure, sampling=sampling)
+    omega = (path.instruments[0].detector.pixel_scale_arcsec * arcsec2rad) ** 2
     expected = 40 * 0.3 * 1e12 * omega * 0.8 * 0.9 * band.width_nm / 2
     np.testing.assert_allclose(
         image.local_zodi[0, 4, 4],
@@ -605,7 +627,10 @@ def test_source_scales_are_linear_in_the_image_and_live_for_gradients():
 
     scene = with_zodi(make_system(disk=AYOExozodi(level_zodis=3.0)), AYOZodi())
     path = make_path(n=8, cube=True)
-    exposure = cp.build_exposure(scene, path, (Band(500.0, 600.0),), time_d=0.0)
+    exposure = cp.build_exposure(
+        (Band(500.0, 600.0),), epoch=scene.epoch, instrument="imager", time_d=0.0
+    )
+    sampling = cp.build_sampling(path, exposure, scene=scene)
     names = ("planet", "star_leakage", "local_zodi", "exozodi")
     where = dict(
         star=lambda s: s.star.flux_scale,
@@ -619,7 +644,7 @@ def test_source_scales_are_linear_in_the_image_and_live_for_gradients():
         for source, value in scales.items():
             current = where[source](scene)
             varied = eqx.tree_at(where[source], varied, jnp.full_like(current, value))
-        return cp.photon_rates(varied, path, exposure)
+        return cp.photon_rates(varied, path, exposure, sampling=sampling)
 
     base = rates()
     for scales, factors in (
@@ -652,7 +677,9 @@ def test_source_scales_are_linear_in_the_image_and_live_for_gradients():
             varied = eqx.tree_at(
                 where[source], scene, jnp.full_like(where[source](scene), scale)
             )
-            return getattr(cp.photon_rates(varied, path, exposure), name).sum()
+            return getattr(
+                cp.photon_rates(varied, path, exposure, sampling=sampling), name
+            ).sum()
 
         image = getattr(base, name)
         rtol = roundoff(1, n_ops=32, dtype=image.dtype) + sum_roundoff(
@@ -687,8 +714,13 @@ def test_disk_render_does_not_depend_on_detector_extent():
         path = make_path(n=64, cube=True, detector_n=detector_n)
         # The two detectors declare different fields, hence different nodes; the
         # crop compares one layout, so the field is zero.
-        exposure = cp.build_exposure(scene, path, bands, time_d=0.0, field_lod=0.0)
-        return np.asarray(cp.photon_rates(scene, path, exposure).exozodi)[0]
+        exposure = cp.build_exposure(
+            bands, epoch=scene.epoch, instrument="imager", time_d=0.0
+        )
+        sampling = cp.build_sampling(path, exposure, field_lod=0.0, scene=scene)
+        return np.asarray(
+            cp.photon_rates(scene, path, exposure, sampling=sampling).exozodi
+        )[0]
 
     small, full = exozodi(32), exozodi(64)
     crop = full[:, 16:48, 16:48]
@@ -750,10 +782,13 @@ def test_disk_reaches_the_operator_on_its_scene_grid():
     bands = (Band(500.0, 600.0),)
     base = make_path(n=n, cube=True)
     for model in (Wide, Stamp):
-        path = eqx.tree_at(lambda p: p.coronagraph, base, model(n, 0.25))
+        path = eqx.tree_at(lambda p: p.instruments[0].coronagraph, base, model(n, 0.25))
         with jax.disable_jit():
-            exposure = cp.build_exposure(scene, path, bands, time_d=0.0, order=1)
-            cp.photon_rates(scene, path, exposure)
+            exposure = cp.build_exposure(
+                bands, epoch=scene.epoch, instrument="imager", time_d=0.0
+            )
+            sampling = cp.build_sampling(path, exposure, order=1, scene=scene)
+            cp.photon_rates(scene, path, exposure, sampling=sampling)
 
     wide, stamp = seen["Wide"], seen["Stamp"]
     assert wide.grid.shape == (n + 2 * pad,) * 2 and stamp.grid.shape == (n, n)
@@ -789,15 +824,21 @@ def test_pixels_beyond_the_tables_are_zero_and_unsupported():
     zodi = PrecomputedZodi(jnp.array([400.0, 700.0]), jnp.full(2, 1e12))
     scene = with_zodi(make_system(), zodi)
     bands = (Band(500.0, 600.0),)
-    exposure = cp.build_exposure(scene, path, bands, time_d=0.0, order=2)
-    nodes = np.asarray(exposure.quadrature.nodes_nm)[0]
+    exposure = cp.build_exposure(
+        bands, epoch=scene.epoch, instrument="imager", time_d=0.0
+    )
+    sampling = cp.build_sampling(path, exposure, order=2, scene=scene)
+    nodes = np.asarray(sampling.quadrature.nodes_nm)[0]
     assert nodes.size >= 2
-    rates = cp.expected(scene, path, exposure)
-    photons = cp.photon_rates(scene, path, exposure)
+    rates = cp.expected(scene, path, exposure, sampling=sampling)
+    photons = cp.photon_rates(scene, path, exposure, sampling=sampling)
 
-    pixel_arcsec = float(path.detector.pixel_scale_arcsec)
+    pixel_arcsec = float(path.instruments[0].detector.pixel_scale_arcsec)
     lod = np.asarray(
-        [float(path.coronagraph.grid.frame.lod_to_arcsec(w)) for w in nodes]
+        [
+            float(path.instruments[0].coronagraph.grid.frame.lod_to_arcsec(w))
+            for w in nodes
+        ]
     )
     centre = (2 * n - 1) / 2
     far_edge = (np.abs(np.arange(2 * n) - centre) + 0.5) * pixel_arcsec
@@ -857,9 +898,13 @@ def test_support_follows_the_deposit_read_on_a_coarse_detector(cells, detector_n
             n=n, step=step, detector_n=detector_n, detector_step=cells * step
         )
         exposure = cp.build_exposure(
-            scene, path, (Band(500.0, 600.0),), time_d=0.0, order=2
+            (Band(500.0, 600.0),), epoch=scene.epoch, instrument="imager", time_d=0.0
         )
-        renders[n] = (exposure, eqx.filter_jit(cp.expected)(scene, path, exposure))
+        sampling = cp.build_sampling(path, exposure, order=2, scene=scene)
+        renders[n] = (
+            sampling,
+            eqx.filter_jit(cp.expected)(scene, path, exposure, sampling=sampling),
+        )
     nodes = np.asarray(renders[24][0].quadrature.nodes_nm)
     np.testing.assert_array_equal(nodes, np.asarray(renders[48][0].quadrature.nodes_nm))
     assert nodes.size >= 2
@@ -890,9 +935,9 @@ def test_returned_products_carry_the_measure_of_the_read():
     from optixstuff.grids import Measure
 
     path = make_path(n=24, step=0.25, detector_n=15, detector_step=0.75)
-    coro = path.coronagraph
-    stellar = coro.stellar_map(550.0, 0.0, grid=path.detector.grid)
-    sky = coro.uniform_sky_map(550.0, grid=path.detector.grid)
+    coro = path.instruments[0].coronagraph
+    stellar = coro.stellar_map(550.0, 0.0, grid=path.instruments[0].detector.grid)
+    sky = coro.uniform_sky_map(550.0, grid=path.instruments[0].detector.grid)
     assert stellar.measure == Measure.integral()
     assert sky.measure == Measure.intensive()
 
@@ -1003,13 +1048,18 @@ def test_star_support_matches_the_footprint_read(reconstruction, pitch_lod, dete
             n=_TABLE_N, step=_TABLE_STEP, detector_n=detector_n, detector_step=pitch_lod
         )
         path = eqx.tree_at(
-            lambda p: p.coronagraph, path, _declared_star(reconstruction, pad)
+            lambda p: p.instruments[0].coronagraph,
+            path,
+            _declared_star(reconstruction, pad),
         )
-        exposure = cp.build_exposure(scene, path, bands, time_d=0.0, order=1)
-        return exposure, cp.expected(scene, path, exposure)
+        exposure = cp.build_exposure(
+            bands, epoch=scene.epoch, instrument="imager", time_d=0.0
+        )
+        sampling = cp.build_sampling(path, exposure, order=1, scene=scene)
+        return sampling, cp.expected(scene, path, exposure, sampling=sampling)
 
-    exposure, narrow = render(0)
-    nodes = np.asarray(exposure.quadrature.nodes_nm).ravel()
+    rule, narrow = render(0)
+    nodes = np.asarray(rule.quadrature.nodes_nm).ravel()
     # The table is fixed in lambda/D and the detector in arcsec, so a pixel
     # spans 550 / node of its 550 nm width; support is the AND over nodes.
     cells = [pitch_lod * 550.0 / float(w) / _TABLE_STEP for w in nodes]
@@ -1020,8 +1070,8 @@ def test_star_support_matches_the_footprint_read(reconstruction, pitch_lod, dete
         sets = [_supported_from_corners(detector_n, g, rule(g)) for g in cells]
         return np.logical_and.reduce(sets)
 
-    sampling = _SAMPLING_MARGIN[reconstruction]
-    footprint_set = expected(lambda g: sampling)
+    margin = _SAMPLING_MARGIN[reconstruction]
+    footprint_set = expected(lambda g: margin)
     if reconstruction == "cubic_spline":
         np.testing.assert_array_equal(supported, footprint_set)
     else:
@@ -1030,7 +1080,7 @@ def test_star_support_matches_the_footprint_read(reconstruction, pitch_lod, dete
         def deposit(g):
             # The integral measure of the on_grid output takes the deposit
             # rule wherever a pixel is at least a cell.
-            return max(sampling, (k - 0.5) * g - 0.5) if g >= 1 else sampling
+            return max(margin, (k - 0.5) * g - 0.5) if g >= 1 else margin
 
         np.testing.assert_array_equal(supported, expected(deposit))
         assert not (supported & ~footprint_set).any()
@@ -1064,11 +1114,11 @@ def test_stellar_and_planet_images_follow_product_scale(
 
     import coronagraphoto as cp
 
-    scene, path, exposure = gaussian_observation(band_averaged)
-    q = exposure.quadrature
+    scene, path, exposure, sampling = gaussian_observation(band_averaged)
+    q = sampling.quadrature
     assert len(q.pieces[0]) == 2
     band = q.bands[0]
-    frame = path.coronagraph.frame
+    frame = path.instruments[0].coronagraph.frame
     assert band.center_nm == 0.9 * frame.reference_wavelength_nm
     waves = np.asarray(q.nodes_nm[0])
     east, north = np.asarray(scene.positions(np.array([0.0])))[:, 0, 0]
@@ -1077,7 +1127,9 @@ def test_stellar_and_planet_images_follow_product_scale(
         lod = float(frame.lod_to_arcsec(scale_nm))
 
         def gaussian(x, y, sigma):
-            return gaussian_pixels(path.detector, frame, scale_nm, x, y, sigma)
+            return gaussian_pixels(
+                path.instruments[0].detector, frame, scale_nm, x, y, sigma
+            )
 
         diameter = 0.013 / lod
         star = gaussian(-0.6, 0.45, np.hypot(0.28, diameter / 2))
@@ -1085,8 +1137,8 @@ def test_stellar_and_planet_images_follow_product_scale(
         planet = gaussian(-east / lod, north / lod, 0.35)
         return np.stack([1e6 * 1e-8 * star, 1e6 * 1e-7 * 0.3 * planet])
 
-    photons = cp.photon_rates(scene, path, exposure)
-    electrons = cp.expected(scene, path, exposure)
+    photons = cp.photon_rates(scene, path, exposure, sampling=sampling)
+    electrons = cp.expected(scene, path, exposure, sampling=sampling)
     assert np.all(photons.supported)
     gain = 20 * (0.4 + 0.004 * (waves - 500))
     eta = 0.9 - 0.002 * (waves - 500)
@@ -1122,14 +1174,14 @@ class _BandScaledGaussian(IntegratedGaussianCoronagraph):
         )
 
 
-def _weighted_planet_sum(roll, scene, instrument, exposure):
+def _weighted_planet_sum(roll, scene, instrument, exposure, sampling):
     import equinox as eqx
     import jax.numpy as jnp
 
     import coronagraphoto as cp
 
     exposure = eqx.tree_at(lambda e: e.pointing.roll_deg, exposure, roll)
-    image = cp.expected(scene, instrument, exposure).planet
+    image = cp.expected(scene, instrument, exposure, sampling=sampling).planet
     return jnp.sum(image * jnp.arange(image.shape[-1]))
 
 
@@ -1143,15 +1195,13 @@ def test_band_planet_samples_match_per_node_reads(gaussian_observation, quantity
     integration and the reverse derivative of the two render paths.
     Node accumulation takes at most one addition for each node per path.
     """
-    from dataclasses import replace
-
     import jax
     from optixstuff import MultiBandCoronagraph
     from optixstuff.spectral import Band
 
     import coronagraphoto as cp
 
-    scene, instrument, _ = gaussian_observation()
+    scene, instrument, _, _ = gaussian_observation()
     bands = (Band(520, 540), Band(560, 590))
 
     def setup(averaged):
@@ -1159,34 +1209,39 @@ def test_band_planet_samples_match_per_node_reads(gaussian_observation, quantity
             _BandScaledGaussian(Band(550, 600), averaged, throughput=0.7),
             _BandScaledGaussian(Band(500, 550), averaged, throughput=0.1),
         )
-        path = replace(instrument, coronagraph=MultiBandCoronagraph(children))
+        path = with_instrument(instrument, coronagraph=MultiBandCoronagraph(children))
         exposure = cp.build_exposure(
-            scene, path, bands, time_d=0.0, roll_deg=17.0, order=2, field_lod=0.0
+            bands, epoch=scene.epoch, instrument="imager", time_d=0.0, roll_deg=17.0
         )
-        return path, exposure
+        sampling = cp.build_sampling(
+            path, exposure, order=2, field_lod=0.0, scene=scene
+        )
+        return path, exposure, sampling
 
-    path, exp = setup(True)
-    reference, ref_exp = setup(False)
-    np.testing.assert_array_equal(exp.quadrature.nodes_nm, ref_exp.quadrature.nodes_nm)
+    path, exp, rule = setup(True)
+    reference, ref_exp, ref_rule = setup(False)
     np.testing.assert_array_equal(
-        exp.quadrature.weights(), ref_exp.quadrature.weights()
+        rule.quadrature.nodes_nm, ref_rule.quadrature.nodes_nm
+    )
+    np.testing.assert_array_equal(
+        rule.quadrature.weights(), ref_rule.quadrature.weights()
     )
     if quantity == "roll_gradient":
         grad = jax.grad(_weighted_planet_sum)
-        actual = grad(exp.pointing.roll_deg, scene, path, exp)
-        truth = grad(ref_exp.pointing.roll_deg, scene, reference, ref_exp)
+        actual = grad(exp.pointing.roll_deg, scene, path, exp, rule)
+        truth = grad(ref_exp.pointing.roll_deg, scene, reference, ref_exp, ref_rule)
         assert abs(truth) > 0
     else:
         render = cp.expected if quantity == "electrons" else cp.photon_rates
-        actual = render(scene, path, exp).planet
-        truth = render(scene, reference, ref_exp).planet
+        actual = render(scene, path, exp, sampling=rule).planet
+        truth = render(scene, reference, ref_exp, sampling=ref_rule).planet
     np.testing.assert_allclose(
         actual,
         truth,
         rtol=0,
         atol=roundoff(
             np.max(np.abs(truth)),
-            n_ops=128 + 2 * exp.quadrature.nodes_nm.size,
+            n_ops=128 + 2 * rule.quadrature.nodes_nm.size,
             dtype=actual.dtype,
         ),
     )
@@ -1222,21 +1277,21 @@ def test_band_planet_psf_read_counts(gaussian_observation):
 
     for model, averaged in ((CountedGaussian, True), (CountedPerNode, False)):
         coro = model(Band(500, 600), averaged)
-        one, path, exp = gaussian_observation(coro=coro)
+        one, path, exp, rule = gaussian_observation(coro=coro)
         scene = make_system(
             star=one.star,
             planet_groups=(Planet(jnp.ones(2), one.planets[0].physical_model),),
             separation_arcsec=jnp.array([0.02, 0.03]),
         )
-        n = exp.quadrature.nodes_nm.shape[1]
+        n = rule.quadrature.nodes_nm.shape[1]
         assert n > 1
         reads.clear()
-        cp.expected(scene, path, exp)
+        cp.expected(scene, path, exp, sampling=rule)
         jax.effects_barrier()
         assert reads == [2] * (1 if averaged else n)
 
         reads.clear()
-        jax.grad(_weighted_planet_sum)(exp.pointing.roll_deg, scene, path, exp)
+        jax.grad(_weighted_planet_sum)(exp.pointing.roll_deg, scene, path, exp, rule)
         jax.effects_barrier()
         if averaged:
             assert reads == [2]
@@ -1245,20 +1300,23 @@ def test_band_planet_psf_read_counts(gaussian_observation):
             assert all(k == 2 for k in reads)
 
 
-def test_build_exposure_refuses_underblurred_band(gaussian_observation):
+def test_build_sampling_refuses_underblurred_band(gaussian_observation):
     """The exact width ratio 1.3 exceeds 1.25, so only an explicit opt-in builds."""
     from optixstuff.spectral import Band
 
     import coronagraphoto as cp
 
-    scene, instrument, _ = gaussian_observation()
+    scene, instrument, _, _ = gaussian_observation()
     band = Band(444, 756)
-    with pytest.raises(ValueError, match="nm"):
-        cp.build_exposure(scene, instrument, (band,), time_d=0)
     exposure = cp.build_exposure(
-        scene, instrument, (band,), time_d=0, allow_wide_bands=True
+        (band,), epoch=scene.epoch, instrument="imager", time_d=0
     )
-    assert exposure.quadrature.bands == (band,)
+    with pytest.raises(ValueError, match="nm"):
+        cp.build_sampling(instrument, exposure, scene=scene)
+    sampling = cp.build_sampling(
+        instrument, exposure, allow_wide_bands=True, scene=scene
+    )
+    assert sampling.quadrature.bands == (band,)
 
 
 def test_single_wavelength_product_changes_angular_image_at_two_nodes(
@@ -1274,13 +1332,14 @@ def test_single_wavelength_product_changes_angular_image_at_two_nodes(
 
     import coronagraphoto as cp
 
-    scene, instrument, exposure = gaussian_observation(False)
-    q = exposure.quadrature
+    scene, instrument, _, sampling = gaussian_observation(False)
+    q = sampling.quadrature
     images = []
     for j in (0, -1):
         one = Quadrature(q.bands, q.nodes_nm[:, [j]], np.ones((1, 1)))
+        event, one_sampling = exposure_for(scene, one)
         image = np.asarray(
-            cp.expected(scene, instrument, exposure_for(scene, one)).star_leakage
+            cp.expected(scene, instrument, event, sampling=one_sampling).star_leakage
         )
         images.append(image / image.max())
     assert np.max(np.abs(images[0] - images[1])) > 1e-5
@@ -1303,18 +1362,26 @@ def test_each_observing_band_uses_a_child_covering_both_edges(gaussian_observati
 
     partial = IntegratedGaussianCoronagraph(Band(510, 545), True, throughput=0.1)
     wide = IntegratedGaussianCoronagraph(Band(515, 580), True, throughput=0.7)
-    scene, path, _ = gaussian_observation(coro=MultiBandCoronagraph((partial, wide)))
+    scene, path, _, _ = gaussian_observation(coro=MultiBandCoronagraph((partial, wide)))
     bands = (Band(520, 560), Band(524, 532))
-    exposure = cp.build_exposure(scene, path, bands, time_d=0.0, order=2, field_lod=0.0)
-    photons = cp.photon_rates(scene, path, exposure)
+    exposure = cp.build_exposure(
+        bands, epoch=scene.epoch, instrument="imager", time_d=0.0
+    )
+    sampling = cp.build_sampling(path, exposure, order=2, field_lod=0.0, scene=scene)
+    photons = cp.photon_rates(scene, path, exposure, sampling=sampling)
     east, north = np.asarray(scene.positions(np.array([0.0])))[:, 0, 0]
     for i, (band, throughput) in enumerate(zip(bands, (0.7, 0.1), strict=True)):
         lod = float(wide.frame.lod_to_arcsec(band.center_nm))
         pixels = gaussian_pixels(
-            path.detector, wide.frame, band.center_nm, -east / lod, north / lod, 0.35
+            path.instruments[0].detector,
+            wide.frame,
+            band.center_nm,
+            -east / lod,
+            north / lod,
+            0.35,
         )
-        real = np.asarray(exposure.quadrature.active[i])
-        waves = np.asarray(exposure.quadrature.nodes_nm[i])[real]
+        real = np.asarray(sampling.quadrature.active[i])
+        waves = np.asarray(sampling.quadrature.nodes_nm[i])[real]
         gain = 20 * (0.4 + 0.004 * (waves - 500))
         density = (1e6 * 1e-7 * throughput * gain[:, None, None]) * pixels
         np.testing.assert_allclose(
@@ -1338,17 +1405,19 @@ def test_integer_nodes_keep_the_fractional_band_centre(gaussian_observation):
 
     import coronagraphoto as cp
 
-    scene, instrument, _ = gaussian_observation()
+    scene, instrument, _, _ = gaussian_observation()
     band = Band(520, 561)
-    images = [
-        np.asarray(
-            cp.photon_rates(
-                scene,
-                instrument,
-                exposure_for(scene, Quadrature((band,), nodes, [[20.5, 20.5]])),
-            ).star_leakage
+
+    def star(nodes):
+        event, sampling = exposure_for(
+            scene, Quadrature((band,), nodes, [[20.5, 20.5]])
         )
-        for nodes in (np.array([[530, 551]]), np.array([[530.0, 551.0]]))
+        return np.asarray(
+            cp.photon_rates(scene, instrument, event, sampling=sampling).star_leakage
+        )
+
+    images = [
+        star(nodes) for nodes in (np.array([[530, 551]]), np.array([[530.0, 551.0]]))
     ]
     np.testing.assert_allclose(
         images[0], images[1], atol=1e-12 * images[1].max(), rtol=0
@@ -1361,25 +1430,28 @@ def planned_observation():
     scene = make_system(smooth_planet=True)
     instrument = make_path(n=8, step=0.5)
     exposure = cp.build_exposure(
-        scene,
-        instrument,
         (Band(540.0, 560.0),),
+        epoch=scene.epoch,
+        instrument="imager",
         time_d=0.0,
         roll_deg=17.0,
         plan=FramePlan(10.0, 1.0),
-        order=1,
-        field_lod=0.0,
     )
-    return scene, instrument, exposure
+    sampling = cp.build_sampling(
+        instrument, exposure, order=1, field_lod=0.0, scene=scene
+    )
+    return scene, instrument, exposure, sampling
 
 
-def test_observe_data_matches_observe(planned_observation):
+def test_observe_is_the_detector_draw_of_the_expected_electrons(planned_observation):
     """The same key and detector draw give bitwise identical electrons."""
-    scene, instrument, exposure = planned_observation
+    scene, instrument, exposure, sampling = planned_observation
     key = jax.random.key(0)
-    result = cp.observe_data(key, scene, instrument, exposure)
-    legacy = cp.observe(key, scene, instrument, exposure)
-    actual, expected = np.asarray(result.image.data), np.asarray(legacy.data)
+    result = cp.observe(key, scene, instrument, exposure, sampling=sampling)
+    rates = cp.expected(scene, instrument, exposure, sampling=sampling)
+    detector = instrument.instruments[0].detector
+    draw = eqx.filter_jit(detector.draw)(key, rates, exposure.plan)
+    actual, expected = np.asarray(result.image.data), np.asarray(draw)
     assert actual.shape == expected.shape
     assert actual.dtype == expected.dtype
     assert actual.tobytes() == expected.tobytes()
@@ -1387,22 +1459,32 @@ def test_observe_data_matches_observe(planned_observation):
     assert result.image.grid.orientation is None
     assert result.image.leading_axes == ("band",)
     assert result.image.quantity == "electrons"
-    assert result.image.measure == legacy.measure
+    assert result.image.measure == Measure.integral()
     assert result.variance is None
     assert result.flags is None
     np.testing.assert_array_equal(result.valid, np.ones(actual.shape, dtype=bool))
     with pytest.raises(ValueError, match="FramePlan"):
-        cp.observe_data(key, scene, instrument, replace(exposure, plan=None))
+        cp.observe(
+            key, scene, instrument, replace(exposure, plan=None), sampling=sampling
+        )
     with pytest.raises(NotImplementedError, match="offset_mas=None"):
         pointing = Pointing(exposure.pointing.roll_deg, [0.0, 0.0])
-        cp.observe_data(key, scene, instrument, replace(exposure, pointing=pointing))
+        cp.observe(
+            key,
+            scene,
+            instrument,
+            replace(exposure, pointing=pointing),
+            sampling=sampling,
+        )
 
 
-def test_observe_data_draw_stack_keeps_one_exposure(planned_observation):
+def test_observe_draw_stack_keeps_one_exposure(planned_observation):
     """Three draws have a draw axis and exactly the original unbatched exposure."""
-    scene, instrument, exposure = planned_observation
+    scene, instrument, exposure, sampling = planned_observation
     keys = jax.random.split(jax.random.key(1), 3)
-    draws = [cp.observe_data(key, scene, instrument, exposure) for key in keys]
+    draws = [
+        cp.observe(key, scene, instrument, exposure, sampling=sampling) for key in keys
+    ]
     stacked = stack_exposure_data(draws, axis="draw")
     assert stacked.exposure is exposure
     assert stacked.image.leading_axes == ("draw", "band")

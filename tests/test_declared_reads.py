@@ -1,20 +1,27 @@
-"""The exposure reads only static knots; the aperture record declares what it reads.
+"""The sampling reads only static knots; the aperture record declares what it reads.
 
-The exposure reads the static knot grids of the scene's tables and caches no
-value, so it declares no reads and moving any floating scene leaf leaves it
-unchanged; the record also holds the star's node-effective flux and names the
-scene paths it holds fixed.
+The sampling reads the static knot grids of the scene's tables and caches no
+value, so moving any floating scene leaf leaves it unchanged; it names the
+frozen node rule and the tabulated scene tables it reduced in ``reads``. The
+aperture record also holds the star's node-effective flux and names the scene
+paths it holds fixed.
 """
-
-from dataclasses import replace
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import PlateauCoronagraph, make_path, make_system, with_zodi
+from conftest import (
+    PlateauCoronagraph,
+    make_path,
+    make_system,
+    with_instrument,
+    with_zodi,
+)
 from hwoutils.model_paths import paths_overlap
+from hwoutils.provenance import StampMismatchError
+from optixstuff.sampling import SpectralSampling
 from optixstuff.spectral import Band, Quadrature
 from skyscapes import LeinertZodi, PrecomputedZodi
 from skyscapes.scene import Scene, Star
@@ -26,7 +33,9 @@ _BANDS = (Band(500.0, 600.0),)
 
 def _instrument():
     path = make_path(detector_n=24, detector_step=0.3)
-    return eqx.tree_at(lambda p: p.coronagraph, path, PlateauCoronagraph(24, 0.25))
+    return eqx.tree_at(
+        lambda p: p.instruments[0].coronagraph, path, PlateauCoronagraph(24, 0.25)
+    )
 
 
 def _dotted(key_path):
@@ -89,31 +98,38 @@ def _bitwise_equal(a, b):
 
 
 @pytest.mark.parametrize("zodi", _ZODIS.values(), ids=_ZODIS.keys())
-def test_exposure_of_a_round_trip_scene_equals_the_live_exposure(zodi):
+def test_sampling_of_a_round_trip_scene_equals_the_live_sampling(zodi):
     """Fails if the build reads anything the batch round trip changes.
 
     The scene goes through ``Scene.from_scenes`` and ``to_scenes`` (which
-    return JAX leaves) and both are built into an exposure on the same
-    instrument and bands. The two exposures must have one tree structure (the
+    return JAX leaves) and both are built into a sampling on the same
+    instrument and bands. The two samplings must have one tree structure (the
     static knots and resolution keys included) and bitwise equal leaves of
     equal dtype: the same inputs go through the same host build, so there is no
-    tolerance, and the exposure declares no reads. Then every floating leaf of
-    the scene is moved in turn and the exposure rebuilt: the build must accept
-    the moved scene and return an exposure bitwise equal to the first, which is
-    the evidence that the exposure needs no reads.
+    tolerance, and the declared reads are the same. Then every floating leaf of
+    the scene is moved in turn and the sampling rebuilt: the build must accept
+    the moved scene and return a sampling bitwise equal to the first, which is
+    the evidence that the sampling reads only static knots.
     """
     scene = _tabulated_scene(None)
     (round_trip,) = Scene.from_scenes([scene]).to_scenes()
     if zodi is not None:  # a batch holds no local zodi; it is put back after
         scene, round_trip = with_zodi(scene, zodi), with_zodi(round_trip, zodi)
     instrument = _instrument()
-    live = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0)
-    other = cp.build_exposure(round_trip, instrument, _BANDS, time_d=0.0)
-    assert not hasattr(live, "reads")
-    assert _bitwise_equal(live, other)
+    live = cp.build_exposure(_BANDS, epoch=scene.epoch, instrument="imager", time_d=0.0)
+    live_sampling = cp.build_sampling(instrument, live, scene=scene)
+    other = cp.build_exposure(
+        _BANDS, epoch=round_trip.epoch, instrument="imager", time_d=0.0
+    )
+    other_sampling = cp.build_sampling(instrument, other, scene=round_trip)
+    assert live_sampling.reads == other_sampling.reads
+    assert _bitwise_equal(live_sampling, other_sampling)
     for path, moved in _floating_leaves(scene):
-        rebuilt = cp.build_exposure(moved, instrument, _BANDS, time_d=0.0)
-        assert _bitwise_equal(live, rebuilt), path
+        rebuilt = cp.build_exposure(
+            _BANDS, epoch=moved.epoch, instrument="imager", time_d=0.0
+        )
+        rebuilt_sampling = cp.build_sampling(instrument, rebuilt, scene=moved)
+        assert _bitwise_equal(live_sampling, rebuilt_sampling), path
 
 
 @pytest.mark.parametrize(
@@ -121,8 +137,8 @@ def test_exposure_of_a_round_trip_scene_equals_the_live_exposure(zodi):
     [np.asarray(12.5), np.float64(12.5)],
     ids=["ndarray", "np.float64"],
 )
-def test_a_numpy_leaf_is_refused_by_the_build_with_its_path(value):
-    """Fails if a NumPy leaf put into a scene by ``tree_at`` reaches the build.
+def test_a_numpy_leaf_is_refused_by_the_sampling_build_with_its_path(value):
+    """Fails if a NumPy leaf put into a scene by ``tree_at`` reaches the sampling build.
 
     ``eqx.tree_at`` bypasses the field converters, so a NumPy value can stand
     in a scene whose constructors never produced one. The build must raise
@@ -132,10 +148,13 @@ def test_a_numpy_leaf_is_refused_by_the_build_with_its_path(value):
     """
     scene = _tabulated_scene(None)
     instrument = _instrument()
-    cp.build_exposure(scene, instrument, _BANDS, time_d=0.0)
+    exposure = cp.build_exposure(
+        _BANDS, epoch=scene.epoch, instrument="imager", time_d=0.0
+    )
+    cp.build_sampling(instrument, exposure, scene=scene)
     broken = eqx.tree_at(lambda s: s.dynamics.frame.dist_pc, scene, value)
     with pytest.raises(TypeError, match=r"\.dynamics\.frame\.dist_pc"):
-        cp.build_exposure(broken, instrument, _BANDS, time_d=0.0)
+        cp.build_sampling(instrument, exposure, scene=broken)
 
 
 class _UserBox(eqx.Module):
@@ -147,7 +166,7 @@ class _UserBox(eqx.Module):
 def test_a_numpy_leaf_in_a_user_module_is_refused_at_every_entry_with_its_path():
     """Fails if a NumPy leaf inside a user's Module nested in the scene gets through.
 
-    The user Module is put into the scene by ``tree_at``. ``build_exposure``,
+    The user Module is put into the scene by ``tree_at``. ``build_sampling``,
     ``photon_rates`` and ``expected`` must raise ``TypeError`` naming the path
     through the user Module (the walk enters it, as ``require_tree`` does), and
     ``expected`` under ``jit`` must run on the unchanged scene, where every leaf is
@@ -155,44 +174,62 @@ def test_a_numpy_leaf_in_a_user_module_is_refused_at_every_entry_with_its_path()
     """
     scene = _tabulated_scene(None, smooth_planet=True)
     instrument = _instrument()
-    exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0)
+    exposure = cp.build_exposure(
+        _BANDS, epoch=scene.epoch, instrument="imager", time_d=0.0
+    )
+    sampling = cp.build_sampling(instrument, exposure, scene=scene)
     broken = eqx.tree_at(
         lambda s: s.dynamics.frame.dist_pc, scene, _UserBox(np.asarray(12.5))
     )
     match = r"\.dynamics\.frame\.dist_pc.*\.inner"
     with pytest.raises(TypeError, match=match):
-        cp.build_exposure(broken, instrument, _BANDS, time_d=0.0)
+        cp.build_sampling(instrument, exposure, scene=broken)
     with pytest.raises(TypeError, match=match):
-        cp.photon_rates(broken, instrument, exposure)
+        cp.photon_rates(broken, instrument, exposure, sampling=sampling)
     with pytest.raises(TypeError, match=match):
-        cp.expected(broken, instrument, exposure)
-    rates = jax.jit(lambda sc: cp.expected(sc, instrument, exposure))(scene)
+        cp.expected(broken, instrument, exposure, sampling=sampling)
+    rates = jax.jit(
+        lambda sc: cp.expected(sc, instrument, exposure, sampling=sampling)
+    )(scene)
     assert np.all(np.isfinite(np.asarray(rates.star_leakage)))
 
 
-def test_replacing_a_stars_knots_leaves_the_old_exposure_without_an_operator():
-    """Fails if an exposure built for one knot grid is accepted for another.
+def test_replacing_a_stars_knots_leaves_the_old_sampling_refused():
+    """Fails if a sampling built for one knot grid is accepted for another.
 
     The star is replaced by one whose static ``Knots`` has the same length and
     another last knot, on a scene whose planet has no table (so the star's is the
     only operator and no other refusal can stand in for it). Every leaf shape is
     unchanged and only the digest differs. The exposure built before the change
-    must refuse the new scene (``LookupError``: no operator for the new digest)
-    in ``photon_rates``, and the exposure built after the change must render it.
-    The truth is the presence of an operator for the digest, so there is no tolerance.
+    must refuse the new scene (``StampMismatchError``: the sampling's stamp holds
+    the old scene layout) in ``photon_rates``, and the sampling built after the
+    change must render it. The truth is the presence of the layout stamp, so
+    there is no tolerance.
     """
     scene = _tabulated_scene(None, smooth_planet=True)
     instrument = _instrument()
-    exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0)
+    exposure = cp.build_exposure(
+        _BANDS, epoch=scene.epoch, instrument="imager", time_d=0.0
+    )
+    sampling = cp.build_sampling(instrument, exposure, scene=scene)
     moved = eqx.tree_at(
         lambda s: s.star, scene, _tabulated_scene(None, 710.0, smooth_planet=True).star
     )
     assert moved.star.knots.digest != scene.star.knots.digest
-    with pytest.raises(LookupError):
-        cp.photon_rates(moved, instrument, exposure)
-    fresh = cp.build_exposure(moved, instrument, _BANDS, time_d=0.0)
+    with pytest.raises(StampMismatchError):
+        cp.photon_rates(moved, instrument, exposure, sampling=sampling)
+    fresh = cp.build_exposure(
+        _BANDS, epoch=moved.epoch, instrument="imager", time_d=0.0
+    )
+    fresh_sampling = cp.build_sampling(instrument, fresh, scene=moved)
     assert np.all(
-        np.isfinite(np.asarray(cp.photon_rates(moved, instrument, fresh).star_leakage))
+        np.isfinite(
+            np.asarray(
+                cp.photon_rates(
+                    moved, instrument, fresh, sampling=fresh_sampling
+                ).star_leakage
+            )
+        )
     )
 
 
@@ -241,16 +278,17 @@ def test_a_calibration_band_beyond_the_other_tables_is_resolved_for_the_star_onl
     """
     scene = _bolometric_scene()
     exposure = cp.build_exposure(
-        scene, _instrument(), (Band(610.0, 690.0),), time_d=0.0
+        (Band(610.0, 690.0),), epoch=scene.epoch, instrument="imager", time_d=0.0
     )
+    sampling = cp.build_sampling(_instrument(), exposure, scene=scene)
     (v_band,) = scene.calibration_bands()
     v_rule = Quadrature.build((v_band,))
     star, planet = scene.spectral_tables()
-    assert exposure.resolution.rule(v_rule, star).kind in ("table", "identity")
+    assert sampling.resolution.rule(v_rule, star).kind in ("table", "identity")
     with pytest.raises(LookupError):
-        exposure.resolution.rule(v_rule, planet)
+        sampling.resolution.rule(v_rule, planet)
     # The disk then renders: its level reads the calibration the sources hold.
-    rates = cp.photon_rates(scene, _instrument(), exposure)
+    rates = cp.photon_rates(scene, _instrument(), exposure, sampling=sampling)
     assert np.all(np.isfinite(np.asarray(rates.exozodi)))
     assert float(jnp.sum(rates.exozodi)) > 0
 
@@ -273,10 +311,13 @@ def test_aperture_record_declares_exactly_what_it_reads(zodi, host):
     if zodi is not None:
         scene = with_zodi(scene, zodi)
     instrument = _instrument()
-    exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0)
+    exposure = cp.build_exposure(
+        _BANDS, epoch=scene.epoch, instrument="imager", time_d=0.0
+    )
+    sampling = cp.build_sampling(instrument, exposure, scene=scene)
     response = cp.aperture_response(
         instrument,
-        exposure.quadrature,
+        sampling.quadrature,
         n_separations=3,
         n_angles=3,
         max_separation_arcsec=0.04,
@@ -287,8 +328,12 @@ def test_aperture_record_declares_exactly_what_it_reads(zodi, host):
         for path, moved in _floating_leaves(scene)
         if _changed(base, cp.aperture_record(moved, instrument, exposure, response))
     ]
-    assert len(jax.tree.leaves(base)) == len(jax.tree.leaves(replace(base, reads=())))
-    assert jax.tree.structure(base) != jax.tree.structure(replace(base, reads=()))
+    assert len(jax.tree.leaves(base)) == len(
+        jax.tree.leaves(with_instrument(base, reads=()))
+    )
+    assert jax.tree.structure(base) != jax.tree.structure(
+        with_instrument(base, reads=())
+    )
     declared = base.reads
     assert sensitive, "the scene should have at least one leaf the record reads"
     for path in sensitive:
@@ -306,4 +351,65 @@ def test_aperture_record_declares_exactly_what_it_reads(zodi, host):
         "star",
         "dynamics.frame",
         *(() if zodi is None else ("local_zodi",)),
+    )
+
+
+def test_sampling_reads_follow_the_tables_the_build_reduced():
+    """Fails if ``reads`` names a path the build did not freeze, or misses one.
+
+    Three samplings: a smooth spectrum (no operator, so nothing frozen and no
+    reads), a tabulated star (the frozen node rule and the star's table are
+    declared) and a hand-built sampling with a non-empty resolution (the
+    caller's tuple stands). The truth is the set of paths the build reduced,
+    so the comparison is exact.
+    """
+    instrument = _instrument()
+    smooth = make_system(smooth_planet=True)
+    smooth_event = cp.build_exposure(
+        _BANDS, epoch=smooth.epoch, instrument="imager", time_d=0.0
+    )
+    smooth_sampling = cp.build_sampling(instrument, smooth_event, scene=smooth)
+    assert not smooth_sampling.resolution.keys
+    assert smooth_sampling.reads == ()
+
+    tabulated = _tabulated_scene(None, smooth_planet=True)
+    event = cp.build_exposure(
+        _BANDS, epoch=tabulated.epoch, instrument="imager", time_d=0.0
+    )
+    sampling = cp.build_sampling(instrument, event, scene=tabulated)
+    assert sampling.resolution.keys
+    assert "sampling.quadrature.nodes_nm" in sampling.reads
+    assert "sampling.quadrature.weights_nm" in sampling.reads
+    assert "scene.star" in sampling.reads
+    assert not any(r.startswith("scene.dynamics") for r in sampling.reads)
+
+    mine = ("sampling.quadrature.nodes_nm",)
+    by_hand = SpectralSampling(
+        sampling.quadrature,
+        sampling.resolution,
+        reads=mine,
+        built_at=sampling.built_at,
+    )
+    assert by_hand.reads == mine
+
+
+def test_sampling_builds_without_a_scene():
+    """Fails if a sampling needs a scene, or writes scene stamps or reads without one.
+
+    A scene-less sampling holds no resolution, declares no reads and carries no
+    scene layout stamp, and its nodes equal those of the same event built with a
+    smooth scene.
+    """
+    instrument = _instrument()
+    smooth = make_system(smooth_planet=True)
+    event = cp.build_exposure(
+        _BANDS, epoch=smooth.epoch, instrument="imager", time_d=0.0
+    )
+    bare = cp.build_sampling(instrument, event)
+    assert not bare.resolution.keys
+    assert bare.reads == ()
+    assert "scene_layout" not in dict(bare.built_at)
+    with_scene = cp.build_sampling(instrument, event, scene=smooth)
+    np.testing.assert_array_equal(
+        bare.quadrature.nodes_nm, with_scene.quadrature.nodes_nm
     )

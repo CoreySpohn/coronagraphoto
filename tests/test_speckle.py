@@ -7,7 +7,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import centroid, exposure_for, make_path, make_system
+from conftest import (
+    centroid,
+    exposure_for,
+    make_path,
+    make_system,
+    with_instrument,
+)
 from hwoutils.constants import s2d
 from hwoutils.epoch import Epoch
 from hwoutils.numerics import roundoff
@@ -35,6 +41,7 @@ class Halo(AbstractSpeckleField):
         static=True,
         default=PixelGrid.focal(8, 0.5, Frame(550.0, 6.0, "circumscribed")),
     )
+    epoch: Epoch = eqx.field(static=True, default=Epoch(2451545.0))
     epoch_d: float = eqx.field(static=True, converter=float, default=3.0)
     level: float = 1.5
 
@@ -78,17 +85,21 @@ def test_speckle_leakage_day_clock():
     system = make_system(
         star=Star(wavelengths_nm=wave, times_d=times, flux_density_jy=flux)
     )
-    q = Quadrature.build((Band(549.5, 550.5),), system, path, Halo(), order=1)
+    q = Quadrature.build(
+        (Band(549.5, 550.5),), system, path.select("imager"), Halo(), order=1
+    )
     scene = system
 
     def rates(scene, path, time_d, roll_deg=0, speckle=None):
         if speckle is not None:
             path = eqx.tree_at(
-                lambda p: p.speckle, path, speckle, is_leaf=lambda v: v is None
+                lambda p: p.instruments[0].speckle,
+                path,
+                speckle,
+                is_leaf=lambda v: v is None,
             )
-        return photon_rates(
-            scene, path, exposure_for(scene, q, time_d=time_d, roll_deg=roll_deg)
-        )
+        event, sampling = exposure_for(scene, q, time_d=time_d, roll_deg=roll_deg)
+        return photon_rates(scene, path, event, sampling=sampling)
 
     def band_mean(star, time):
         """The star's mean over the one nm band: eight Gauss points of its own read."""
@@ -108,7 +119,9 @@ def test_speckle_leakage_day_clock():
         snapshots.append(first)
         if factor > 0:
             grid = PixelGrid.regular(
-                path.detector.shape, float(path.detector.pixel_scale_arcsec), "arcsec"
+                path.instruments[0].detector.shape,
+                float(path.instruments[0].detector.pixel_scale_arcsec),
+                "arcsec",
             )
             np.testing.assert_allclose(
                 centroid(excess(first, base)[0, 0], grid),
@@ -125,16 +138,16 @@ def test_speckle_leakage_day_clock():
         )
         np.testing.assert_array_equal(first.star_leakage, rolled.star_leakage)
 
-        # Same physical epoch: shift orbit, stellar samples and speckle clock.
+        # Same physical instant: the scene epoch and its samples move by the
+        # shift, the event is stated on the shifted epoch, and the halo, which
+        # is hardware, keeps its own clock.
         shift = 2.25
         shifted = make_system(
             star=Star(wavelengths_nm=wave, times_d=times - shift, flux_density_jy=flux),
             epoch=Epoch(2451547.0, 0.25),
             epoch_d=-shift,
         )
-        same_date = rates(
-            shifted, path, time - shift, speckle=Halo(epoch_d=3.0 - shift)
-        )
+        same_date = rates(shifted, path, time - shift, speckle=Halo())
         for a, b in zip(
             jax.tree.leaves(first), jax.tree.leaves(same_date), strict=True
         ):
@@ -181,11 +194,17 @@ def test_render_converts_scene_time_once_and_refuses_x32(precision):
     def render(time_d, speckle):
         path = make_path(detector_n=16)
         path = eqx.tree_at(
-            lambda p: p.speckle, path, speckle, is_leaf=lambda v: v is None
+            lambda p: p.instruments[0].speckle,
+            path,
+            speckle,
+            is_leaf=lambda v: v is None,
         )
         system = make_system()
-        q = Quadrature.build((Band(549.5, 550.5),), system, path, speckle, order=1)
-        return photon_rates(system, path, exposure_for(system, q, time_d=time_d))
+        q = Quadrature.build(
+            (Band(549.5, 550.5),), system, path.select("imager"), speckle, order=1
+        )
+        event, sampling = exposure_for(system, q, time_d=time_d)
+        return photon_rates(system, path, event, sampling=sampling)
 
     zero = render(t_s * s2d, Halo(epoch_d=0.0))
     if precision == np.float64:
@@ -196,6 +215,47 @@ def test_render_converts_scene_time_once_and_refuses_x32(precision):
     else:
         with pytest.raises(PrecisionError, match="epoch_d"):
             render(2.0 + t_s * s2d, Halo(epoch_d=2.0))
+
+
+def test_speckle_clock_is_the_hardware_clock_and_ignores_the_scene_epoch(precision):
+    """Fails if the speckle field is fed the scene-epoch time.
+
+    One non-constant halo (epoch ``E``) sits on one observatory. Two scenes
+    differ only in their epoch (``E`` and ``E`` plus 10 d) and are rendered at
+    one physical instant: one event stated on ``E``. Under x64 the stellar
+    leakage, which carries the halo, is equal pixel for pixel, because the halo
+    reads the event on its own epoch whatever the scene epoch is; and each
+    planet sits where its own scene puts it at the scene's time (the shifted
+    scene at the event equals the unshifted one 10 d earlier, and differs from
+    the unshifted one at the event). A render that feeds the halo the scene's
+    translation of the time changes the halo phase and fails the equality. Under
+    x32 the unshifted scene renders and the shifted one raises
+    ``PrecisionError``, because a binary32 time cannot be moved between epochs.
+    """
+    hardware = Epoch(2451545.0)
+    halo = Halo(epoch_d=0.0)
+    path = with_instrument(make_path(detector_n=16), speckle=halo)
+    unshifted = make_system(separation_arcsec=0.02)
+    shifted = make_system(separation_arcsec=0.02, epoch=Epoch(2451555.0))
+
+    def render(scene, time_d):
+        q = Quadrature.build(
+            (Band(549.5, 550.5),), scene, path.select("imager"), halo, order=1
+        )
+        event, sampling = exposure_for(scene, q, time_d=time_d, epoch=hardware)
+        return photon_rates(scene, path, event, sampling=sampling)
+
+    here = render(unshifted, 3.5)
+    if precision != np.float64:
+        with pytest.raises(PrecisionError):
+            render(shifted, 3.5)
+        return
+    there = render(shifted, 3.5)
+    np.testing.assert_array_equal(there.star_leakage, here.star_leakage)
+    earlier = render(unshifted, 3.5 - 10.0)
+    np.testing.assert_allclose(there.planet, earlier.planet, rtol=1e-12, atol=0)
+    assert not np.allclose(there.planet, here.planet, rtol=1e-3, atol=0)
+    assert np.any(np.asarray(there.planet) > 0)
 
 
 class Patch(AbstractSpeckleField):
@@ -209,6 +269,7 @@ class Patch(AbstractSpeckleField):
     grid: PixelGrid = eqx.field(static=True)
     reconstruction: str = eqx.field(static=True)
     data: jax.Array
+    epoch: Epoch = eqx.field(static=True, default=Epoch(2451545.0))
     epoch_d: float = eqx.field(static=True, converter=float, default=0.0)
 
     def spectral_breaks_nm(self):
@@ -260,19 +321,28 @@ def _setup(pixel_cells, *, plan=None):
     path = make_path(n=72, step=0.25, detector_n=detector_n, detector_step=pixel_lod)
     scene = make_system()
     exposure = cp.build_exposure(
-        scene, path, (Band(549.5, 550.5),), time_d=0.0, order=1, plan=plan
+        (Band(549.5, 550.5),),
+        epoch=scene.epoch,
+        instrument="imager",
+        time_d=0.0,
+        plan=plan,
     )
-    assert np.asarray(exposure.quadrature.nodes_nm).size == 2
-    return scene, path, exposure
+    sampling = cp.build_sampling(path, exposure, order=1, scene=scene)
+    assert np.asarray(sampling.quadrature.nodes_nm).size == 2
+    return scene, path, exposure, sampling
 
 
 def _with(path, field):
-    return eqx.tree_at(lambda p: p.speckle, path, field, is_leaf=lambda v: v is None)
+    return eqx.tree_at(
+        lambda p: p.instruments[0].speckle, path, field, is_leaf=lambda v: v is None
+    )
 
 
 def _field_coverage(field, path, nodes):
     """``coverage`` of the field's grid at every node, ANDed, from primitives."""
-    detector = replace(path.detector.grid, orientation=SkyOrientation(0.0))
+    detector = replace(
+        path.instruments[0].detector.grid, orientation=SkyOrientation(0.0)
+    )
     covered = np.ones(detector.shape, bool)
     for w in nodes:
         source = replace(field.grid.to_arcsec(w), orientation=detector.orientation)
@@ -294,8 +364,8 @@ def _beyond_grown_footprint(field, path, nodes):
     each is largest, the margin as the read takes it (the sampling margin, or
     ``max(m, (k - 1/2) g - 1/2)`` cells when a pixel of g cells deposits).
     """
-    detector = path.detector.grid
-    pixel = float(path.detector.pixel_scale_arcsec)
+    detector = path.instruments[0].detector.grid
+    pixel = float(path.instruments[0].detector.pixel_scale_arcsec)
     n, cell_lod = field.grid.shape[0], float(field.grid.step)
     reach = 0.0
     for w in nodes:
@@ -347,11 +417,17 @@ def test_static_support_and_the_static_light_beyond_the_field(
     """
     n, cell_lod, _, _ = _GEOMETRY[pixel_cells]
     field = _patch(n, cell_lod, reconstruction)
-    scene, path, exposure = _setup(pixel_cells)
-    nodes = np.asarray(exposure.quadrature.nodes_nm).ravel()
-    alone = cp.expected(scene, path, exposure)
-    default = cp.expected(scene, _with(path, field), exposure)
-    kept = cp.expected(scene, _with(path, field), exposure, static_beyond_speckle=True)
+    scene, path, exposure, sampling = _setup(pixel_cells)
+    nodes = np.asarray(sampling.quadrature.nodes_nm).ravel()
+    alone = cp.expected(scene, path, exposure, sampling=sampling)
+    default = cp.expected(scene, _with(path, field), exposure, sampling=sampling)
+    kept = cp.expected(
+        scene,
+        _with(path, field),
+        exposure,
+        static_beyond_speckle=True,
+        sampling=sampling,
+    )
 
     static = np.asarray(alone.supported)[0]
     assert static.all(), "the static table must cover the detector"
@@ -395,12 +471,18 @@ def test_cropped_field_matches_the_wide_field_where_supported(
     order only).
     """
     n, cell_lod, _, _ = _GEOMETRY[pixel_cells]
-    scene, path, exposure = _setup(pixel_cells)
+    scene, path, exposure, sampling = _setup(pixel_cells)
     wide = cp.expected(
-        scene, _with(path, _patch(2 * n, cell_lod, reconstruction)), exposure
+        scene,
+        _with(path, _patch(2 * n, cell_lod, reconstruction)),
+        exposure,
+        sampling=sampling,
     )
     crop = cp.expected(
-        scene, _with(path, _patch(2 * n, cell_lod, reconstruction, crop=n)), exposure
+        scene,
+        _with(path, _patch(2 * n, cell_lod, reconstruction, crop=n)),
+        exposure,
+        sampling=sampling,
     )
     supported = np.asarray(crop.supported)[0]
     assert supported.any() and not supported.all()
@@ -429,14 +511,17 @@ def test_observe_draws_the_default_render_beyond_the_field():
     summation order).
     """
     plan = FramePlan(frame_time_s=10.0, n_frames=3.0)
-    scene, path, exposure = _setup(2.5, plan=plan)
+    scene, path, exposure, sampling = _setup(2.5, plan=plan)
     path = _with(path, _patch(16, 0.25, "linear"))
     key = jax.random.PRNGKey(0)
-    frame = cp.observe(key, scene, path, exposure)
-    default = cp.expected(scene, path, exposure)
-    kept = cp.expected(scene, path, exposure, static_beyond_speckle=True)
+    frame = cp.observe(key, scene, path, exposure, sampling=sampling)
+    default = cp.expected(scene, path, exposure, sampling=sampling)
+    kept = cp.expected(
+        scene, path, exposure, static_beyond_speckle=True, sampling=sampling
+    )
     np.testing.assert_array_equal(
-        frame.data, eqx.filter_jit(path.detector.draw)(key, default, plan)
+        frame.image.data,
+        eqx.filter_jit(path.instruments[0].detector.draw)(key, default, plan),
     )
     off = ~np.asarray(default.supported)
     assert off.any()
@@ -445,14 +530,18 @@ def test_observe_draws_the_default_render_beyond_the_field():
     )
     assert np.any(np.asarray(kept.total())[off] != np.asarray(default.total())[off])
     for flag in (np.True_, jnp.bool_(True)):
-        again = cp.expected(scene, path, exposure, static_beyond_speckle=flag)
+        again = cp.expected(
+            scene, path, exposure, static_beyond_speckle=flag, sampling=sampling
+        )
         np.testing.assert_array_equal(again.star_leakage, kept.star_leakage)
     # The spectral route keeps the same light under the same flags.
-    photons = cp.photon_rates(scene, path, exposure, static_beyond_speckle=True)
+    photons = cp.photon_rates(
+        scene, path, exposure, static_beyond_speckle=True, sampling=sampling
+    )
     np.testing.assert_array_equal(photons.supported, kept.supported)
     np.testing.assert_array_equal(photons.static_supported, kept.static_supported)
     np.testing.assert_allclose(
-        path.detector.electrons(photons).star_leakage,
+        path.instruments[0].detector.electrons(photons).star_leakage,
         kept.star_leakage,
         rtol=1e-12,
         atol=0,
@@ -493,13 +582,21 @@ def test_masked_field_support_ends_at_its_data():
     x, y = (np.asarray(c) for c in plain.grid.coordinates())
     mask = (x < 0.1) & (y < 0.9)
     field = MaskedPatch(plain.grid, "linear", plain.data, mask=jnp.asarray(mask))
-    scene, path, exposure = _setup(2.5)
-    nodes = np.asarray(exposure.quadrature.nodes_nm).ravel()
-    alone = cp.expected(scene, path, exposure)
-    default = cp.expected(scene, _with(path, field), exposure)
-    kept = cp.expected(scene, _with(path, field), exposure, static_beyond_speckle=True)
+    scene, path, exposure, sampling = _setup(2.5)
+    nodes = np.asarray(sampling.quadrature.nodes_nm).ravel()
+    alone = cp.expected(scene, path, exposure, sampling=sampling)
+    default = cp.expected(scene, _with(path, field), exposure, sampling=sampling)
+    kept = cp.expected(
+        scene,
+        _with(path, field),
+        exposure,
+        static_beyond_speckle=True,
+        sampling=sampling,
+    )
 
-    detector = replace(path.detector.grid, orientation=SkyOrientation(0.0))
+    detector = replace(
+        path.instruments[0].detector.grid, orientation=SkyOrientation(0.0)
+    )
 
     def covered(valid):
         out = np.ones(detector.shape, bool)
@@ -556,20 +653,22 @@ def test_band_product_preserves_node_wavelength_for_speckles(gaussian_observatio
     operations at the leakage scale before subtraction, covering the
     coordinate transforms, resampling and spectral products.
     """
-    scene, path, exposure = gaussian_observation()
+    scene, path, exposure, sampling = gaussian_observation()
     frame = Frame(600, 6, "circumscribed")
     grid = PixelGrid.focal(24, 0.6, frame)
     x, _ = grid.coordinates()
     ramp = ChromaticRamp(grid, "linear", 1e-8 * (1 + 0.1 * x) * grid.pixel_area)
-    base = cp.photon_rates(scene, path, exposure)
-    result = cp.photon_rates(scene, replace(path, speckle=ramp), exposure)
+    base = cp.photon_rates(scene, path, exposure, sampling=sampling)
+    result = cp.photon_rates(
+        scene, with_instrument(path, speckle=ramp), exposure, sampling=sampling
+    )
     assert np.all(result.supported)
     excess = np.asarray(result.star_leakage - base.star_leakage)[0]
-    for got, wave in zip(excess, exposure.quadrature.nodes_nm[0], strict=True):
-        pitch = float(path.detector.pixel_scale_arcsec) / float(
+    for got, wave in zip(excess, sampling.quadrature.nodes_nm[0], strict=True):
+        pitch = float(path.instruments[0].detector.pixel_scale_arcsec) / float(
             frame.lod_to_arcsec(wave)
         )
-        nx = path.detector.shape[1]
+        nx = path.instruments[0].detector.shape[1]
         centers = (np.arange(nx) - (nx - 1) / 2) * pitch
         gain = 20 * (0.4 + 0.004 * (float(wave) - 500))
         truth = gain * 1e6 * 1e-8 * (1 + 0.1 * centers) * pitch**2 * float(wave) / 600

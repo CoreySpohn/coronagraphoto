@@ -2,8 +2,8 @@
 
 A pixel at separation s sees the diffraction pattern slide across a band by s
 times the band's fractional width in chromatic cycles, so a band needs more
-nodes the farther the pixel is from the detector center. ``build_exposure``
-takes its field radius from the instrument, whose default is the detector
+nodes the farther the pixel is from the detector center. ``build_sampling``
+takes its field radius from the selected instrument, whose default is the detector
 half-diagonal, and the routes render only the nodes a band really has.
 """
 
@@ -38,18 +38,21 @@ _HALF_DIAGONAL_LOD = _HALF_WIDTH_LOD * math.sqrt(2.0)
 class HalfWidthInstrument(Instrument):
     """An instrument that declares the half-width of its detector as its field."""
 
-    def spectral_field_lod(self, band):
+    def spectral_field_lod(self, band, *, telescope, detector):
         """Half the longer detector side, in lambda/D at the band center."""
-        ny, nx = self.detector.shape
-        half_width = 0.5 * max(ny, nx) * self.detector.pixel_scale_arcsec
+        ny, nx = detector.shape
+        half_width = 0.5 * max(ny, nx) * detector.pixel_scale_arcsec
         return half_width / float(self.coronagraph.frame.lod_to_arcsec(band.center_nm))
 
 
-def _with_half_width_field(instrument):
+def _with_half_width_field(observatory):
+    (instrument,) = observatory.instruments
     fields = {
         f.name: getattr(instrument, f.name) for f in dataclasses.fields(instrument)
     }
-    return HalfWidthInstrument(**fields)
+    return dataclasses.replace(
+        observatory, instruments=(HalfWidthInstrument(**fields),)
+    )
 
 
 def _scene():
@@ -77,20 +80,20 @@ def _relative_blackbody(wavelength_nm):
     return (550.0 / wavelength_nm) ** 4 / np.expm1(exponent)
 
 
-def _worst_corner_error(exposure, instrument, *, count=67):
+def _worst_corner_error(sampling, instrument, *, count=67):
     """Worst relative error over the corner pixels, across every band.
 
     The corners are the pixels from the half-width to the half-diagonal of the
     detector, 16 to 22.6 lambda/D at 550 nm and the same angles at each band
     center. Truth is the response times the star on a 16000-point Gauss rule.
     """
-    quadrature = exposure.quadrature
+    quadrature = sampling.quadrature
     worst = 0.0
     for i, band in enumerate(quadrature.bands):
         center = band.center_nm
-        scale = float(instrument.coronagraph.frame.lod_to_arcsec(550.0)) / float(
-            instrument.coronagraph.frame.lod_to_arcsec(center)
-        )
+        scale = float(
+            instrument.instruments[0].coronagraph.frame.lod_to_arcsec(550.0)
+        ) / float(instrument.instruments[0].coronagraph.frame.lod_to_arcsec(center))
         seps = np.linspace(_HALF_WIDTH_LOD, _HALF_DIAGONAL_LOD, count) * scale
         # The layout sets the discretization error. Reconstruct its Gauss
         # nodes on the host and verify separately what the lane actually stores.
@@ -139,15 +142,18 @@ def test_the_corner_pixels_are_resolved_at_the_default_field():
     """
     instrument = make_path(n=16, step=0.25, detector_n=128, detector_step=0.25)
     scene = _scene()
-    default = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0)
-    half_width = cp.build_exposure(
-        scene, _with_half_width_field(instrument), _BANDS, time_d=0.0
+    event = cp.build_exposure(
+        _BANDS, epoch=scene.epoch, instrument="imager", time_d=0.0
     )
-    none = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0, field_lod=0.0)
+    default_sampling = cp.build_sampling(instrument, event, scene=scene)
+    half_width_sampling = cp.build_sampling(
+        _with_half_width_field(instrument), event, scene=scene
+    )
+    none_sampling = cp.build_sampling(instrument, event, field_lod=0.0, scene=scene)
     got = {
-        "default": _worst_corner_error(default, instrument),
-        "half_width": _worst_corner_error(half_width, instrument),
-        "none": _worst_corner_error(none, instrument),
+        "default": _worst_corner_error(default_sampling, instrument),
+        "half_width": _worst_corner_error(half_width_sampling, instrument),
+        "none": _worst_corner_error(none_sampling, instrument),
     }
     assert got["default"] < 1e-8
     assert got["half_width"] > 1e-7, "the half-width field must leave the corners short"
@@ -180,9 +186,12 @@ def test_routes_render_the_real_nodes_only(monkeypatch):
     first real node of their band, so a ratio of two rows stays finite.
     """
     scene, instrument, bands = _unequal_setup()
-    exposure = cp.build_exposure(scene, instrument, bands, time_d=0.0)
-    orders = _orders(exposure.quadrature)
-    width = exposure.quadrature.nodes_nm.shape[1]
+    exposure = cp.build_exposure(
+        bands, epoch=scene.epoch, instrument="imager", time_d=0.0
+    )
+    sampling = cp.build_sampling(instrument, exposure, scene=scene)
+    orders = _orders(sampling.quadrature)
+    width = sampling.quadrature.nodes_nm.shape[1]
     assert len(set(orders)) == 3 and max(orders) == width
     renders = []
     real_function = simulation._node_function
@@ -200,19 +209,24 @@ def test_routes_render_the_real_nodes_only(monkeypatch):
     for run in (cp.photon_rates, cp.expected):
         jax.clear_caches()
         renders.clear()
-        result = run(scene, instrument, exposure)
+        result = run(scene, instrument, exposure, sampling=sampling)
         jax.effects_barrier()
         assert len(renders) == sum(orders), run.__name__
         assert result is not None
     monkeypatch.undo()
 
-    photons = cp.photon_rates(scene, instrument, exposure)
-    electrons = cp.expected(scene, instrument, exposure)
+    photons = cp.photon_rates(scene, instrument, exposure, sampling=sampling)
+    electrons = cp.expected(scene, instrument, exposure, sampling=sampling)
     for i, band in enumerate(bands):
-        alone = cp.build_exposure(scene, instrument, (band,), time_d=0.0)
-        assert alone.quadrature.nodes_nm.shape[1] == orders[i]
-        photon_alone = cp.photon_rates(scene, instrument, alone).integrate()
-        electron_alone = cp.expected(scene, instrument, alone)
+        alone = cp.build_exposure(
+            (band,), epoch=scene.epoch, instrument="imager", time_d=0.0
+        )
+        alone_sampling = cp.build_sampling(instrument, alone, scene=scene)
+        assert alone_sampling.quadrature.nodes_nm.shape[1] == orders[i]
+        photon_alone = cp.photon_rates(
+            scene, instrument, alone, sampling=alone_sampling
+        ).integrate()
+        electron_alone = cp.expected(scene, instrument, alone, sampling=alone_sampling)
         for name in ("star_leakage", "planet", "local_zodi"):
             a = np.asarray(getattr(photons.integrate(), name)[i])
             b = np.asarray(getattr(photon_alone, name)[0])

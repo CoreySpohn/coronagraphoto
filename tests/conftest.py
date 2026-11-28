@@ -75,8 +75,11 @@ from optixstuff import (
     Detector,
     Exposure,
     Instrument,
+    Observatory,
     Pointing,
-    SimplePrimary,
+    SimplePupil,
+    SpectralSampling,
+    Telescope,
 )
 from optixstuff.apertures import Circular
 from optixstuff.coronagraph import (
@@ -316,19 +319,59 @@ class FlatContrast(AbstractPhysicalModel):
         return jnp.broadcast_to(self.value, phase_angle_rad.shape)
 
 
-def exposure_for(scene, quadrature, *, time_d=0.0, roll_deg=0.0, plan=None):
-    """An exposure on a hand-built quadrature, with the scene's resolution.
+def exposure_for(
+    scene,
+    quadrature,
+    *,
+    time_d=0.0,
+    roll_deg=0.0,
+    plan=None,
+    instrument="imager",
+    epoch=None,
+):
+    """An event and a hand-built sampling on a hand-built quadrature.
 
-    The quadrature must come from ``Quadrature.build`` when the scene has a
-    tabulated source.
+    The sampling holds the scene's resolution on the quadrature, which must come
+    from ``Quadrature.build`` when the scene has a tabulated source. The event is
+    stated on ``epoch`` (the scene's when omitted).
+
+    Returns:
+        ``(exposure, sampling)``.
     """
-    return Exposure(
-        time_d=time_d,
-        pointing=Pointing(roll_deg),
-        quadrature=quadrature,
-        plan=plan,
-        resolution=Resolution.build(quadrature, *scene.spectral_tables()),
+    exposure = Exposure(
+        time_d,
+        Pointing(roll_deg),
+        plan,
+        epoch=scene.epoch if epoch is None else epoch,
+        instrument=instrument,
+        bands=quadrature.bands,
     )
+    sampling = SpectralSampling(
+        quadrature, Resolution.build(quadrature, *scene.spectral_tables())
+    )
+    return exposure, sampling
+
+
+def observatory_for(pupil, elements, coronagraph, detector, *, name="imager", **kw):
+    """One telescope on ``pupil`` and one configuration named ``name`` on it."""
+    return Observatory(
+        Telescope(pupil),
+        (
+            Instrument(
+                name,
+                attenuating_elements=elements,
+                coronagraph=coronagraph,
+                detector=detector,
+                **kw,
+            ),
+        ),
+    )
+
+
+def with_instrument(observatory, **fields):
+    """The observatory with fields of its one configuration replaced."""
+    (instrument,) = observatory.instruments
+    return replace(observatory, instruments=(replace(instrument, **fields),))
 
 
 def make_system(
@@ -407,8 +450,8 @@ def make_path(
         qe_curve=(jnp.array([500.0, 600.0]), jnp.array([0.9, 0.7])),
         survival_fraction=0.9,
     )
-    return Instrument(
-        SimplePrimary(circumscribed_diameter_m=6.0, collecting_area_m2=40.0),
+    return observatory_for(
+        SimplePupil(circumscribed_diameter_m=6.0, collecting_area_m2=40.0),
         (ConstantThroughput(0.4),),
         coro,
         detector,
@@ -748,7 +791,7 @@ class IntegratedGaussianCoronagraph(AbstractImagingCoronagraph):
 @pytest.fixture
 def gaussian_observation():
     """Build a 540 nm observation with a resolved star and sloping gain and QE."""
-    from coronagraphoto import build_exposure
+    from coronagraphoto import build_exposure, build_sampling
 
     def build(band_averaged=True, *, coro=None):
         band = Band(520, 560)
@@ -756,8 +799,8 @@ def gaussian_observation():
             coro = IntegratedGaussianCoronagraph(
                 Band(480, 720), band_averaged, (543.0,)
             )
-        instrument = Instrument(
-            SimplePrimary(circumscribed_diameter_m=6.0, collecting_area_m2=20.0),
+        observatory = observatory_for(
+            SimplePupil(circumscribed_diameter_m=6.0, collecting_area_m2=20.0),
             (TransmissiveElement(Transmission([500, 600], [0.4, 0.8])),),
             coro,
             Detector(
@@ -773,9 +816,12 @@ def gaussian_observation():
             separation_arcsec=0.02,
         )
         exposure = build_exposure(
-            scene, instrument, (band,), time_d=0.0, order=2, field_lod=0.0
+            (band,), epoch=scene.epoch, instrument="imager", time_d=0.0
         )
-        return scene, instrument, exposure
+        sampling = build_sampling(
+            observatory, exposure, order=2, field_lod=0.0, scene=scene
+        )
+        return scene, observatory, exposure, sampling
 
     return build
 

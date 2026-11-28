@@ -9,7 +9,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import exposure_for, make_path, make_system, with_zodi, worked_setup
+from conftest import (
+    exposure_for,
+    make_path,
+    make_system,
+    with_instrument,
+    with_zodi,
+    worked_setup,
+)
 from hwoutils.leaves import canonical
 from hwoutils.precision import PrecisionError
 from hwoutils.testing import assert_precision_closed, precision_pair, ulps
@@ -109,37 +116,55 @@ def render_problem():
         PrecomputedZodi(wave, jnp.full(wave.shape, 1e12)),
     )
     instrument = make_path(n=12, step=0.5, detector_n=6)
-    instrument = replace(
-        instrument, coronagraph=_TentCoronagraph(instrument.coronagraph.grid)
+    instrument = with_instrument(
+        instrument,
+        coronagraph=_TentCoronagraph(instrument.instruments[0].coronagraph.grid),
     )
     exposure = cp.build_exposure(
-        scene,
-        instrument,
         (Band(545, 555),),
+        epoch=scene.epoch,
+        instrument="imager",
         time_d=0.0,
         roll_deg=17.0,
         plan=FramePlan(10.0, 2),
-        order=2,
-        field_lod=0.0,
     )
-    response = cp.aperture_response(
+    sampling = cp.build_sampling(
+        instrument, exposure, order=2, field_lod=0.0, scene=scene
+    )
+    return canonical((scene, instrument, exposure, sampling), precision="float64")
+
+
+def _response(instrument, sampling):
+    """The aperture response of the render problem."""
+    return cp.aperture_response(
         instrument,
-        exposure.quadrature,
+        sampling.quadrature,
         n_separations=3,
         n_angles=2,
         max_separation_arcsec=0.025,
     )
-    return canonical((scene, instrument, exposure, response), precision="float64")
+
+
+def _photon_rates(scene, observatory, exposure, sampling):
+    return cp.photon_rates(scene, observatory, exposure, sampling=sampling)
+
+
+def _expected(scene, observatory, exposure, sampling):
+    return cp.expected(scene, observatory, exposure, sampling=sampling)
+
+
+def _planet_source_support(scene, observatory, exposure, sampling):
+    return cp.planet_source_support(scene, observatory, exposure, sampling=sampling)
 
 
 @pytest.fixture
 def closed_render_problem(render_problem, monkeypatch):
     """Supply closed collaborators at the pinned upstream precision boundaries."""
-    scene, instrument, exposure, response = render_problem
+    scene, instrument, exposure, sampling = render_problem
     scene = with_zodi(scene, _UniformZodi(jnp.ones(())))
     detector = Detector(
-        pixel_scale_arcsec=instrument.detector.pixel_scale_arcsec,
-        shape=instrument.detector.shape,
+        pixel_scale_arcsec=instrument.instruments[0].detector.pixel_scale_arcsec,
+        shape=instrument.instruments[0].detector.shape,
         qe=0.8,
         survival_fraction=0.9,
     )
@@ -185,19 +210,33 @@ def closed_render_problem(render_problem, monkeypatch):
     monkeypatch.setattr(Scene, "positions", fixed_positions)
     monkeypatch.setattr(Scene, "sources", smooth_sources)
     monkeypatch.setattr(simulation, "coverage", interior_coverage)
-    return scene, replace(instrument, detector=detector), exposure, response
+    instrument = with_instrument(instrument, detector=detector)
+    # The closed scene has another local zodi, so its sampling is built anew.
+    sampling = cp.build_sampling(
+        instrument, exposure, order=2, field_lod=0.0, scene=scene
+    )
+    return scene, instrument, exposure, canonical(sampling, precision="float64")
 
 
-def _observe(key, scene, instrument, exposure):
+def _observe(key, scene, instrument, exposure, sampling):
     """Compare the electron array; grid metadata belongs to the concrete roll."""
-    return cp.observe(key, scene, instrument, exposure).data
+    return cp.observe(key, scene, instrument, exposure, sampling=sampling).image.data
 
 
-def _observation_pair(keys, scene, instrument, exposure, other_scene, other_exposure):
+def _observation_pair(
+    keys,
+    scene,
+    instrument,
+    exposure,
+    sampling,
+    other_scene,
+    other_exposure,
+    other_sampling,
+):
     """Read the target and another roll or reference-star exposure."""
     return (
-        _observe(keys[0], scene, instrument, exposure),
-        _observe(keys[1], other_scene, instrument, other_exposure),
+        _observe(keys[0], scene, instrument, exposure, sampling),
+        _observe(keys[1], other_scene, instrument, other_exposure, other_sampling),
     )
 
 
@@ -206,33 +245,44 @@ _DRAWS = ("observe", "roll_pair", "reference_star")
 
 def _render_case(entry, problem):
     """Choose the public read and data for one render entry."""
-    scene, instrument, exposure, response = problem
+    scene, instrument, exposure, sampling = problem
     if entry in {"photon_rates", "expected"}:
-        read = getattr(cp, entry)
-        args = (scene, instrument, exposure)
+        read = {"photon_rates": _photon_rates, "expected": _expected}[entry]
+        args = (scene, instrument, exposure, sampling)
     elif entry == "multiband_photon_rates":
-        grid = instrument.coronagraph.grid
+        grid = instrument.instruments[0].coronagraph.grid
         children = (
             _TentCoronagraph(grid, bandpass=band, band_averaged=False)
             for band in (Band(500, 550), Band(550, 600))
         )
-        instrument = replace(instrument, coronagraph=MultiBandCoronagraph(children))
-        read = cp.photon_rates
-        args = (scene, instrument, exposure)
+        instrument = with_instrument(
+            instrument, coronagraph=MultiBandCoronagraph(children)
+        )
+        precision = str(instrument.instruments[0].flux_scale.dtype)
+        sampling = canonical(
+            cp.build_sampling(
+                instrument, exposure, order=2, field_lod=0.0, scene=scene
+            ),
+            precision=precision,
+        )
+        read = _photon_rates
+        args = (scene, instrument, exposure, sampling)
     elif entry == "aperture_record":
         read = cp.aperture_record
-        args = (scene, instrument, exposure, response)
+        args = (scene, instrument, exposure, _response(instrument, sampling))
     elif entry == "scene_aperture_rates":
         read = cp.scene_aperture_rates
+        response = _response(instrument, sampling)
         record = cp.aperture_record(scene, instrument, exposure, response)
         args = (record, scene, jnp.array([0.0, 0.5]))
     elif entry == "observe":
         read = _observe
-        args = (jax.random.key(0), scene, instrument, exposure)
+        args = (jax.random.key(0), scene, instrument, exposure, sampling)
     else:
         read = _observation_pair
         if entry == "roll_pair":
             other = scene
+            other_sampling = sampling
             other_exposure = replace(exposure, pointing=Pointing(39.0))
         else:
             other = canonical(
@@ -244,13 +294,21 @@ def _render_case(entry, problem):
                 precision="float64",
             )
             other_exposure = exposure
+            other_sampling = canonical(
+                cp.build_sampling(
+                    instrument, exposure, order=2, field_lod=0.0, scene=other
+                ),
+                precision="float64",
+            )
         args = (
             jax.random.split(jax.random.key(0)),
             scene,
             instrument,
             exposure,
+            sampling,
             other,
             other_exposure,
+            other_sampling,
         )
     return read, args
 
@@ -291,15 +349,18 @@ def test_render_precision_closed(render_problem, entry, monkeypatch, request):
     read = eqx.filter_jit(read)
     precision_pair(read, args, bound=float(ulps(192, np.float32(1))))
     if entry in _DRAWS:
-        _, scene, instrument, exposure, *other = args
+        _, scene, instrument, exposure, sampling, *other = args
         frames = (read(*args),) if not other else read(*args)
         targets = (
-            ((scene, exposure), (other[0], other[1])) if other else ((scene, exposure),)
+            ((scene, exposure, sampling), tuple(other))
+            if other
+            else ((scene, exposure, sampling),)
         )
-        for frame, (target, view) in zip(frames, targets, strict=True):
+        for frame, (target, view, rule) in zip(frames, targets, strict=True):
             assert int(view.plan.n_frames) > 0
             expected = (
-                cp.expected(target, instrument, view).total() * view.plan.live_time_s
+                cp.expected(target, instrument, view, sampling=rule).total()
+                * view.plan.live_time_s
             )
             assert np.any(np.asarray(expected) > 0)
             np.testing.assert_allclose(
@@ -334,7 +395,8 @@ def test_wide_scene_narrow_render(render_problem, entry):
     Allow 32 float32 epsilons of each component's peak for orbit evaluation,
     the sky rotation, interpolation and the disk or aperture sum.
     """
-    scene, instrument, exposure, response = render_problem
+    scene, instrument, exposure, sampling = render_problem
+    response = _response(instrument, sampling) if entry == "aperture" else None
     if entry == "disk":
         scene = make_system(
             disk=AYOExozodi(level_zodis=3.0),
@@ -343,10 +405,14 @@ def test_wide_scene_narrow_render(render_problem, entry):
         )
         instrument = make_path(n=8, step=0.25, detector_n=4, cube=True)
         exposure = cp.build_exposure(
-            scene, instrument, exposure.quadrature.bands, time_d=0.0, order=2
+            sampling.quadrature.bands,
+            epoch=scene.epoch,
+            instrument="imager",
+            time_d=0.0,
         )
-    instrument, exposure, response = canonical(
-        (instrument, exposure, response), precision="float32"
+        sampling = cp.build_sampling(instrument, exposure, order=2, scene=scene)
+    instrument, exposure, sampling, response = canonical(
+        (instrument, exposure, sampling, response), precision="float32"
     )
 
     def render(scene):
@@ -356,7 +422,7 @@ def test_wide_scene_narrow_render(render_problem, entry):
             return cp.scene_aperture_rates(record, scene, np.array([0.0, 0.5]))
         read, args = _render_case(
             "photon_rates" if entry == "disk" else entry,
-            (scene, instrument, exposure, response),
+            (scene, instrument, exposure, sampling),
         )
         return read(*args)
 
@@ -386,20 +452,22 @@ def test_wide_scene_node_precision_closed(closed_render_problem, monkeypatch):
     The scene and the width conversions themselves contain float64 arithmetic.
     The returned kernel, including its pixel geometry, must be float32 throughout.
     """
-    scene, instrument, exposure, _ = closed_render_problem
-    instrument, exposure = canonical((instrument, exposure), precision="float32")
+    scene, instrument, exposure, sampling = closed_render_problem
+    instrument, exposure, sampling = canonical(
+        (instrument, exposure, sampling), precision="float32"
+    )
     node_function = simulation._node_function
     checked = []
 
     def check_node(*args):
         node = node_function(*args)
-        wavelength = exposure.quadrature.nodes_nm[0, 0]
+        wavelength = sampling.quadrature.nodes_nm[0, 0]
         assert_precision_closed(node, wavelength, 0, 0)
         checked.append(True)
         return node
 
     monkeypatch.setattr(simulation, "_node_function", check_node)
-    rates = cp.photon_rates(scene, instrument, exposure)
+    rates = cp.photon_rates(scene, instrument, exposure, sampling=sampling)
     assert checked
     assert rates.planet.dtype == np.float32
 
@@ -408,12 +476,12 @@ def test_wide_scene_node_precision_closed(closed_render_problem, monkeypatch):
 @pytest.mark.parametrize("owner", ["instrument", "exposure"])
 def test_render_refuses_mixed_owner(render_problem, owner):
     """A single off-precision leaf in either owner names the repair at entry."""
-    scene, instrument, exposure, _ = render_problem
+    scene, instrument, exposure, sampling = render_problem
     if owner == "instrument":
         instrument = eqx.tree_at(
-            lambda i: i.flux_scale,
+            lambda i: i.instruments[0].flux_scale,
             instrument,
-            instrument.flux_scale.astype(jnp.float32),
+            instrument.instruments[0].flux_scale.astype(jnp.float32),
         )
     else:
         exposure = eqx.tree_at(
@@ -422,7 +490,7 @@ def test_render_refuses_mixed_owner(render_problem, owner):
             exposure.pointing.roll_deg.astype(jnp.float32),
         )
     with pytest.raises(PrecisionError, match="canonical"):
-        cp.expected(scene, instrument, exposure)
+        cp.expected(scene, instrument, exposure, sampling=sampling)
 
 
 @vv.case(
@@ -445,14 +513,14 @@ def test_worked_expected_precision():
     Fails if float32 rendering loses pixel or planet photometric precision.
     """
     scene, instrument = worked_setup()
-    quadrature = Quadrature.build((Band(500, 600),), scene, instrument)
+    quadrature = Quadrature.build((Band(500, 600),), scene, instrument.select("imager"))
     args = canonical(
-        (scene, instrument, exposure_for(scene, quadrature)), precision="float64"
+        (scene, instrument, *exposure_for(scene, quadrature)), precision="float64"
     )
 
-    def render(scene, instrument, exposure):
-        dtype = exposure.quadrature.weights_nm.dtype
-        rates = cp.expected(scene, instrument, exposure)
+    def render(scene, instrument, exposure, sampling):
+        dtype = sampling.quadrature.weights_nm.dtype
+        rates = cp.expected(scene, instrument, exposure, sampling=sampling)
         image, planet = rates.total(), rates.planet.sum()
         for value in (image, planet):
             assert value.dtype == dtype
@@ -487,11 +555,11 @@ def test_observe_exact_sampler_precision(closed_render_problem, entry, monkeypat
     Fails if the caller widens before or after the sampler, or if the exact
     sampler widens on JAX 0.12.1 or later.
     """
-    scene, instrument, exposure, response = closed_render_problem
+    scene, instrument, exposure, sampling = closed_render_problem
     assert int(exposure.plan.n_frames) > 0
     ideal = IdealDetector(
-        pixel_scale_arcsec=instrument.detector.pixel_scale_arcsec,
-        shape=instrument.detector.shape,
+        pixel_scale_arcsec=instrument.instruments[0].detector.pixel_scale_arcsec,
+        shape=instrument.instruments[0].detector.shape,
     )
     monkeypatch.setattr(
         IdealDetector,
@@ -536,7 +604,7 @@ def test_observe_exact_sampler_precision(closed_render_problem, entry, monkeypat
 
     monkeypatch.setattr(simulation, "_draw", fresh_draw)
     read, args = _render_case(
-        entry, (scene, replace(instrument, detector=ideal), exposure, response)
+        entry, (scene, with_instrument(instrument, detector=ideal), exposure, sampling)
     )
     assert_precision_closed(eqx.filter_jit(read), *canonical(args, precision="float32"))
     assert calls
@@ -557,8 +625,9 @@ def test_aperture_response_precision_closed(render_problem):
 
     Fails if any response table is stored wide or the ring kernel widens.
     """
-    _, instrument, exposure, response = render_problem
-    quadrature = exposure.quadrature
+    _, instrument, _, sampling = render_problem
+    response = _response(instrument, sampling)
+    quadrature = sampling.quadrature
     args = (instrument, quadrature)
 
     def build(instrument, quadrature):
@@ -599,8 +668,8 @@ def test_aperture_response_precision_closed(render_problem):
 
     assert_precision_closed(
         read_ring,
-        instrument32.coronagraph,
-        instrument32.detector,
+        instrument32.instruments[0].coronagraph,
+        instrument32.instruments[0].detector,
         quadrature32.nodes_nm[0],
         np.float32(550),
     )
@@ -615,11 +684,14 @@ def test_planet_source_support_precision(render_problem):
     scene, instrument, exposure, _ = render_problem
     distant = make_system(separation_arcsec=0.065, smooth_planet=True)
     for system, supported in ((scene, True), (distant, False)):
-        args = (system, instrument, exposure)
-        precision_pair(cp.planet_source_support, args, bound=0)
-        result = cp.planet_source_support(*args)
+        rule = cp.build_sampling(
+            instrument, exposure, order=2, field_lod=0.0, scene=system
+        )
+        args = (system, instrument, exposure, canonical(rule, precision="float64"))
+        precision_pair(_planet_source_support, args, bound=0)
+        result = _planet_source_support(*args)
         np.testing.assert_array_equal(result, np.full((1, 1, 1), supported))
-        system32, instrument32, exposure32 = canonical(args, precision="float32")
+        system32, instrument32, exposure32, _ = canonical(args, precision="float32")
         # Carry roll as a dynamic input rather than closing over the host grid.
         positions = system32.positions(jnp.atleast_1d(exposure32.time_d))
 
@@ -628,7 +700,7 @@ def test_planet_source_support_precision(render_problem):
 
         support_args = canonical(
             (
-                instrument32.coronagraph,
+                instrument32.select("imager").coronagraph,
                 exposure32.pointing.roll_deg,
                 jnp.asarray(550.0),
                 positions,
@@ -649,20 +721,20 @@ def test_integer_node_precision(closed_render_problem):
     bands = (Band(549, 552),)
     nodes = jnp.array([[550, 551]], dtype=jnp.int32)
     weights = jnp.array([[1.5, 1.5]], dtype=jnp.float32)
-    exposure = exposure_for(
+    exposure, sampling = exposure_for(
         scene, Quadrature(bands, nodes, weights), roll_deg=exposure.pointing.roll_deg
     )
-    scene32, instrument32, exposure32 = canonical(
-        (scene, instrument, exposure), precision="float32"
-    )
-    assert_precision_closed(cp.photon_rates, scene32, instrument32, exposure32)
-    wide = canonical((scene, instrument, exposure), precision="float64")
-    precision_pair(cp.photon_rates, wide, bound=float(ulps(192, np.float32(1))))
-    assert np.any(np.asarray(cp.photon_rates(*wide).local_zodi) > 0)
+    args32 = canonical((scene, instrument, exposure, sampling), precision="float32")
+    assert_precision_closed(_photon_rates, *args32)
+    instrument32 = args32[1].select("imager")
+    selected = instrument.select("imager")
+    wide = canonical((scene, instrument, exposure, sampling), precision="float64")
+    precision_pair(_photon_rates, wide, bound=float(ulps(192, np.float32(1))))
+    assert np.any(np.asarray(_photon_rates(*wide).local_zodi) > 0)
     for dtype in (np.float32, np.float64):
         rule = Quadrature(bands, nodes, weights.astype(dtype))
         assert simulation._band_center_dtype(rule, instrument32) == dtype
-        assert simulation._band_center_dtype(rule, instrument) == np.float64
+        assert simulation._band_center_dtype(rule, selected) == np.float64
     # With floating nodes, weights still contribute to the working precision.
     rule = Quadrature(bands, nodes.astype(np.float32), weights.astype(np.float64))
     assert simulation._band_center_dtype(rule, instrument32) == np.float64
@@ -711,10 +783,10 @@ def test_cold_thermal_precision(render_problem):
 
     Fails if the native cold instrument creates a default-width thermal plane.
     """
-    scene, instrument, exposure, _ = render_problem
-    assert instrument.warm_emission is None
-    args = canonical((scene, instrument, exposure), precision="float32")
-    rates = cp.photon_rates(*args)
+    scene, instrument, exposure, sampling = render_problem
+    assert instrument.instruments[0].warm_emission is None
+    args = canonical((scene, instrument, exposure, sampling), precision="float32")
+    rates = _photon_rates(*args)
     assert rates.thermal.dtype == np.float32
     np.testing.assert_array_equal(rates.thermal, 0)
 

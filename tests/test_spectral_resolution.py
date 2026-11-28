@@ -61,7 +61,9 @@ def _instrument(*, chromatic=False, detector_step=0.5):
         detector_step=detector_step,
         chromatic=chromatic,
     )
-    return eqx.tree_at(lambda p: p.attenuating_elements, path, (CubicThroughput(),))
+    return eqx.tree_at(
+        lambda p: p.instruments[0].attenuating_elements, path, (CubicThroughput(),)
+    )
 
 
 def _star(tilt=0.0):
@@ -184,9 +186,9 @@ def _node_effective(rule, source, knots):
     return np.asarray(values)
 
 
-def _images(scene, instrument, exposure):
+def _images(scene, instrument, exposure, sampling):
     """Band-integrated star leakage and planet images of an exposure."""
-    rates = cp.photon_rates(scene, instrument, exposure).integrate()
+    rates = cp.photon_rates(scene, instrument, exposure, sampling=sampling).integrate()
     return np.asarray(rates.star_leakage)[0], np.asarray(rates.planet)[0]
 
 
@@ -216,19 +218,25 @@ def test_image_path_star_and_planet_are_the_node_sum_of_independent_renders():
     against a closed form, which this test does not provide.
     """
     scene, instrument = _rough_scene(), _instrument(chromatic=True)
-    exposure = cp.build_exposure(scene, instrument, (_BAND,), time_d=0.0)
-    rule = exposure.quadrature
+    exposure = cp.build_exposure(
+        (_BAND,), epoch=scene.epoch, instrument="imager", time_d=0.0
+    )
+    sampling = cp.build_sampling(instrument, exposure, scene=scene)
+    rule = sampling.quadrature
     nodes = np.asarray(rule.nodes_nm)[0]
     weights = np.asarray(rule.weights_nm)[0]
     count = sum(n for *_, n in rule.pieces[0])
     assert count > 4
     nodes, weights = nodes[:count], weights[:count]
-    got = cp.photon_rates(scene, instrument, exposure).integrate()
+    got = cp.photon_rates(scene, instrument, exposure, sampling=sampling).integrate()
 
     bands = tuple(Band(float(x) - 1e-3, float(x) + 1e-3) for x in nodes)
-    one_node = Quadrature.build(bands, instrument, order=1, field_lod=0.0)
+    one_node = Quadrature.build(
+        bands, instrument.select("imager"), order=1, field_lod=0.0
+    )
     assert one_node.nodes_nm.shape == (count, 1)
-    mono = cp.photon_rates(scene, instrument, exposure_for(scene, one_node))
+    one_event, one_sampling = exposure_for(scene, one_node)
+    mono = cp.photon_rates(scene, instrument, one_event, sampling=one_sampling)
 
     knots = _knots(scene)
     for name, source in _documented_sources(scene).items():
@@ -281,11 +289,11 @@ def test_image_path_star_planet_and_contrast_match_the_fine_rule():
     """
     scene = _rough_scene()
     instrument = _instrument(chromatic=True, detector_step=0.45)
-    table = instrument.coronagraph.grid
+    table = instrument.instruments[0].coronagraph.grid
     cells = {}
     for wavelength in (_BAND.low_nm, _BAND.high_nm):
-        pixels = instrument.detector.grid.to_lod(
-            wavelength, instrument.coronagraph.frame
+        pixels = instrument.instruments[0].detector.grid.to_lod(
+            wavelength, instrument.instruments[0].coronagraph.frame
         )
         assert pixels.pixel_area < table.pixel_area
         cells[wavelength] = [
@@ -295,14 +303,17 @@ def test_image_path_star_planet_and_contrast_match_the_fine_rule():
     for low, high in zip(*cells.values(), strict=True):
         np.testing.assert_array_equal(low, high)
 
-    coarse = cp.build_exposure(scene, instrument, (_BAND,), time_d=0.0)
-    fine_rule = Quadrature.build((_BAND,), scene, instrument)
+    coarse = cp.build_exposure(
+        (_BAND,), epoch=scene.epoch, instrument="imager", time_d=0.0
+    )
+    coarse_sampling = cp.build_sampling(instrument, coarse, scene=scene)
+    fine_rule = Quadrature.build((_BAND,), scene, instrument.select("imager"))
     assert fine_rule.nodes_nm.shape[1] > 150
-    assert coarse.quadrature.nodes_nm.shape == (1, 6)
-    assert "table" in {r.kind for r in coarse.resolution.rules}
-    star, planet = _images(scene, instrument, coarse)
+    assert coarse_sampling.quadrature.nodes_nm.shape == (1, 6)
+    assert "table" in {r.kind for r in coarse_sampling.resolution.rules}
+    star, planet = _images(scene, instrument, coarse, coarse_sampling)
     star_truth, planet_truth = _images(
-        scene, instrument, exposure_for(scene, fine_rule)
+        scene, instrument, *exposure_for(scene, fine_rule)
     )
     for image, truth in ((star, star_truth), (planet, planet_truth)):
         assert np.max(truth) > 0
@@ -332,9 +343,14 @@ def test_image_path_local_zodi_is_the_exact_table_integral():
     result = {}
     for name, zodi in (("rough", rough), ("flat", flat)):
         scene = _rough_scene(zodi)
-        exposure = cp.build_exposure(scene, instrument, (_BAND,), time_d=0.0)
+        exposure = cp.build_exposure(
+            (_BAND,), epoch=scene.epoch, instrument="imager", time_d=0.0
+        )
+        sampling = cp.build_sampling(instrument, exposure, scene=scene)
         result[name] = np.asarray(
-            cp.photon_rates(scene, instrument, exposure).integrate().local_zodi[0, 4, 4]
+            cp.photon_rates(scene, instrument, exposure, sampling=sampling)
+            .integrate()
+            .local_zodi[0, 4, 4]
         )
     truth = _band_integral(wave, np.asarray(rough.radiance_phot_per_s_m2_nm_sr), _cubic)
     flat_truth = _band_integral(wave, np.full(76, 1e12), _cubic)
@@ -344,7 +360,7 @@ def test_image_path_local_zodi_is_the_exact_table_integral():
         atol=0,
         rtol=roundoff(
             1,
-            n_ops=64 + 2 * exposure.quadrature.nodes_nm.size,
+            n_ops=64 + 2 * sampling.quadrature.nodes_nm.size,
             dtype=result["rough"].dtype,
         ),
     )
@@ -368,10 +384,13 @@ def test_aperture_record_zodi_read_is_the_exact_table_integral():
     result = {}
     for name, zodi in (("rough", rough), ("flat", flat)):
         scene = _rough_scene(zodi)
-        exposure = cp.build_exposure(scene, instrument, (_BAND,), time_d=0.0)
+        exposure = cp.build_exposure(
+            (_BAND,), epoch=scene.epoch, instrument="imager", time_d=0.0
+        )
+        sampling = cp.build_sampling(instrument, exposure, scene=scene)
         response = cp.aperture_response(
             instrument,
-            exposure.quadrature,
+            sampling.quadrature,
             n_separations=3,
             n_angles=3,
             max_separation_arcsec=0.04,
@@ -388,7 +407,7 @@ def test_aperture_record_zodi_read_is_the_exact_table_integral():
         atol=0,
         rtol=roundoff(
             1,
-            n_ops=64 + 2 * exposure.quadrature.nodes_nm.size,
+            n_ops=64 + 2 * sampling.quadrature.nodes_nm.size,
             dtype=result["rough"].dtype,
         ),
     )
@@ -408,21 +427,35 @@ def test_the_default_field_is_the_instruments_and_zero_keeps_the_layout():
     scene, instrument = make_system(smooth_planet=True), _instrument()
     for order in (1, 3, 4):
         exposure = cp.build_exposure(
-            scene, instrument, (_BAND,), time_d=0.0, order=order, field_lod=0.0
+            (_BAND,), epoch=scene.epoch, instrument="imager", time_d=0.0
         )
-        assert exposure.quadrature.nodes_nm.shape == (1, order)
-    default = cp.build_exposure(scene, instrument, (_BAND,), time_d=0.0)
-    declared = cp.build_exposure(
-        scene,
-        instrument,
-        (_BAND,),
-        time_d=0.0,
-        field_lod=instrument.spectral_field_lod(_BAND),
+        sampling = cp.build_sampling(
+            instrument, exposure, order=order, field_lod=0.0, scene=scene
+        )
+        assert sampling.quadrature.nodes_nm.shape == (1, order)
+    default = cp.build_exposure(
+        (_BAND,), epoch=scene.epoch, instrument="imager", time_d=0.0
     )
-    assert default.quadrature.pieces == declared.quadrature.pieces
-    assert default.quadrature.nodes_nm.shape[1] > 4
-    wide = cp.build_exposure(scene, instrument, (_BAND,), time_d=0.0, field_lod=10.0)
-    assert wide.quadrature.nodes_nm.shape[1] > default.quadrature.nodes_nm.shape[1]
+    default_sampling = cp.build_sampling(instrument, default, scene=scene)
+    declared = cp.build_exposure(
+        (_BAND,), epoch=scene.epoch, instrument="imager", time_d=0.0
+    )
+    declared_sampling = cp.build_sampling(
+        instrument,
+        declared,
+        field_lod=instrument.select("imager").spectral_field_lod(_BAND),
+        scene=scene,
+    )
+    assert default_sampling.quadrature.pieces == declared_sampling.quadrature.pieces
+    assert default_sampling.quadrature.nodes_nm.shape[1] > 4
+    wide = cp.build_exposure(
+        (_BAND,), epoch=scene.epoch, instrument="imager", time_d=0.0
+    )
+    wide_sampling = cp.build_sampling(instrument, wide, field_lod=10.0, scene=scene)
+    assert (
+        wide_sampling.quadrature.nodes_nm.shape[1]
+        > default_sampling.quadrature.nodes_nm.shape[1]
+    )
 
     zodi = PrecomputedZodi(jnp.array([490.0, 535.0, 560.0]), jnp.full(3, 1e12))
     scene = with_zodi(scene, zodi)
@@ -430,11 +463,12 @@ def test_the_default_field_is_the_instruments_and_zero_keeps_the_layout():
         lambda s: s.disk, scene, AYOExozodi(), is_leaf=lambda x: x is None
     )
     options = dict(order=4, field_lod=0.0)
-    truth = Quadrature.build((_BAND,), instrument, zodi, **options)
+    truth = Quadrature.build((_BAND,), instrument.select("imager"), zodi, **options)
+    event = cp.build_exposure(
+        (_BAND,), epoch=scene.epoch, instrument="imager", time_d=0.0
+    )
     for system in (scene, with_disk):
-        rule = cp.build_exposure(
-            system, instrument, (_BAND,), time_d=0.0, **options
-        ).quadrature
+        rule = cp.build_sampling(instrument, event, **options, scene=system).quadrature
         np.testing.assert_array_equal(rule.nodes_nm, truth.nodes_nm)
         np.testing.assert_array_equal(rule.weights_nm, truth.weights_nm)
         assert rule.pieces == truth.pieces
@@ -448,8 +482,10 @@ def test_the_default_field_is_the_instruments_and_zero_keeps_the_layout():
     wide_disk = eqx.tree_at(
         lambda s: s.disk, scene, WideFieldExozodi(), is_leaf=lambda x: x is None
     )
-    truth = Quadrature.build((_BAND,), instrument, zodi, order=4, field_lod=None)
-    rule = cp.build_exposure(wide_disk, instrument, (_BAND,), time_d=0.0).quadrature
+    truth = Quadrature.build(
+        (_BAND,), instrument.select("imager"), zodi, order=4, field_lod=None
+    )
+    rule = cp.build_sampling(instrument, event, scene=wide_disk).quadrature
     np.testing.assert_array_equal(rule.nodes_nm, truth.nodes_nm)
     np.testing.assert_array_equal(rule.weights_nm, truth.weights_nm)
     assert rule.pieces == truth.pieces
@@ -476,9 +512,12 @@ def test_exovista_disk_knots_resolve_narrow_spectral_feature():
     )
     scene = make_system(star=_flat_star(wave), smooth_planet=True, disk=disk)
     exposure = cp.build_exposure(
-        scene, _instrument(), (Band(500, 600),), time_d=0.0, order=4, field_lod=0.0
+        (Band(500, 600),), epoch=scene.epoch, instrument="imager", time_d=0.0
     )
-    rule = exposure.quadrature
+    sampling = cp.build_sampling(
+        _instrument(), exposure, order=4, field_lod=0.0, scene=scene
+    )
+    rule = sampling.quadrature
     nodes = rule.nodes_nm[0]
     radiance = scene.photon_radiance(nodes, exposure.time_d, grid=grid).data[:, 3, 3]
     stellar_flux = scene.star.photon_flux_density(
@@ -509,11 +548,16 @@ def test_each_node_carries_its_own_star_value():
     flat = eqx.tree_at(lambda sc: sc.star, flat, _flat_star())
     leak = {}
     for name, scene in (("tilted", tilted), ("flat", flat)):
-        exposure = cp.build_exposure(scene, instrument, (_BAND,), time_d=0.0)
-        node = np.asarray(cp.photon_rates(scene, instrument, exposure).star_leakage)
+        exposure = cp.build_exposure(
+            (_BAND,), epoch=scene.epoch, instrument="imager", time_d=0.0
+        )
+        sampling = cp.build_sampling(instrument, exposure, scene=scene)
+        node = np.asarray(
+            cp.photon_rates(scene, instrument, exposure, sampling=sampling).star_leakage
+        )
         leak[name] = node.reshape((*node.shape[:2], -1)).sum(-1)[0]
         values = scene.sources(
-            exposure.quadrature, exposure.resolution, np.array([0.0])
+            sampling.quadrature, sampling.resolution, np.array([0.0])
         )
         leak[name + "_star"] = np.asarray(values.star).reshape(-1)
     assert leak["tilted_star"].max() / leak["tilted_star"].min() > 3

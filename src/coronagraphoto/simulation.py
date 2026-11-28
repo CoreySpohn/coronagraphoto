@@ -2,10 +2,13 @@
 
 Arrays are (band, node, y, x) for photons/s/nm and (band, y, x) for
 band-integrated electrons/s. Detector shape, grid axes, frame and band
-selection are static; the wavelength nodes and weights, the roll and the epoch
-are traced leaves, so one compiled program serves any node values and any roll
-(a new node count or band count is a new array shape and compiles once).
-Scenes, instruments and exposures can all be arguments of JAX
+selection are static; the wavelength nodes and weights, the roll and the event
+time are traced leaves, so one compiled program serves any node values and any
+roll (a new node count or band count is a new array shape and compiles once).
+The compiled stage sees leaves only: the commanded event and the sampling stay
+on the host, which checks them against the observatory and translates the event
+time to the scene's epoch and to the speckle field's own epoch, one clock each.
+Scenes, observatories, events and samplings can all be arguments of JAX
 transformations. For a band-averaged product, planet source images are read
 once per observing band at its centre. Each node weights them by its planet
 flux and gain, with detector terms applied per node for electrons.
@@ -13,8 +16,8 @@ Single-wavelength responses and the speckle field use the node wavelength.
 The field size still sets the node count. For a band product, extra nodes
 sample the spectra and speckles without refining the coronagraph geometry.
 Scene positions, spectra, angular diameter and disk radiance enter instrument
-calculations at the working precision of the band centers. Each instrument
-and exposure must have a uniform working precision.
+calculations at the working precision of the band centers. The observatory,
+the event and the sampling must have one uniform working precision.
 A roll changes the position angle of detector +y, north through east.
 """
 
@@ -26,11 +29,21 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.epoch import Epoch
 from hwoutils.leaves import require_tree
 from hwoutils.numerics import COARSEST
 from hwoutils.precision import like, precision_of
-from hwoutils.provenance import build_stamps
-from optixstuff import Exposure, ExposureData, FramePlan, Instrument, Pointing, Rates
+from hwoutils.provenance import Digest, build_stamps, merge_stamps, qualify, stamp_value
+from optixstuff import (
+    Exposure,
+    ExposureData,
+    FramePlan,
+    Instrument,
+    Observatory,
+    Pointing,
+    Rates,
+    SpectralSampling,
+)
 from optixstuff.coronagraph import (
     AbstractImagingCoronagraph,
     AbstractSceneCoronagraph,
@@ -46,22 +59,23 @@ from optixstuff.grids import (
     integrate_footprints,
     resample,
 )
+from optixstuff.sampling import build_facts
 from optixstuff.spectral import Band, Quadrature, Resolution, merge_tolerance_nm
 from skyscapes import Scene
 
 from coronagraphoto._version import __version__
 
 
-def _detector_grid(instrument, orientation):
+def _detector_grid(sel, orientation):
     """Construct the one sky grid shared by planets, disks and observations."""
     if orientation is not None and orientation.parity != -1:
         raise ValueError("detector pointing must have parity=-1")
-    return replace(instrument.detector.grid, orientation=orientation)
+    return replace(sel.detector.grid, orientation=orientation)
 
 
-def _exposure_grid(instrument, exposure):
-    """Read the detector grid at the exposure's roll."""
-    return _detector_grid(instrument, SkyOrientation(exposure.pointing.roll_deg))
+def _exposure_grid(sel, pointing):
+    """Read the detector grid at the commanded roll."""
+    return _detector_grid(sel, SkyOrientation(pointing.roll_deg))
 
 
 def _source_offsets_lod(wavelength_nm, pointing, native, positions):
@@ -110,8 +124,9 @@ def _node_rates(
     band_center_nm,
     coro,
     system,
-    instrument,
+    sel,
     time_d,
+    speckle_time_d,
     grid,
     pointing,
     positions,
@@ -137,12 +152,12 @@ def _node_rates(
     True without a field). Nothing is reflected or extrapolated, so the light
     at an uncovered pixel is not modeled; the caller zeroes it.
     """
-    speckle = instrument.speckle
+    speckle = sel.speckle
     # A band average already includes the chromatic blur across its band.
     scale_nm = coro.scale_wavelength_nm(wavelength_nm, band_center_nm)
     products = coro.at_wavelength(wavelength_nm)
     native = products.source_grid
-    gain = instrument.effective_area_m2(wavelength_nm)
+    gain = sel.effective_area_m2(wavelength_nm)
 
     detector_pixels = partial(_detector_pixels, grid, scale_nm)
 
@@ -172,13 +187,14 @@ def _node_rates(
     if speckle is not None:
         # The field owns its native lod grid, Frame and reconstruction, and
         # ends where its data end: its grid, narrowed by its data mask when
-        # its array is wider than its data. Scene time is converted by the
-        # field's ``elapsed_s``, which refuses a float32 time at a nonzero
+        # its array is wider than its data. The event time is converted by the
+        # field's ``elapsed_s`` from the event stated on the field's own epoch
+        # (``speckle_time_d``), which refuses a float32 time at a nonzero
         # epoch. Its coverage is kept apart from the static products'. The
         # excess is signed (coherent interference can lower the floor); only
         # the total leakage is clipped at zero below.
         excess = speckle.realize(
-            wavelength_nm=wavelength_nm, elapsed_s=speckle.elapsed_s(time_d)
+            wavelength_nm=wavelength_nm, elapsed_s=speckle.elapsed_s(speckle_time_d)
         )
         leakage = leakage + onto_detector(excess)
         speckle_covered = coverage(
@@ -251,14 +267,14 @@ def _node_rates(
     # A native cold instrument needs no radiance read. Honor custom models.
     thermal = zero
     if (
-        instrument.warm_emission is not None
-        or type(instrument).thermal_photon_rate_per_sr
+        sel.warm_emission is not None
+        or type(sel.instrument).thermal_photon_rate_per_sr
         is not Instrument.thermal_photon_rate_per_sr
     ):
         thermal = (
             Image(
                 jnp.broadcast_to(
-                    instrument.thermal_photon_rate_per_sr(wavelength_nm), grid.shape
+                    sel.thermal_photon_rate_per_sr(wavelength_nm), grid.shape
                 ),
                 grid,
                 (),
@@ -279,14 +295,13 @@ def _node_rates(
     return components, supported, speckle_covered
 
 
-def _band_ids(instrument, scene, quadrature):
+def _band_ids(coro, scene, quadrature):
     """Select, on the host, which coronagraph models the program needs.
 
     For averaged products, return the covering child index for each observing
     band. For single-wavelength products, return the children the real nodes
     can select, in dispatch order (all children when the nodes are traced).
     """
-    coro = instrument.coronagraph
     models = coro.coronagraphs if isinstance(coro, MultiBandCoronagraph) else (coro,)
     nodes = quadrature.nodes_nm
     if isinstance(coro, MultiBandCoronagraph) and coro.band_averaged:
@@ -363,33 +378,36 @@ def _node_child_ids(models, quadrature):
     return tuple(i for i in range(len(models)) if i in selected)
 
 
-def _band_center_dtype(quadrature, instrument):
+def _band_center_dtype(quadrature, sel):
     """Floating working precision for a band center, even with integer nodes."""
     floating = (
         values
         for values in (quadrature.nodes_nm, quadrature.weights_nm)
         if jnp.issubdtype(values.dtype, jnp.floating)
     )
-    return jnp.result_type(instrument.flux_scale, *floating)
+    return jnp.result_type(sel.flux_scale, *floating)
 
 
-def _band_centers(quadrature, instrument):
+def _band_centers(quadrature, sel):
     """Band centers in the floating working precision, including for integer nodes."""
     return jnp.asarray(
         [band.center_nm for band in quadrature.bands],
-        dtype=_band_center_dtype(quadrature, instrument),
+        dtype=_band_center_dtype(quadrature, sel),
     )
 
 
 def _node_function(
     models,
     scene,
-    instrument,
-    exposure,
+    sel,
+    quadrature,
+    resolution,
+    pointing,
     grid,
     ephemeris,
     positions,
     time_d,
+    speckle_time_d,
     centers,
     uniform_sky,
     band_branches,
@@ -397,7 +415,7 @@ def _node_function(
     """Return the checkpointed function for one node's rates and pixel support.
 
     ``w`` is the traced node wavelength and ``(i, j)`` its band and node index
-    in the exposure's quadrature. The sources are read once, on the exposure's
+    in the sampling's quadrature. The sources are read once, on the sampling's
     quadrature and resolution, and each node takes its row. Works for any model
     count; the result is ``(components, static, speckle)``, the static and
     speckle coverage of :func:`_node_rates`.
@@ -427,8 +445,8 @@ def _node_function(
         else system
     )
     sources = read.sources(
-        exposure.quadrature,
-        exposure.resolution,
+        quadrature,
+        resolution,
         jnp.atleast_1d(time_d),
         ephemeris=ephemeris,
     )
@@ -460,10 +478,11 @@ def _node_function(
             centers[i],
             model,
             system,
-            instrument,
+            sel,
             time_d,
+            speckle_time_d,
             grid,
-            exposure.pointing,
+            pointing,
             positions,
             row(w, i, j),
             samples,
@@ -507,7 +526,11 @@ def _planet_support(model, pointing, center, positions):
 
 
 def planet_source_support(
-    scene: Scene, instrument: Instrument, exposure: Exposure
+    scene: Scene,
+    observatory: Observatory,
+    exposure: Exposure,
+    *,
+    sampling: SpectralSampling,
 ) -> np.ndarray:
     """Read whether each planet is inside the coronagraph's source domain.
 
@@ -524,22 +547,29 @@ def planet_source_support(
     component boundary the nodes on either side read different components. A
     False flag therefore does not guarantee a zero band image, nor a True flag a
     nonzero one, when admission changes inside the band. Times are
-    ``exposure.time_d`` (a scalar gives T = 1).
-    This is a host function on concrete values.
+    ``exposure.on_epoch(scene.epoch).time_d`` (a scalar gives T = 1).
+    This is a host function on concrete values. It checks the event against
+    the sampling and renders nothing.
 
     Examples:
         Two bands, each read through the component that covers its center::
 
             bands = (Band(520.0, 530.0), Band(570.0, 580.0))
-            exposure = build_exposure(scene, instrument, bands, time_d=0.0)
-            support = planet_source_support(scene, instrument, exposure)
+            exposure = build_exposure(
+                bands, epoch=scene.epoch, instrument="imager", time_d=0.0
+            )
+            sampling = build_sampling(observatory, exposure, scene=scene)
+            support = planet_source_support(
+                scene, observatory, exposure, sampling=sampling
+            )
             support.shape  # (2, number of planets, 1)
             support[:, 0, 0]  # e.g. [False, True]: outside the blue grid only
 
     Args:
         scene: The unbatched scene supplying planet positions.
-        instrument: The instrument supplying the coronagraph and detector grid.
-        exposure: The exposure supplying the bands, times and roll.
+        observatory: The observatory supplying the coronagraph and detector grid.
+        exposure: The commanded event supplying the bands, times and roll.
+        sampling: The wavelength rule built for this event.
 
     Returns:
         A NumPy Boolean array of shape (W, K, T), one entry per band, planet
@@ -548,20 +578,21 @@ def planet_source_support(
     Raises:
         NotImplementedError: The exposure has an explicit pointing offset.
         ValueError: A band center falls outside every multiband component the
-            renderer holds for the quadrature.
+            renderer holds for the quadrature, or the instrument is not named
+            in the observatory.
+        StampMismatchError: The sampling was built for other hardware.
     """
-    _check_render_inputs(scene, instrument, exposure)
-    quadrature = exposure.quadrature
-    centers = _band_centers(quadrature, instrument)
-    _, positions = _planet_positions(scene, like(exposure.time_d, centers), centers)
+    sel, coro, time_d, _ = _host_stage(scene, observatory, exposure, sampling)
+    quadrature = sampling.quadrature
+    centers = _band_centers(quadrature, sel)
+    _, positions = _planet_positions(scene, like(time_d, centers), centers)
     _, n_planets, n_times = positions.shape
     support = np.zeros((len(quadrature.bands), n_planets, n_times), dtype=bool)
     if not n_planets:
         return support
-    coro = instrument.coronagraph
     # The components the renderer holds for this quadrature, in dispatch order.
     models = (
-        tuple(coro.coronagraphs[i] for i in _band_ids(instrument, scene, quadrature))
+        tuple(coro.coronagraphs[i] for i in _band_ids(coro, scene, quadrature))
         if isinstance(coro, MultiBandCoronagraph)
         else (coro,)
     )
@@ -631,8 +662,13 @@ def _real_nodes(quadrature):
 @eqx.filter_jit
 def _render(
     scene,
-    instrument,
-    exposure,
+    sel,
+    coro,
+    pointing,
+    time_d,
+    speckle_time_d,
+    quadrature,
+    resolution,
     *,
     kind,
     band_ids,
@@ -647,7 +683,6 @@ def _render(
     are zeroed where the strict support (both) is False, or only where the
     static support is False when ``static_beyond_speckle``.
     """
-    coro = instrument.coronagraph
     models = (coro,)
     band_branches = None
     if isinstance(coro, MultiBandCoronagraph):
@@ -657,10 +692,11 @@ def _render(
         models = tuple(coro.coronagraphs[i] for i in model_ids)
         if coro.band_averaged:
             band_branches = tuple(model_ids.index(i) for i in band_ids)
-    quadrature = exposure.quadrature
-    grid = _exposure_grid(instrument, exposure)
-    centers = _band_centers(quadrature, instrument)
-    time_d = like(exposure.time_d, centers)
+    grid = _exposure_grid(sel, pointing)
+    centers = _band_centers(quadrature, sel)
+    time_d = like(time_d, centers)
+    if speckle_time_d is not None:
+        speckle_time_d = like(speckle_time_d, centers)
     ephemeris, positions = None, None
     if planets and scene.planets:
         ephemeris, positions = _planet_positions(scene, time_d, centers)
@@ -669,12 +705,15 @@ def _render(
     node = _node_function(
         models,
         scene,
-        instrument,
-        exposure,
+        sel,
+        quadrature,
+        resolution,
+        pointing,
         grid,
         ephemeris,
         positions,
         time_d,
+        speckle_time_d,
         centers,
         uniform_sky,
         band_branches,
@@ -687,7 +726,7 @@ def _render(
         native = model.at_wavelength(center).source_grid
         scale_nm = model.scale_wavelength_nm(center, center)
         return _planet_samples(
-            model, center, scale_nm, grid, exposure.pointing, native, positions
+            model, center, scale_nm, grid, pointing, native, positions
         )
 
     if kind == "photons":
@@ -735,7 +774,7 @@ def _render(
             photons = Rates(
                 single, "photon", **jax.tree.map(lambda x: x[None, None], components)
             )
-            electrons = instrument.detector.electrons(photons)
+            electrons = sel.detector.electrons(photons)
             values = {name: getattr(electrons, name)[0] for name in components}
             return values, static_node, speckle_node
 
@@ -782,38 +821,49 @@ def _draw(detector, key, electrons, plan):
 
 def _run(
     scene,
-    instrument,
+    sel,
+    coro,
     exposure,
+    clocks,
+    sampling,
     kind,
     *,
     planets=True,
     uniform_sky=False,
     static_beyond_speckle=False,
 ):
-    """Run the shared program for one scene, instrument and exposure.
+    """Run the shared program for one scene, selected instrument and event.
+
+    ``clocks`` is the pair ``(time_d, speckle_time_d)`` stated on the scene's
+    epoch and on the speckle field's epoch. The compiled stage receives leaves
+    and structure only, never the event or the sampling object.
 
     The record always carries both flags: ``supported`` is the static support
     AND the speckle field's, and ``static_supported`` the static support alone
     (the two are equal without a field).
     """
+    quadrature = sampling.quadrature
     values, static, speckle = _render(
         scene,
-        instrument,
-        exposure,
+        sel,
+        coro,
+        exposure.pointing,
+        *clocks,
+        quadrature,
+        sampling.resolution,
         kind=kind,
-        band_ids=_band_ids(instrument, scene, exposure.quadrature),
+        band_ids=_band_ids(coro, scene, quadrature),
         planets=planets,
         uniform_sky=uniform_sky,
         # Structure, not a value: a NumPy or JAX boolean is read on the host so
         # that filter_jit does not trace it.
         static_beyond_speckle=bool(static_beyond_speckle),
     )
-    quadrature = exposure.quadrature
-    sampling, carrier = (
+    axis, carrier = (
         (quadrature, "photon") if kind == "photons" else (quadrature.bands, "electron")
     )
     return Rates(
-        sampling,
+        axis,
         carrier,
         supported=static & speckle,
         static_supported=static,
@@ -882,66 +932,145 @@ def _require_on_axis(exposure):
         )
 
 
-def _check_render_inputs(scene, instrument, exposure):
+def _check_render_inputs(scene, observatory, exposure, sampling):
     """Require on-axis pointing and check render precision and scene leaves."""
     _require_on_axis(exposure)
-    precision_of(instrument)
+    precision_of(observatory)
     precision_of(exposure)
+    precision_of(sampling)
     _refuse_numpy_leaves(scene)
 
 
+def _host_stage(scene, observatory, exposure, sampling):
+    """Run the host checks and translations that precede every render.
+
+    Selects the configuration, binds its coronagraph once, checks the event
+    against the sampling, states the event time on the scene's epoch and on the
+    speckle field's own epoch (in binary64 on the host, before any precision
+    cast), then refuses an explicit offset and mixed precision.
+
+    Returns:
+        ``(sel, coronagraph, time_d, speckle_time_d)``; the last is None
+        without a speckle field.
+    """
+    sel = observatory.select(exposure.instrument)
+    coro = sel.coronagraph
+    sampling.check_event(exposure, selected=sel, scene=scene)
+    time_d = exposure.on_epoch(scene.epoch).time_d
+    field = sel.speckle
+    speckle_time_d = None if field is None else exposure.on_epoch(field.epoch).time_d
+    _check_render_inputs(scene, observatory, exposure, sampling)
+    return sel, coro, time_d, speckle_time_d
+
+
 def build_exposure(
-    scene: Scene,
-    instrument: Instrument,
     bands: Sequence[Band],
     *,
+    epoch: Epoch,
+    instrument: str,
     time_d,
     roll_deg=0.0,
     offset_mas=None,
     plan: FramePlan | None = None,
-    order: int = 4,
-    field_lod=None,
-    allow_wide_bands: bool = False,
 ) -> Exposure:
-    """Build the host-side Exposure for one observation of a scene.
+    """Build the commanded event of one observation.
 
-    Each band is split at the breaks the instrument, the scene's local zodi
-    and its disk declare, and a Gauss-Legendre rule is applied to every piece:
-    ``order`` nodes, raised for a piece the diffraction pattern slides across by
-    the detector field (``field_lod``). The field sets the node count for both
-    product types. For a band-averaged product, every node uses the observing
-    band's central lambda/D scale. Extra nodes sample the source spectra and
-    speckle field, and do not refine the coronagraph image. For a
-    single-wavelength product the diffraction pattern scales at every node.
-    The star, the planets and a tabulated local zodi supply no breaks. The
-    exposure holds the ``Resolution`` that reduces each tabulated spectrum on the
-    nodes, so a band integral of a rough stellar spectrum is exact in the
-    spectrum however few nodes the band has. A disk has no such reduction and
-    is read at the nodes, so a disk with a tabulated spectrum (an ExoVista
-    contrast cube) declares its wavelength knots as breaks and every knot
-    interval inside a band gets its own nodes; a disk that declares
-    no breaks adds none. ``roll_deg`` is the position angle
-    of detector +y, north through east. ``plan`` is only needed by
-    :func:`observe`. The local zodi is evaluated at render time for the scene's
-    sky frame and ``time_d``.
-
-    The build reads the static knot grids of the scene's tables and caches no
-    other scene value, so the exposure declares no reads: a knot grid is never a
-    leaf, and no fit can move one. Replacing a table's ``Knots`` gives a grid
-    with another digest, and the resolution then holds no operator for it and
-    refuses. A NumPy leaf in the scene is refused at entry, naming its path.
-    A band that leaves a table is refused here, naming the table and its end;
-    end the band at the table.
+    The event holds no scene, no observatory and no wavelength rule; it is what
+    a scheduler commands. Build the rule that serves it with
+    :func:`build_sampling`. ``roll_deg`` is the position angle of detector +y,
+    north through east. ``plan`` is only needed by :func:`observe`. Nothing is
+    checked against hardware here: an explicit offset is refused when the event
+    is rendered.
 
     Args:
-        scene: The scene, whose tabulated sources are resolved on the nodes.
-        instrument: The instrument, which declares its own spectral breaks.
-        bands: The bands to observe, each split and integrated separately.
-        time_d: Observation time in days from the scene's epoch.
+        bands: The bands to observe, in order.
+        epoch: Day zero of ``time_d``.
+        instrument: Name of the instrument configuration.
+        time_d: Start of collection in days from ``epoch``.
         roll_deg: Position angle of detector +y, in degrees.
         offset_mas: Target position from the optical axis in detector (x, y)
             milliarcseconds. Rendering requires None (on axis).
         plan: The frame plan, needed only by :func:`observe`. None for none.
+
+    Returns:
+        The commanded event.
+
+    Raises:
+        ValueError: An explicit pointing offset has a shape other than (2,).
+    """
+    return Exposure(
+        time_d,
+        Pointing(roll_deg, offset_mas),
+        plan,
+        epoch=epoch,
+        instrument=instrument,
+        bands=tuple(bands),
+    )
+
+
+def _scene_reads(scene, resolution):
+    """Owner-qualified scene paths of the tables whose operators the build froze."""
+    if not resolution.keys:
+        return ()
+    paths = []
+
+    def tabulated(source):
+        return getattr(source, "knot_digest", None) is not None
+
+    if tabulated(scene.star):
+        paths.append("star")
+    for i, planet in enumerate(scene.planets):
+        if tabulated(planet.physical_model):
+            paths += [f"planets[{i}].physical_model", "star"]
+    if tabulated(scene.local_zodi):
+        paths.append("local_zodi")
+    return qualify("scene", dict.fromkeys(paths))
+
+
+def build_sampling(
+    observatory: Observatory,
+    exposure: Exposure,
+    *,
+    scene: Scene | None = None,
+    order: int = 4,
+    field_lod=None,
+    allow_wide_bands: bool = False,
+) -> SpectralSampling:
+    """Build the wavelength rule and operators that serve one commanded event.
+
+    Each band of the event is split at the breaks the selected instrument (its
+    telescope included), the scene's local zodi and its disk declare, and a
+    Gauss-Legendre rule is applied to every piece: ``order`` nodes, raised for a
+    piece the diffraction pattern slides across by the detector field
+    (``field_lod``). The field sets the node count for both product types. For a
+    band-averaged product, every node uses the observing band's central
+    lambda/D scale. Extra nodes sample the source spectra and speckle field, and
+    do not refine the coronagraph image. For a single-wavelength product the
+    diffraction pattern scales at every node. The star, the planets and a
+    tabulated local zodi supply no breaks. The sampling holds the
+    ``Resolution`` that reduces each tabulated spectrum on the nodes, so a band
+    integral of a rough stellar spectrum is exact in the spectrum however few
+    nodes the band has. A disk has no such reduction and is read at the nodes,
+    so a disk with a tabulated spectrum (an ExoVista contrast cube) declares its
+    wavelength knots as breaks and every knot interval inside a band gets its
+    own nodes; a disk that declares no breaks adds none.
+
+    The build reads the static knot grids of the scene's tables. When the
+    resolution holds an operator, ``reads`` names the frozen node rule
+    (``sampling.quadrature.nodes_nm`` and ``weights_nm``) and the scene tables
+    the operators were built from; a smooth scene declares none. ``built_at``
+    records the host facts that determined the sampling, so the renderer can
+    check that it serves the event and the hardware it is given.
+
+    Args:
+        observatory: The observatory, whose selected instrument declares its own
+            spectral breaks.
+        exposure: The commanded event, which names the bands and the instrument.
+        scene: The scene, whose tabulated sources are resolved on the nodes, or
+            None to build from the hardware and the event alone. Without a
+            scene the sampling adds no scene breaks, holds no resolution, reads
+            no scene tables and carries no scene-layout stamp, so the check
+            reports the scene layout as unverified.
         order: Number of quadrature nodes in each piece of a band.
         field_lod: Largest separation, in lambda/D at the band center, at which
             the response is read: a number, one value per band, or None for the
@@ -955,51 +1084,75 @@ def build_exposure(
             is under-blurred for the wider band.
 
     Returns:
-        The exposure holding the time, pointing, wavelength quadrature, its
-        resolution and the plan.
+        The quadrature, its resolution, the frozen reads and the build stamps.
 
     Raises:
-        ValueError: An explicit pointing offset has a shape other than (2,), or
-            an observing band exceeds the coverage of a tabulated source.
+        ValueError: The instrument is not named in the observatory, or an
+            observing band exceeds the coverage of a tabulated source.
         TypeError: The scene contains NumPy leaves.
     """
-    _refuse_numpy_leaves(scene)
-    models = [m for m in (instrument, scene.local_zodi) if m is not None]
-    # The disk supplies breaks only: its knots split the band, and it has no
-    # say in the field that sets the node count of a piece.
-    disk_breaks = () if scene.disk is None else scene.disk.spectral_breaks_nm()
+    sel = observatory.select(exposure.instrument)
+    if scene is None:
+        models = [sel]
+        disk_breaks = ()
+    else:
+        _refuse_numpy_leaves(scene)
+        models = [m for m in (sel, scene.local_zodi) if m is not None]
+        # The disk supplies breaks only: its knots split the band, and it has no
+        # say in the field that sets the node count of a piece.
+        disk_breaks = () if scene.disk is None else scene.disk.spectral_breaks_nm()
     quadrature = Quadrature.build(
-        bands,
+        exposure.bands,
         *models,
         order=order,
         breaks_nm=disk_breaks,
         field_lod=field_lod,
         allow_wide_bands=allow_wide_bands,
     )
-    return Exposure(
-        time_d=time_d,
-        pointing=Pointing(roll_deg, offset_mas),
-        quadrature=quadrature,
-        plan=plan,
-        resolution=_resolve(scene, quadrature),
+    if scene is None:
+        resolution = Resolution.build(quadrature)
+    else:
+        resolution = _resolve(scene, quadrature)
+    reads = ()
+    if resolution.keys:
+        reads = qualify(
+            "sampling", ("quadrature.nodes_nm", "quadrature.weights_nm")
+        ) + _scene_reads(scene, resolution)
+    built_at = build_facts(
+        exposure.bands,
+        instrument=exposure.instrument,
+        selected=sel,
+        scene=scene,
+        field_lod=field_lod,
+        order=order,
+        allow_wide_bands=allow_wide_bands,
+        layout=Digest(quadrature.digest),
+        precision=str(precision_of(observatory)),
+        producer="coronagraphoto.build_sampling",
+        producer_version=__version__,
     )
+    return SpectralSampling(quadrature, resolution, reads=reads, built_at=built_at)
 
 
 def photon_rates(
     scene: Scene,
-    instrument: Instrument,
+    observatory: Observatory,
     exposure: Exposure,
     *,
+    sampling: SpectralSampling,
     static_beyond_speckle: bool = False,
 ) -> Rates:
     """Return full (W,Q,ny,nx) photon integrands, in photons/s/nm/pixel.
 
-    One entry per source term and wavelength node of ``exposure.quadrature``.
+    One entry per source term and wavelength node of ``sampling.quadrature``.
     Call integrate() on the returned record to integrate its spectral nodes.
     No QE or survival is applied. Local zodi comes from ``scene.local_zodi`` (None
-    disables it); the speckle field from ``instrument.speckle`` (None adds
-    none). Thermal is the warm telescope's uniform emission from
-    ``instrument.warm_emission`` (zero when None); companion terms are zero.
+    disables it); the speckle field from the selected instrument (None adds
+    none). Thermal is the warm telescope's uniform emission from the selected
+    instrument's ``warm_emission`` (zero when None); companion terms are zero.
+
+    The scene is read at ``exposure.on_epoch(scene.epoch).time_d`` and the
+    speckle field at the event stated on the field's own epoch.
 
     The coronagraph renders only what its data hold. ``supported`` of shape
     (W, ny, nx) is False at a detector pixel whose footprint, with the reach of
@@ -1012,8 +1165,9 @@ def photon_rates(
 
     Args:
         scene: The scene to render.
-        instrument: The instrument to render it with.
-        exposure: The exposure giving the time, roll and wavelength nodes.
+        observatory: The observatory to render it with.
+        exposure: The commanded event giving the time, roll and instrument.
+        sampling: The wavelength rule built for this event.
         static_beyond_speckle: Keep the static light where only the speckle
             field is missing. By default the product terms are zero wherever
             ``supported`` is False. With True they are zero only where
@@ -1034,12 +1188,19 @@ def photon_rates(
 
     Raises:
         NotImplementedError: The exposure has an explicit pointing offset.
+        ValueError: The event bands differ from the sampling bands, or the
+            instrument is not named in the observatory.
+        StampMismatchError: The sampling was built for other hardware.
+        PrecisionError: A float32 event time would lose an epoch difference.
     """
-    _check_render_inputs(scene, instrument, exposure)
+    sel, coro, *clocks = _host_stage(scene, observatory, exposure, sampling)
     return _run(
         scene,
-        instrument,
+        sel,
+        coro,
         exposure,
+        clocks,
+        sampling,
         "photons",
         static_beyond_speckle=static_beyond_speckle,
     )
@@ -1047,20 +1208,21 @@ def photon_rates(
 
 def expected(
     scene: Scene,
-    instrument: Instrument,
+    observatory: Observatory,
     exposure: Exposure,
     *,
+    sampling: SpectralSampling,
     static_beyond_speckle: bool = False,
 ) -> Rates:
     """Stream nodes into (W,ny,nx) electrons/s with detector-owned yield.
 
-    These are the expected rates for the instantaneous scene at
-    ``exposure.time_d``; ``exposure.plan`` does not enter. The exposure may be
-    an argument of JIT, vmap and grad: node wavelengths, weights and roll are
-    traced, and one program serves any of their values. Each scan step sends
-    one photon image and its wavelength and weight to the detector. Forward
-    storage includes the band accumulator, one node's images and any shared
-    planet PSFs for the band. JAX reverse-mode may retain residuals.
+    These are the expected rates for the instantaneous scene at the event time;
+    ``exposure.plan`` does not enter. The exposure and the sampling may be
+    arguments of JIT, vmap and grad: node wavelengths, weights, time and roll
+    are traced, and one program serves any of their values. Each scan step
+    sends one photon image and its wavelength and weight to the detector.
+    Forward storage includes the band accumulator, one node's images and any
+    shared planet PSFs for the band. JAX reverse-mode may retain residuals.
 
     ``supported`` of shape (W, ny, nx) is False where any node of the band
     reads beyond a product's data (see :func:`photon_rates`); the band-integrated
@@ -1069,8 +1231,9 @@ def expected(
 
     Args:
         scene: The scene to render.
-        instrument: The instrument to render it with, including its detector.
-        exposure: The exposure giving the time, roll and wavelength nodes.
+        observatory: The observatory to render it with, including its detector.
+        exposure: The commanded event giving the time, roll and instrument.
+        sampling: The wavelength rule built for this event.
         static_beyond_speckle: Keep the static light where only the speckle
             field is missing. By default the product terms are zero wherever
             ``supported`` is False. With True they are zero only where
@@ -1092,96 +1255,80 @@ def expected(
 
     Raises:
         NotImplementedError: The exposure has an explicit pointing offset.
+        ValueError: The event bands differ from the sampling bands, or the
+            instrument is not named in the observatory.
+        StampMismatchError: The sampling was built for other hardware.
+        PrecisionError: A float32 event time would lose an epoch difference.
     """
-    _check_render_inputs(scene, instrument, exposure)
+    sel, coro, *clocks = _host_stage(scene, observatory, exposure, sampling)
     return _run(
         scene,
-        instrument,
+        sel,
+        coro,
         exposure,
+        clocks,
+        sampling,
         "electrons",
         static_beyond_speckle=static_beyond_speckle,
     )
 
 
-def observe(key, scene: Scene, instrument: Instrument, exposure: Exposure) -> Image:
-    """Draw one electron Image (W,ny,nx), integrated on the detector sky grid.
-
-    Rates describe the instantaneous scene at ``exposure.time_d``, held
-    throughout ``exposure.plan``, which is required. Plan fields are scalar or
-    (W,), with W matching the band axis. Detector noise is drawn once after
-    combining all source terms.
-
-    Args:
-        key: JAX PRNG key for the detector noise draw.
-        scene: The scene to render.
-        instrument: The instrument to render it with, including its detector.
-        exposure: The exposure giving the time, roll, wavelength nodes and the
-            required frame plan.
-
-    Returns:
-        The noisy electron image of shape (W, ny, nx), one plane per band.
-
-    Raises:
-        NotImplementedError: The exposure has an explicit pointing offset.
-        ValueError: The exposure has no frame plan.
-    """
-    _require_on_axis(exposure)
-    if exposure.plan is None:
-        raise ValueError("observe needs an exposure built with a FramePlan")
-    electrons = expected(scene, instrument, exposure)
-    # A traced roll cannot live in static grid metadata, so the returned grid
-    # then carries no orientation.
-    roll = exposure.pointing.roll_deg
-    orientation = None if isinstance(roll, jax.core.Tracer) else SkyOrientation(roll)
-    return Image(
-        _draw(instrument.detector, key, electrons, exposure.plan),
-        _detector_grid(instrument, orientation),
-        ("band",),
-        Measure.integral(),
-        "electrons",
-    )
-
-
-def observe_data(
-    key, scene: Scene, instrument: Instrument, exposure: Exposure
+def observe(
+    key,
+    scene: Scene,
+    observatory: Observatory,
+    exposure: Exposure,
+    *,
+    sampling: SpectralSampling,
 ) -> ExposureData:
     """Draw one detector observation and retain its exposure.
 
-    As in :func:`observe`, the scene is held at the exposure time and detector
-    noise is drawn once over the frame plan. The roll lives on the exposure.
-    The returned variance and flags are absent and all pixels are marked valid.
+    Rates describe the instantaneous scene at the event time, held throughout
+    ``exposure.plan``, which is required. Plan fields are scalar or (W,), with W
+    matching the band axis. Detector noise is drawn once after combining all
+    source terms. The roll lives on ``data.exposure.pointing``, not on the
+    image grid. The variance and flags are absent and every pixel is marked
+    valid. ``built_at`` records the producer, its version, the detector class
+    and the sampling's ``layout`` stamp, so two observations built from one
+    sampling stack.
 
     Args:
         key: JAX PRNG key for the detector noise draw.
         scene: The scene to render.
-        instrument: The instrument to render with, including its detector.
-        exposure: On-axis pointing, observation time, wavelength quadrature,
-            and the required frame plan.
+        observatory: The observatory to render with, including its detector.
+        exposure: The commanded event, with the required frame plan.
+        sampling: The wavelength rule built for this event.
 
     Returns:
         The measured electrons, with axes (band, y, x), and their exposure.
 
     Raises:
         NotImplementedError: The exposure has an explicit pointing offset.
-        ValueError: The exposure has no frame plan.
+        ValueError: The exposure has no frame plan, the event bands differ from
+            the sampling bands, or the instrument is not named in the
+            observatory.
+        StampMismatchError: The sampling was built for other hardware.
     """
     _require_on_axis(exposure)
     if exposure.plan is None:
-        raise ValueError("observe_data needs an exposure built with a FramePlan")
-    detector = instrument.detector
-    rates = expected(scene, instrument, exposure)
-    electrons = _draw(detector, key, rates, exposure.plan)
+        raise ValueError("observe needs an exposure built with a FramePlan")
+    sel = observatory.select(exposure.instrument)
+    rates = expected(scene, observatory, exposure, sampling=sampling)
+    electrons = _draw(sel.detector, key, rates, exposure.plan)
     image = Image(
         electrons,
-        _detector_grid(instrument, None),
+        _detector_grid(sel, None),
         ("band",),
         Measure.integral(),
         "electrons",
     )
-    built_at = build_stamps(
-        producer="coronagraphoto.observe_data",
-        producer_version=__version__,
-        detector=type(detector).__name__,
-        quadrature_layout=exposure.quadrature.layout_digest,
+    layout = dict(sampling.built_at).get("layout", stamp_value(None))
+    built_at = merge_stamps(
+        build_stamps(
+            producer="coronagraphoto.observe",
+            producer_version=__version__,
+            detector=type(sel.detector).__name__,
+        ),
+        (("layout", layout),),
     )
     return ExposureData(image, exposure, built_at=built_at)

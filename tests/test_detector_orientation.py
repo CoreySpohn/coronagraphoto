@@ -6,7 +6,14 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import GaussianCoronagraph, centroid, exposure_for, make_path, make_system
+from conftest import (
+    GaussianCoronagraph,
+    centroid,
+    exposure_for,
+    make_path,
+    make_system,
+    with_instrument,
+)
 from hwoutils.numerics import roundoff
 from optixstuff import MultiBandCoronagraph
 from optixstuff.grids import Frame, PixelGrid, SkyOrientation
@@ -20,7 +27,8 @@ from coronagraphoto import photon_rates
 
 def rates_at(system, path, quadrature, roll=0):
     """Photon rates of a zodi-free scene at day 0 and a roll in degrees."""
-    return photon_rates(system, path, exposure_for(system, quadrature, roll_deg=roll))
+    exposure, sampling = exposure_for(system, quadrature, roll_deg=roll)
+    return photon_rates(system, path, exposure, sampling=sampling)
 
 
 @pytest.mark.parametrize(
@@ -34,7 +42,7 @@ def test_cardinal_centroids(sky_pa, roll, expected):
     PSF deposition, radiometry and the two-source sum, at image peak.
     """
     path = make_path()
-    scale = float(path.detector.pixel_scale_arcsec)
+    scale = float(path.instruments[0].detector.pixel_scale_arcsec)
     system = make_system(sky_pa_deg=sky_pa, separation_arcsec=scale)
     # The smaller inscribed diameter enlarges lambda/D in the red band. A sky
     # source must still land on the same detector pixel.
@@ -43,23 +51,26 @@ def test_cardinal_centroids(sky_pa, roll, expected):
         n=32, step=0.35, frame=Frame(600.0, 3.0, "inscribed"), bandpass=Band(590, 610)
     )
     multiband = MultiBandCoronagraph((blue, red))
-    two_band_path = replace(
-        path,
-        primary=replace(
-            path.primary, inscribed_diameter_m=3.0, collecting_area_m2=20.0
-        ),
+    pupil = replace(
+        path.telescope.pupil, inscribed_diameter_m=3.0, collecting_area_m2=20.0
+    )
+    two_band_path = with_instrument(
+        replace(path, telescope=replace(path.telescope, pupil=pupil)),
         coronagraph=multiband,
     )
     rates = rates_at(
         system,
         two_band_path,
         Quadrature.build(
-            (Band(499.5, 500.5), Band(599.5, 600.5)), system, two_band_path, order=1
+            (Band(499.5, 500.5), Band(599.5, 600.5)),
+            system,
+            two_band_path.select("imager"),
+            order=1,
         ),
         roll,
     )
     for image in rates.planet[:, 0]:
-        grid = PixelGrid.regular(path.detector.shape, scale, "arcsec")
+        grid = PixelGrid.regular(path.instruments[0].detector.shape, scale, "arcsec")
         np.testing.assert_allclose(
             centroid(image, grid) - [grid.center_x, grid.center_y],
             expected,
@@ -93,18 +104,24 @@ def test_cardinal_centroids(sky_pa, roll, expected):
                 rates_at(
                     scene,
                     path,
-                    Quadrature.build((Band(549.5, 550.5),), scene, path, order=1),
+                    Quadrature.build(
+                        (Band(549.5, 550.5),), scene, path.select("imager"), order=1
+                    ),
                     90,
                 ).planet[0, 0]
             )
         positions = scene.positions(jnp.array([0.0]))
-        lod_arcsec = path.coronagraph.grid.frame.lod_to_arcsec(550.0)
-        reference = path.coronagraph.source_psfs(
-            550.0,
-            positions[1, :, 0] / lod_arcsec,
-            positions[0, :, 0] / lod_arcsec,
-            grid=None,
-        ).image.data
+        lod_arcsec = path.instruments[0].coronagraph.grid.frame.lod_to_arcsec(550.0)
+        reference = (
+            path.instruments[0]
+            .coronagraph.source_psfs(
+                550.0,
+                positions[1, :, 0] / lod_arcsec,
+                positions[0, :, 0] / lod_arcsec,
+                grid=None,
+            )
+            .image.data
+        )
         reference = (
             40
             * 0.4
@@ -129,7 +146,7 @@ def test_roll_moves_disk_and_planet_together(disk_kind):
     sampling of its second moments bounds rotation error below .02 radian.
     """
     path = make_path(n=32, step=0.3, cube=True)
-    scale = float(path.detector.pixel_scale_arcsec)
+    scale = float(path.instruments[0].detector.pixel_scale_arcsec)
     grid = PixelGrid.regular((32, 32), scale, "arcsec", orientation=SkyOrientation(0))
     x, y = grid.coordinates()
     contrast = 1e-9 * jnp.exp(-0.5 * ((x / (2 * scale)) ** 2 + (y / (6 * scale)) ** 2))
@@ -164,7 +181,9 @@ def test_roll_moves_disk_and_planet_together(disk_kind):
         rates = rates_at(
             system,
             path,
-            Quadrature.build((Band(549.5, 550.5),), system, path, order=1),
+            Quadrature.build(
+                (Band(549.5, 550.5),), system, path.select("imager"), order=1
+            ),
             roll,
         )
         delta = centroid(rates.planet[0, 0], grid) - [grid.center_x, grid.center_y]
@@ -196,7 +215,7 @@ def test_compact_disk_planet_centroids():
     path = make_path(n=24, step=0.3, cube=True)
     grid = PixelGrid.regular(
         (24, 24),
-        float(path.detector.pixel_scale_arcsec),
+        float(path.instruments[0].detector.pixel_scale_arcsec),
         "arcsec",
         orientation=SkyOrientation(0),
     )
@@ -212,7 +231,9 @@ def test_compact_disk_planet_centroids():
         disk=disk,
     )
     rates = rates_at(
-        system, path, Quadrature.build((Band(549.5, 550.5),), system, path, order=1)
+        system,
+        path,
+        Quadrature.build((Band(549.5, 550.5),), system, path.select("imager"), order=1),
     )
     np.testing.assert_allclose(
         centroid(rates.planet[0, 0], grid),
@@ -224,6 +245,6 @@ def test_compact_disk_planet_centroids():
 
 def test_imaging_capability_required():
     """A throughput-only path cannot produce detector pixels."""
-    path = eqx.tree_at(lambda p: p.coronagraph, make_path(n=8), None)
+    path = eqx.tree_at(lambda p: p.instruments[0].coronagraph, make_path(n=8), None)
     with pytest.raises(TypeError, match="AbstractImagingCoronagraph"):
         rates_at(make_system(smooth_planet=True), path, Quadrature.monochromatic(550.0))
