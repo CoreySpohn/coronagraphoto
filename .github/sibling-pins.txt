@@ -1,4 +1,4 @@
 # Unreleased sibling libraries, applied as uv overrides in the same resolve.
 # Each pins the sibling's release head; delete a pin once PyPI carries that version.
-hwoutils @ git+https://github.com/CoreySpohn/hwoutils@325eada78cc5e112fde5d17cfb4c07724d009f38
-optixstuff @ git+https://github.com/CoreySpohn/optixstuff@5d0edd65c0593210ef77cffb08cca35b99b92e70
+hwoutils @ git+https://github.com/CoreySpohn/hwoutils@d6fa9923e1c4eb2b8b428e65f3a0c1a16cb718b7
+optixstuff @ git+https://github.com/CoreySpohn/optixstuff@f9319f129d41e594dd1021a47a7b52e3850e5dc8
