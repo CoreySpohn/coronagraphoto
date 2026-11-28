@@ -315,7 +315,18 @@ def test_render_precision_closed(render_problem, entry, monkeypatch, request):
 @pytest.mark.float64_only(reason="wide scene and narrow render in one process")
 @pytest.mark.parametrize(
     "entry",
-    ["expected", "photon_rates", "multiband_photon_rates", "disk", "aperture"],
+    [
+        "expected",
+        "photon_rates",
+        "multiband_photon_rates",
+        "disk",
+        pytest.param(
+            "aperture",
+            marks=pytest.mark.slow(
+                reason="mixed-precision aperture response and record, ~14 s in CI"
+            ),
+        ),
+    ],
 )
 def test_wide_scene_narrow_render(render_problem, entry):
     """Scene rounding may move a tent sample by a few ulps of its peak.
@@ -420,10 +431,9 @@ def test_render_refuses_mixed_owner(render_problem, owner):
     basis="spike",
     srq="total electron-rate image and detector-summed planet electron rate",
 )
-@pytest.mark.float64_only(reason="precision_pair needs x64")
+@pytest.mark.float64_only(reason="the reference image needs x64")
 @pytest.mark.medium(reason="render the 1600-node worked spectrum at both precisions")
-@pytest.mark.parametrize(("quantity", "bound"), [("image", 4.4e-6), ("planet", 1.6e-6)])
-def test_worked_expected_precision(quantity, bound):
+def test_worked_expected_precision():
     """Measure the float32 error for the AB=5 star and planet at 0.05 arcsec.
 
     At zero roll, the 48x48 detector integrates 1600 nodes over 500-600 nm.
@@ -443,13 +453,20 @@ def test_worked_expected_precision(quantity, bound):
     def render(scene, instrument, exposure):
         dtype = exposure.quadrature.weights_nm.dtype
         rates = cp.expected(scene, instrument, exposure)
-        value = rates.total() if quantity == "image" else rates.planet.sum()
-        assert value.dtype == dtype
-        assert value.max() > 0
-        return value
+        image, planet = rates.total(), rates.planet.sum()
+        for value in (image, planet):
+            assert value.dtype == dtype
+            assert value.max() > 0
+            assert np.all(np.isfinite(value))
+        return np.asarray(image), float(planet)
 
-    # The default scale is the float64 peak of the single output leaf.
-    precision_pair(render, args, bound=bound, scale=None if quantity == "image" else 0)
+    image64, planet64 = render(*args)
+    image32, planet32 = render(*canonical(args, precision="float32"))
+    assert image32.shape == image64.shape
+    np.testing.assert_allclose(
+        image32, image64, rtol=0, atol=4.4e-6 * np.abs(image64).max()
+    )
+    np.testing.assert_allclose(planet32, planet64, rtol=1.6e-6, atol=0)
 
 
 class _PoissonWidening(AssertionError):

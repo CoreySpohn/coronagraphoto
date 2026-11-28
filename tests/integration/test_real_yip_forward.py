@@ -14,7 +14,9 @@ from yippy import open_yip
 from coronagraphoto import expected, observe
 
 
-@pytest.mark.medium(reason="FITS scene and YIP loaders plus observation compilation")
+@pytest.mark.slow(
+    reason="two FITS scenes, YIP load and observation, about 23 s projected in CI"
+)
 def test_fits_scene_yip_observation(tmp_path):
     """Fails on incompatible scene, YIP, detector or observation adapters.
 
@@ -121,7 +123,9 @@ def test_planet_beyond_the_hull_leaves_the_inner_planet_untouched(tmp_path):
     np.testing.assert_array_equal(valid, [True, False])
 
 
-@pytest.mark.medium(reason="synthetic YIP load and reverse-mode programs")
+@pytest.mark.slow(
+    reason="YIP load and two-mode derivative checks, ~18 s projected in CI"
+)
 @pytest.mark.float64_only(reason="check_grads finite differences at eps=1e-5")
 def test_planet_position_gradient_is_exact_inside_and_zero_beyond_the_hull(tmp_path):
     """Fails if the planet image has a wrong or NaN gradient in its position.

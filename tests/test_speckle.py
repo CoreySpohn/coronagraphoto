@@ -412,6 +412,9 @@ def test_cropped_field_matches_the_wide_field_where_supported(
     )
 
 
+@pytest.mark.slow(
+    reason="beyond-field renders and detector sampler, about 21 s projected in CI"
+)
 def test_observe_draws_the_default_render_beyond_the_field():
     """Fails if a frame holds static light beyond the field, which it cannot flag.
 

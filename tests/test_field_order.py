@@ -165,7 +165,9 @@ def _orders(quadrature):
     return [sum(n for *_, n in band) for band in quadrature.pieces]
 
 
-@pytest.mark.medium(reason="renders of a three-band exposure on both routes")
+@pytest.mark.slow(
+    reason="two image readers with padded and single bands, ~22 s projected in CI"
+)
 def test_routes_render_the_real_nodes_only(monkeypatch):
     """Fails if a route renders padded slots, or the image changes with the padding.
 

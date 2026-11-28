@@ -567,7 +567,7 @@ def closure_system(scale):
         wavelengths_nm=jnp.array([500.0, 600.0]),
         g_HG_grid=jnp.zeros(2),
         Ag_grid=jnp.ones(2),
-        amplitude=SurfaceBrightnessDust(level=3.0),
+        amplitude=SurfaceBrightnessDust(level=jnp.asarray(3.0)),
         n_slices_los=24,
     )
     zodi = PrecomputedZodi(jnp.array([500.0, 600.0]), jnp.full(2, 1e12))
@@ -576,6 +576,35 @@ def closure_system(scale):
             contrast=1e-9, separation_arcsec=2.3 * scale, sky_pa_deg=250.0, disk=disk
         ),
         zodi,
+    )
+
+
+def closure_response(path, quadrature, rule, separation_arcsec, *, outer_neighbours=0):
+    """Keep the original 33-ring spacing and phase through the last needed knot.
+
+    The closure bounds were measured on that grid. Trimming its unused outer
+    rings preserves the interpolation cell and the 16 pixel phases per ring.
+    A caller estimating curvature also keeps the neighbour beyond its cell.
+    """
+    from coronagraphoto import aperture_response
+
+    frame = path.coronagraph.frame
+    radius = max(
+        rule.radius_lod * float(frame.lod_to_arcsec(band.center_nm))
+        for band in quadrature.bands
+    )
+    pitch = float(path.detector.pixel_scale_arcsec)
+    limit = (min(path.detector.shape) / 2 - 1) * pitch - radius
+    rings = np.linspace(0, limit, 33)
+    outer = np.searchsorted(rings, separation_arcsec, side="right") + outer_neighbours
+    assert outer < len(rings)
+    return aperture_response(
+        path,
+        quadrature,
+        rule=rule,
+        n_separations=int(outer) + 1,
+        n_angles=16,
+        max_separation_arcsec=rings[outer],
     )
 
 
