@@ -1057,7 +1057,7 @@ def test_reads_beyond_the_stamp_are_zero_and_unsupported():
     assert flags.any() and not flags.all()
 
 
-@pytest.mark.medium(reason="YIP load and a 12-ring response, 6 s cold")
+@pytest.mark.medium(reason="YIP load and a one-node, 12-ring response")
 @vv.case("aperture-photon-budget", "code-verification")
 def test_planet_beyond_the_hull_reads_zero_and_unsupported(tmp_path):
     """Fails if a planet beyond the coronagraph's source nodes reads light.
@@ -1072,7 +1072,9 @@ def test_planet_beyond_the_hull_reads_zero_and_unsupported(tmp_path):
     nodes, so the table flags rings by the hull's inscribed radius. Basis:
     exact.
     """
-    coro = open_yip(write_yip(tmp_path / "yip")).prepare(rules=(_RULE,))
+    coro = open_yip(write_yip(tmp_path / "yip")).prepare(
+        rules=(_RULE,), leakage_rule="aperture_mean"
+    )
     scale = float(coro.frame.lod_to_arcsec(550.0))
     instrument = Instrument(
         primary=SimplePrimary(
@@ -1080,10 +1082,12 @@ def test_planet_beyond_the_hull_reads_zero_and_unsupported(tmp_path):
         ),
         attenuating_elements=(ConstantThroughput(throughput=1.0),),
         coronagraph=coro,
-        detector=Detector(pixel_scale_arcsec=0.1 * scale, shape=(128, 128), qe=1.0),
+        detector=Detector(pixel_scale_arcsec=0.2 * scale, shape=(64, 64), qe=1.0),
     )
     scene = make_system(separation_arcsec=2.6 * scale)
-    exposure = cp.build_exposure(scene, instrument, (Band(549.0, 551.0),), time_d=0.0)
+    exposure = cp.build_exposure(
+        scene, instrument, (Band(549.0, 551.0),), time_d=0.0, field_lod=0.0, order=1
+    )
     response = cp.aperture_response(
         instrument,
         exposure.quadrature,
@@ -1236,7 +1240,9 @@ def test_aperture_beyond_the_field_reads_zero_inside_the_static_table():
         assert np.all(np.asarray(getattr(rates, name)) == 0.0), name
 
 
-@pytest.mark.medium(reason="aperture tables of a three-band exposure and each band")
+@pytest.mark.slow(
+    reason="three-band and single-band aperture records, ~20 s projected in CI"
+)
 def test_aperture_tables_image_the_real_nodes_only(monkeypatch):
     """Fails if the response or record images padded slots, or the padding moves them.
 

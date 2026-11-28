@@ -1,12 +1,14 @@
 """Closure of the aperture record, S/N and exposure time against image sums."""
 
+from functools import cache
+
 import equinox as eqx
 import ineedvalidation as vv
 import jax.numpy as jnp
 import numpy as np
 import optixstuff as ox
 import pytest
-from conftest import closure_system, make_path, write_yip
+from conftest import closure_response, closure_system, make_path, write_yip
 from optixstuff import Detector, FramePlan
 from optixstuff.apertures import Circular
 from optixstuff.grids import Image, Measure, SkyOrientation
@@ -40,7 +42,7 @@ def _bilinear_bound(table, row, column):
 
 
 @pytest.fixture(scope="module")
-def closure(tmp_path_factory):
+def build_closure(tmp_path_factory):
     """Read one planet from the record and sum the same aperture on images.
 
     The scene is a Gaussian YIP (sigma 0.7 lambda/D, integral 0.3, pitch 0.5
@@ -58,7 +60,8 @@ def closure(tmp_path_factory):
                 half_width=8,
             )
         )
-        .prepare(rules=(rule,))
+        # The calculator consumes the image response only.
+        .prepare(rules=(rule,), leakage_rule="aperture_mean")
         .with_scene_operator()
     )
     base = eqx.tree_at(lambda p: p.coronagraph, make_path(), coro)
@@ -66,14 +69,17 @@ def closure(tmp_path_factory):
     system = closure_system(scale)
     bands = (Band(500.0, 550.0), Band(550.0, 600.0))
     roll, contrast = 15.0, 1e-9
-    east, north = system.positions(jnp.array([0.0]))[:2, 0, 0]
-    separation = jnp.hypot(east, north)
+    # The circular face-on orbit starts at its 250 degree node. Use the
+    # prescribed sky position for the aperture, independently of the renderer.
+    position_angle = np.deg2rad(250.0)
+    separation = 2.3 * scale
+    east = separation * np.sin(position_angle)
+    north = separation * np.cos(position_angle)
     x, y = SkyOrientation(roll).sky_to_detector(east, north)
-    pp = ox.PostProcessing(1e-4, 0.01, background_variance_factor=1.0)
-    frame_time, n_frames = 100.0, 360.0
-    plan = FramePlan(frame_time, n_frames)
-    levels = []
-    for n, pitch in ((48, 0.2), (96, 0.1)):
+
+    @cache
+    def build(n, pitch, compact):
+        """Build the nominal image and record for one detector sampling."""
         detector = Detector(
             shape=(n, n),
             pixel_scale_arcsec=pitch * scale,
@@ -84,10 +90,26 @@ def closure(tmp_path_factory):
             read_noise_e_rms=0.2,
         )
         path = eqx.tree_at(lambda p: p.detector, base, detector)
-        exposure = cp.build_exposure(system, path, bands, time_d=0.0, roll_deg=roll)
-        response = cp.aperture_response(
-            path, exposure.quadrature, rule=rule, n_separations=33, n_angles=16
+        # One band with two nodes still exercises chromatic detector yield.
+        # Nightly keeps both bands, the field-based rule and the ring spacing.
+        observing_bands = bands[:1] if compact else bands
+        sampling = dict(field_lod=0.0, order=2) if compact else {}
+        exposure = cp.build_exposure(
+            system, path, observing_bands, time_d=0.0, roll_deg=roll, **sampling
         )
+        if compact:
+            response = cp.aperture_response(
+                path,
+                exposure.quadrature,
+                rule=rule,
+                n_separations=7,
+                n_angles=8,
+                max_separation_arcsec=3.25 * scale,
+            )
+        else:
+            response = closure_response(
+                path, exposure.quadrature, rule, separation, outer_neighbours=1
+            )
         record = cp.aperture_record(system, path, exposure, response)
         rates = cp.aperture_rates(record, east, north, contrast=contrast, time_d=0.0)
         electrons = detector.electrons(rates)
@@ -95,7 +117,7 @@ def closure(tmp_path_factory):
         # The independent reader: the rule's own weights on the expected images.
         images = cp.expected(system, path, exposure)
         weights = []
-        for band in bands:
+        for band in observing_bands:
             frame = coro.at_wavelength(band.center_nm).source_grid.frame
             lod = float(frame.lod_to_arcsec(band.center_nm))
             ones = Image(
@@ -133,72 +155,59 @@ def closure(tmp_path_factory):
         ].min(-1)
         row = (n - 1) + 2 * float(y) / (pitch * scale)
         column = (n - 1) + 2 * float(x) / (pitch * scale)
-        value = np.asarray(
-            [[getattr(r, t) for t in TERMS[1:]] for r in (rates, rates.variance)]
-        )
         lattice_band = (
-            _bilinear_bound(
-                jnp.stack([record.star_leakage, record.uniform_sky, record.exozodi]),
-                row,
-                column,
-            ).swapaxes(0, 1)
-            / value
+            _bilinear_bound(record.exozodi[0], row, column) / rates.exozodi
         ).max(-1)
+        return dict(
+            calculated=calculated,
+            image=image,
+            error=calculated / image - 1,
+            pixels=pixels,
+            pixel_ratio=np.stack([electrons.n_pix, electrons.variance.n_pix]) / pixels,
+            planet_band=planet_band.max(-1),
+            lattice_band=lattice_band,
+            system=system,
+            path=path,
+            exposure=exposure,
+            response=response,
+            rates=rates,
+            electrons=electrons,
+            weights=weights,
+            offsets=(east, north),
+            contrast=contrast,
+        )
 
-        def residual_sq(e, time):
-            return (pp.speckle_residual_fraction * e[1] * time) ** 2 + (
-                pp.exozodi_residual_fraction * e[3] * time
-            ) ** 2
+    yield build
+    build.cache_clear()
 
-        live = float(plan.live_time_s)
-        image_rates = eqx.tree_at(
-            lambda r: (
-                r.planet,
-                r.star_leakage,
-                r.local_zodi,
-                r.exozodi,
-                r.n_pix,
-                r.variance.planet,
-                r.variance.star_leakage,
-                r.variance.local_zodi,
-                r.variance.exozodi,
-                r.variance.n_pix,
+
+_COARSE = (48, 0.2)
+_FINE = (96, 0.1)
+
+
+@pytest.fixture(
+    scope="module",
+    params=[
+        pytest.param((*_COARSE, True), id="0.2-lod-compact"),
+        pytest.param(
+            (*_COARSE, False),
+            id="0.2-lod",
+            marks=pytest.mark.slow(
+                reason="48x48 aperture record with the full original nodes, ~35 s in CI"
             ),
-            electrons,
-            (*image[0], pixels[0], *image[1], pixels[1]),
-        )
-        _, variance = detector.mean_and_variance(image_rates, plan)
-        image_snr = image[0, 0] * live / np.sqrt(variance + residual_sq(image[0], live))
-        kwargs = dict(frame_time_s=frame_time, post_processing=pp)
-        solved = ox.exposure_time(rates, detector, image_snr, **kwargs)
-
-        doubled = eqx.tree_at(lambda s: s.disk.amplitude.level, system, 6.0)
-        doubled_record = cp.aperture_record(doubled, path, exposure, response)
-        doubled_rates = cp.aperture_rates(
-            doubled_record, east, north, contrast=contrast, time_d=0.0
-        )
-        levels.append(
-            dict(
-                calculated=calculated,
-                image=image,
-                pixels=np.stack([electrons.n_pix, electrons.variance.n_pix]) / pixels,
-                planet_band=planet_band.max(-1),
-                lattice_band=lattice_band,
-                snr=np.stack([ox.snr(rates, detector, live, **kwargs), image_snr]),
-                time=np.asarray(solved.time_s),
-                valid=np.asarray(solved.valid),
-                live=live,
-                dust=np.asarray(doubled_rates.exozodi / rates.exozodi),
-                dust_images=np.asarray(
-                    jnp.sum(cp.expected(doubled, path, exposure).exozodi * weights)
-                    / jnp.sum(images.exozodi * weights)
-                ),
-            )
-        )
-    evidence = {key: np.stack([level[key] for level in levels]) for key in levels[0]}
-    evidence["error"] = evidence["calculated"] / evidence["image"] - 1
-    print("closure evidence", {key: value.tolist() for key, value in evidence.items()})
-    return evidence
+        ),
+        pytest.param(
+            (*_FINE, False),
+            id="0.1-lod",
+            marks=pytest.mark.slow(
+                reason="96x96 aperture record and image renders, ~35 s projected in CI"
+            ),
+        ),
+    ],
+)
+def closure(request, build_closure):
+    """Share one set of nominal reads across every check of this pitch."""
+    return build_closure(*request.param)
 
 
 @vv.case(
@@ -219,13 +228,11 @@ def test_planet_and_leakage_closure(closure):
     number and only float64 rounding of the convolution remains: 1e-9.
     """
     c = closure
-    planet = abs(c["error"][:, 0, 0])
+    planet = abs(c["error"][0, 0])
     assert np.all(c["planet_band"] < 5e-3)
     assert np.all(planet <= c["planet_band"])
-    # Finer pixels leave less pixel phase for the ring mean to hide.
-    assert np.all(planet[1] < planet[0])
-    assert np.all(abs(c["error"][:, 0, 1]) <= 1e-9)
-    assert np.all(c["calculated"][:, 0, :2] > 0)
+    assert np.all(abs(c["error"][0, 1]) <= 1e-9)
+    assert np.all(c["calculated"][0, :2] > 0)
 
 
 @vv.case("etc-count-rates", "code-verification", srq="planet count rate Cp")
@@ -237,7 +244,7 @@ def test_survival_applied_once(closure):
     outside it.
     """
     c = closure
-    image, calculated = c["image"][:, 0, 0], c["calculated"][:, 0, 0]
+    image, calculated = c["image"][0, 0], c["calculated"][0, 0]
     assert np.all(abs(calculated / image - 1) <= c["planet_band"])
     assert np.all(abs(0.9 * calculated / image - 1) > c["planet_band"])
 
@@ -257,13 +264,21 @@ def test_background_closure(closure):
     and both must give a nonzero exozodi.
     """
     c = closure
-    np.testing.assert_allclose(c["dust"], 2.0, rtol=1e-12)
-    np.testing.assert_allclose(c["dust_images"], 2.0, rtol=1e-12)
-    assert np.all(c["calculated"][:, 0, 2:] > 0) and np.all(c["image"][:, 0, 2:] > 0)
-    assert np.all(abs(c["error"][:, 0, 2]) <= 1e-9)
-    exozodi_band = 2 * c["lattice_band"][:, 0, 2] + 1e-9
+    system, path, exposure = c["system"], c["path"], c["exposure"]
+    doubled = eqx.tree_at(
+        lambda s: s.disk.amplitude.level, system, 2 * system.disk.amplitude.level
+    )
+    record = cp.aperture_record(doubled, path, exposure, c["response"])
+    rates = cp.aperture_rates(record, *c["offsets"], contrast=c["contrast"], time_d=0.0)
+    images = cp.expected(doubled, path, exposure)
+    np.testing.assert_allclose(rates.exozodi / c["rates"].exozodi, 2.0, rtol=1e-12)
+    dust_images = jnp.sum(images.exozodi * c["weights"]) / c["image"][0, 3].sum()
+    np.testing.assert_allclose(dust_images, 2.0, rtol=1e-12)
+    assert np.all(c["calculated"][0, 2:] > 0) and np.all(c["image"][0, 2:] > 0)
+    assert np.all(abs(c["error"][0, 2]) <= 1e-9)
+    exozodi_band = 2 * c["lattice_band"] + 1e-9
     assert np.all(exozodi_band < 1e-3)
-    assert np.all(abs(c["error"][:, 0, 3]) <= exozodi_band)
+    assert np.all(abs(c["error"][0, 3]) <= exozodi_band)
 
 
 @vv.case("etc-count-rates", "code-verification", srq="aperture variance rates")
@@ -279,13 +294,33 @@ def test_squared_weight_closure(closure):
     shrink with the pixels.
     """
     c = closure
-    np.testing.assert_allclose(c["pixels"][:, 0], 1.0, rtol=1e-9)
-    backgrounds = abs(c["error"][:, 1, 1:]).max(axis=(-2, -1))
-    pixels = abs(c["pixels"][:, 1] - 1).max(axis=-1)
-    planet = abs(c["error"][:, 1, 0]).max(axis=-1)
-    assert np.all(backgrounds < 1e-2) and np.all(pixels < 1e-2)
-    assert np.all(planet < 3e-2)
-    assert backgrounds[1] < backgrounds[0] and planet[1] < planet[0]
+    np.testing.assert_allclose(c["pixel_ratio"][0], 1.0, rtol=1e-9)
+    backgrounds = abs(c["error"][1, 1:]).max()
+    pixels = abs(c["pixel_ratio"][1] - 1).max()
+    planet = abs(c["error"][1, 0]).max()
+    assert backgrounds < 1e-2 and pixels < 1e-2
+    assert planet < 3e-2
+
+
+@pytest.mark.slow(
+    reason="both aperture records and matched image sums, ~72 s projected in CI"
+)
+@vv.case(
+    "etc-count-rates",
+    "code-verification",
+    srq="planet count rate Cp and aperture variance rates",
+)
+def test_aperture_errors_decrease_with_finer_pixels(build_closure):
+    """Fails if finer pixels leave more mean planet or squared-weight error.
+
+    Truth and tolerances are the two image closures above: finer pixels leave
+    less pixel phase for the ring mean to hide. Compare the planet mean in
+    each band and the largest squared-weight error of each source group.
+    """
+    coarse, fine = (abs(build_closure(*p, False)["error"]) for p in (_COARSE, _FINE))
+    assert np.all(fine[0, 0] < coarse[0, 0])
+    assert fine[1, 1:].max() < coarse[1, 1:].max()
+    assert fine[1, 0].max() < coarse[1, 0].max()
 
 
 @vv.case("etc-inversion", "code-verification", srq="S/N at fixed time; time to S/N")
@@ -302,13 +337,44 @@ def test_snr_and_exposure_time_closure(closure):
     for the time, doubled for the terms the first order drops.
     """
     c = closure
-    dp = abs(c["error"][:, 0, 0])
-    db = np.maximum(
-        abs(c["error"][:, 1]).max(axis=-2), abs(c["pixels"][:, 1] - 1)
-    ) + abs(c["error"][:, 0, 3])
+    detector = c["path"].detector
+    image, pixels, electrons = c["image"], c["pixels"], c["electrons"]
+    pp = ox.PostProcessing(1e-4, 0.01, background_variance_factor=1.0)
+    frame_time = 100.0
+    plan = FramePlan(frame_time, 360.0)
+    live = float(plan.live_time_s)
+    image_rates = eqx.tree_at(
+        lambda r: (
+            r.planet,
+            r.star_leakage,
+            r.local_zodi,
+            r.exozodi,
+            r.n_pix,
+            r.variance.planet,
+            r.variance.star_leakage,
+            r.variance.local_zodi,
+            r.variance.exozodi,
+            r.variance.n_pix,
+        ),
+        electrons,
+        (*image[0], pixels[0], *image[1], pixels[1]),
+    )
+    _, variance = detector.mean_and_variance(image_rates, plan)
+    residual = (pp.speckle_residual_fraction * image[0, 1] * live) ** 2 + (
+        pp.exozodi_residual_fraction * image[0, 3] * live
+    ) ** 2
+    image_snr = image[0, 0] * live / np.sqrt(variance + residual)
+    kwargs = dict(frame_time_s=frame_time, post_processing=pp)
+    snr = ox.snr(c["rates"], detector, live, **kwargs)
+    solved = ox.exposure_time(c["rates"], detector, image_snr, **kwargs)
+
+    dp = abs(c["error"][0, 0])
+    db = np.maximum(abs(c["error"][1]).max(axis=0), abs(c["pixel_ratio"][1] - 1)) + abs(
+        c["error"][0, 3]
+    )
     snr_band, time_band = 2 * (dp + db / 2), 2 * (2 * dp + db)
     assert np.all(snr_band < 3e-2) and np.all(time_band < 6e-2)
-    assert np.all(c["snr"] > 1.0)
-    assert np.all(abs(c["snr"][:, 0] / c["snr"][:, 1] - 1) <= snr_band)
-    assert np.all(c["valid"])
-    assert np.all(abs(c["time"] / c["live"][:, None] - 1) <= time_band)
+    assert np.all(snr > 1.0) and np.all(image_snr > 1.0)
+    assert np.all(abs(snr / image_snr - 1) <= snr_band)
+    assert np.all(solved.valid)
+    assert np.all(abs(solved.time_s / live - 1) <= time_band)

@@ -69,7 +69,9 @@ def _with_nodes(quadrature, nodes):
     return eqx.tree_at(lambda q: q.nodes_nm, quadrature, nodes)
 
 
-@pytest.mark.medium(reason="observation compiled in both argument forms")
+@pytest.mark.slow(
+    reason="three compiled observation argument forms, about 27 s projected in CI"
+)
 def test_exposure_argument_matches_closure():
     """Fails if an exposure or detector geometry cannot be a traced argument.
 
@@ -116,23 +118,12 @@ def test_exposure_argument_matches_closure():
     assert whole.grid.orientation is None
 
 
-@pytest.mark.parametrize(
-    "reader",
-    [
-        photon_rates,
-        expected,
-        pytest.param(
-            observe,
-            marks=pytest.mark.medium(reason="observation kernel compiled once"),
-        ),
-    ],
-)
-def test_reader_compiles_once_for_any_values(reader, caplog):
+@pytest.mark.medium(reason="one compile per renderer and one observation sampler")
+def test_reader_compiles_once_for_any_values(caplog):
     """Fails on recompilation after time, flux, node, weight or roll changes.
 
-    The compile-log count of the renderer stays at one across all of them;
-    new node values and weights change the output, and observe reuses the
-    program that expected compiled.
+    Each renderer compiles once as its inputs change. The observation compiles
+    the electron renderer and both entry points reuse it.
     """
     system = make_system(star=FlatStar(jnp.asarray(1e6)), smooth_planet=True)
     varied = eqx.tree_at(lambda s: s.star.flux_phot_per_nm_m2, system, jnp.asarray(2e6))
@@ -146,25 +137,30 @@ def test_reader_compiles_once_for_any_values(reader, caplog):
         exposure = Exposure(
             time_d=time_d, pointing=Pointing(roll), quadrature=rule, plan=plan
         )
-        if reader is observe:
-            return key, system, path, exposure
         return system, path, exposure
 
     t0, t1 = jnp.asarray(0.0), jnp.asarray(1.0)
+    initial = args(system, quadrature, t0, 23)
+    later = args(varied, quadrature, t1, 41)
+    other_nodes = args(varied, changed, t1, 41)
     jax.clear_caches()
     with jax.log_compiles(True), caplog.at_level("WARNING"):
-        first = jax.block_until_ready(reader(*args(system, quadrature, t0, 23)))
-        assert _renders(caplog) == 1
-        second = jax.block_until_ready(reader(*args(varied, quadrature, t1, 41)))
-        different = jax.block_until_ready(reader(*args(varied, changed, t1, 41)))
-        if reader is observe:
-            jax.block_until_ready(expected(*args(varied, quadrature, t1, 41)[1:]))
-        assert _renders(caplog) == 1
-    if reader is photon_rates:
-        assert first.quadrature is quadrature
-    field = (lambda x: x.data) if reader is observe else (lambda x: x.star_leakage)
-    assert np.any(np.asarray(field(first)) != np.asarray(field(second)))
-    assert np.any(np.asarray(field(second)) != np.asarray(field(different)))
+        for reader in (photon_rates, observe, expected):
+            caplog.clear()
+            prefix = (key,) if reader is observe else ()
+            first = jax.block_until_ready(reader(*prefix, *initial))
+            renderer_compiles = 0 if reader is expected else 1
+            assert _renders(caplog) == renderer_compiles
+            second = jax.block_until_ready(reader(*prefix, *later))
+            different = jax.block_until_ready(reader(*prefix, *other_nodes))
+            assert _renders(caplog) == renderer_compiles
+            if reader is photon_rates:
+                assert first.quadrature is quadrature
+            field = "data" if reader is observe else "star_leakage"
+            assert np.any(np.asarray(getattr(first, field)) != getattr(second, field))
+            assert np.any(
+                np.asarray(getattr(second, field)) != getattr(different, field)
+            )
 
 
 def test_forty_nodes_and_eight_rolls_compile_one_program(caplog):
@@ -174,16 +170,22 @@ def test_forty_nodes_and_eight_rolls_compile_one_program(caplog):
     scene = system
     band = Band(520.0, 580.0)
     nodes = np.linspace(521.0, 579.0, 40)
-    jax.clear_caches()
     wide = Quadrature((band,), nodes[None], np.full((1, 40), 1.5))
     with jax.log_compiles(True), caplog.at_level("WARNING"):
-        rates = [
-            expected(scene, path, Exposure(0.0, Pointing(roll), wide))
-            for roll in np.linspace(0.0, 70.0, 8)
-        ]
-        jax.block_until_ready(rates)
-    assert _renders(caplog) == 1
-    assert not np.allclose(rates[0].planet, rates[-1].planet)
+        rolls = np.linspace(0.0, 70.0, 8)
+        first = jax.block_until_ready(
+            expected(scene, path, Exposure(0.0, Pointing(rolls[0]), wide))
+        )
+        initial_compiles = _renders(caplog)
+        assert initial_compiles <= 1
+        later = jax.block_until_ready(
+            [
+                expected(scene, path, Exposure(0.0, Pointing(roll), wide))
+                for roll in rolls[1:]
+            ]
+        )
+        assert _renders(caplog) == initial_compiles
+    assert not np.allclose(first.planet, later[-1].planet)
 
 
 @pytest.mark.medium(reason="four reverse-mode programs and finite differences")

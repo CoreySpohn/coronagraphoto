@@ -31,10 +31,12 @@ Causes, as measured on this instrument:
   through the coronagraph, which blurs it with the PSF, and sums it over the
   aperture. Where the radiance changes across the PSF and the aperture, in
   particular across the disk's inner edge, the two differ by tens of percent.
-- Curve interpolation. The curves are tabulated at the YIP's offsets (0, 1, 2
-  and 3 lambda/D) and interpolated between them, with a log-linear tail
-  beyond the last. The image holds the leakage at every position.
+- Curve interpolation. The curves are tabulated at the YIP's integer offsets
+  and interpolated between them with a log-linear tail beyond the last. The image
+  holds the leakage at every position.
 """
+
+from functools import cache, cached_property
 
 import equinox as eqx
 import ineedvalidation as vv
@@ -42,13 +44,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import (
-    YIP_PITCH_LOD,
-    YIP_SIGMA_LOD,
-    closure_system,
-    make_path,
-    write_yip,
-)
+from conftest import YIP_PITCH_LOD, YIP_SIGMA_LOD, closure_system, make_path, write_yip
 from jaxedith import rates as analytic_rates
 from optixstuff import Detector, WarmEmission
 from optixstuff.apertures import Circular
@@ -61,7 +57,7 @@ import coronagraphoto as cp
 
 pytestmark = [
     pytest.mark.medium(
-        reason="two YIP loads and a dozen aperture responses at three pixel pitches"
+        reason="shared synthetic YIPs and image aperture records at three pitches"
     ),
     pytest.mark.float64_only(reason="V&V reference values for analytic image closure"),
 ]
@@ -71,8 +67,8 @@ RULE = Circular(0.7)
 ROLL, CONTRAST = 15.0, 1e-9
 BANDS = (Band(500.0, 550.0), Band(550.0, 600.0))
 NARROW_BANDS = (Band(524.0, 526.0), Band(574.0, 576.0))
-# Separations in lambda/D at 550 nm. The last curve knot is at 3 lambda/D and
-# the detector edge matters beyond it; 3.4 is measured but not registered.
+# Separations in lambda/D at 550 nm. The 3.4 lambda/D read probes the detector
+# edge and is outside the range of the registered bounds.
 SEPARATIONS = (0.8, 1.0, 1.5, 2.0, 2.5, 3.0)
 BEYOND = 3.4
 POSITION_ANGLES = (250.0, 20.0)
@@ -139,10 +135,10 @@ def radial_leakage(radius_lod):
 class Case:
     """One instrument, band set and pixel pitch, with both readers built."""
 
-    def __init__(self, coro, scale, system, *, pitch, n_pix, bands):
-        """Build the image record and keep the curves of ``coro``."""
-        base = eqx.tree_at(lambda p: p.coronagraph, make_path(), coro)
-        self.coro, self.scale, self.system, self.bands = coro, scale, system, bands
+    def __init__(self, base, scale, system, *, pitch, n_pix, bands, planet_limit, full):
+        """Build one image record and keep the model's performance curves."""
+        self.scale, self.system, self.bands = scale, system, bands
+        self._reads = {}
         self.detector = Detector(
             shape=(n_pix, n_pix),
             pixel_scale_arcsec=pitch * scale,
@@ -156,21 +152,44 @@ class Case:
             WarmEmission(290.0, 0.5),
             is_leaf=lambda x: x is None,
         )
+        # The 2 nm controls assert band integrals of smooth rates. Two Gauss
+        # nodes resolve the quadratic chromatic term with linear detector QE.
+        sampling = (
+            dict(order=2, field_lod=0.0) if bands == NARROW_BANDS and not full else {}
+        )
         self.exposure = cp.build_exposure(
-            system, self.path, bands, time_d=0.0, roll_deg=ROLL
+            system, self.path, bands, time_d=0.0, roll_deg=ROLL, **sampling
         )
-        response = cp.aperture_response(
+        if full:
+            rings, angles, limit = 33, 16, None
+        elif planet_limit is None:
+            # A background read needs support over the queried separations.
+            rings, angles, limit = 2, 1, BEYOND + pitch
+        elif bands == NARROW_BANDS:
+            # Pixelization is read at one separation. Make it a knot so
+            # interpolation between rings cannot enter the pitch ladder.
+            rings, angles, limit = 2, 16, np.nextafter(planet_limit, np.inf)
+        else:
+            rings, angles, limit = 8, 4, BEYOND + pitch
+        self.response = cp.aperture_response(
             self.path,
-            self.exposure.quadrature,
+            self.quadrature,
             rule=RULE,
-            n_separations=33,
-            n_angles=16,
+            n_separations=rings,
+            n_angles=angles,
+            max_separation_arcsec=None if limit is None else limit * scale,
         )
-        self.record = cp.aperture_record(system, self.path, self.exposure, response)
-        self.curves = coro.curves(RULE)
-        self.sources = system.sources(
-            self.exposure.quadrature, self.exposure.resolution, 0.0
-        )
+        self.curves = base.coronagraph.curves(RULE)
+
+    @cached_property
+    def record(self):
+        """Build the background lattice when a full rate read needs it."""
+        return cp.aperture_record(self.system, self.path, self.exposure, self.response)
+
+    @cached_property
+    def sources(self):
+        """Prepare the analytic reader's source rows once."""
+        return self.system.sources(self.quadrature, self.exposure.resolution, 0.0)
 
     @property
     def quadrature(self):
@@ -185,25 +204,24 @@ class Case:
 
     def read(self, separation_lod, angle_deg):
         """Return (analytic, image) rates of one planet position."""
-        east, north = self.offset(separation_lod, angle_deg)
-        image = cp.aperture_rates(
-            self.record, east, north, contrast=CONTRAST, time_d=0.0
-        )
-        analytic = analytic_rates(
+        key = (separation_lod, angle_deg)
+        if key not in self._reads:
+            self._reads[key] = self._read_at(*self.offset(*key))
+        return self._reads[key]
+
+    def _read_at(self, east, north):
+        """Read both models at a prepared position with array-valued offsets."""
+        return _read_rates(
+            self.record,
             self.curves,
             self.system,
             self.path,
-            self.quadrature,
-            east,
-            north,
-            contrast=CONTRAST,
-            time_d=0.0,
-            sources=self.sources,
+            self.sources,
+            self.record.prepare_position(east, north),
         )
-        return analytic, image
 
-    def gaps(self, separation_lod, angle_deg, *, scale_nodes=None):
-        """Return the node and band gaps of every source, analytic / image - 1.
+    def gaps(self, separation_lod, angle_deg, *, sources=SOURCES, scale_nodes=None):
+        """Return the requested node and band gaps, analytic / image - 1.
 
         ``scale_nodes`` maps a source to node factors multiplied onto the
         analytic rate first, for the predictions of a cause.
@@ -215,50 +233,100 @@ class Case:
                 analytic,
                 tuple(getattr(analytic, k) * v for k, v in scale_nodes.items()),
             )
-        electrons = self.detector.electrons(analytic), self.detector.electrons(image)
+        electrons = _electron_rates(self.detector, analytic, image)
         node = {
-            k: np.asarray(getattr(analytic, k) / getattr(image, k) - 1) for k in SOURCES
+            k: np.asarray(getattr(analytic, k) / getattr(image, k) - 1) for k in sources
         }
         band = {
             k: np.asarray(getattr(electrons[0], k) / getattr(electrons[1], k) - 1)
-            for k in SOURCES
+            for k in sources
         }
         band["n_pix"] = np.asarray(analytic.n_pix / image.n_pix - 1)
-        return node, band, analytic, image
+        return node, band
+
+
+@eqx.filter_jit
+def _electron_rates(detector, analytic, image):
+    """Integrate the two readers with one shared detector program."""
+    return detector.electrons(analytic), detector.electrons(image)
+
+
+@eqx.filter_jit
+def _read_rates(record, curves, system, path, sources, position):
+    """Reuse the same two compiled reads across angles and separations."""
+    image = cp.aperture_rates(record, position, contrast=CONTRAST, time_d=0.0)
+    analytic = analytic_rates(
+        curves,
+        system,
+        path,
+        record.quadrature,
+        position.east_arcsec,
+        position.north_arcsec,
+        contrast=CONTRAST,
+        time_d=0.0,
+        sources=sources,
+    )
+    # These comparisons use the mean rates. Keep the squared-weight
+    # terms out of the read and detector conversion.
+    return tuple(
+        eqx.tree_at(lambda r: r.variance, rates, None) for rates in (analytic, image)
+    )
 
 
 @pytest.fixture(scope="module")
-def build(tmp_path_factory):
-    """Return a cached builder of cases by YIP, pixel pitch, bands and field size."""
-    cache, yips = {}, {}
+def yip_instrument(tmp_path_factory):
+    """Build each prepared optical model once, including its performance curves."""
+    template = make_path()
 
-    def make(*, radial=False, pitch=0.1, bands=BANDS, n_pix=None):
-        n_pix = round(9.6 / pitch) if n_pix is None else n_pix
-        key = (radial, pitch, bands, n_pix)
-        if key not in cache:
-            if radial not in yips:
-                path = write_yip(
-                    tmp_path_factory.mktemp("analytic-closure") / "yip",
-                    stellar_profile=radial_leakage if radial else None,
-                    reach=TABLE_REACH,
-                    half_width=TABLE_REACH,
-                )
-                yips[radial] = (
-                    open_yip(path).prepare(rules=(RULE,)).with_scene_operator()
-                )
-            coro = yips[radial]
-            scale = float(
-                eqx.tree_at(lambda p: p.coronagraph, make_path(), coro)
-                .primary.frame(550.0)
-                .lod_to_arcsec(550.0)
-            )
-            system = closure_system(scale)
-            cache[key] = Case(
-                coro, scale, system, pitch=pitch, n_pix=n_pix, bands=bands
-            )
-        return cache[key]
+    @cache
+    def instrument(radial):
+        path = write_yip(
+            tmp_path_factory.mktemp("analytic-closure") / "yip",
+            stellar_profile=radial_leakage if radial else None,
+            reach=TABLE_REACH,
+            half_width=TABLE_REACH,
+        )
+        coro = open_yip(path).prepare(rules=(RULE,)).with_scene_operator()
+        return eqx.tree_at(lambda p: p.coronagraph, template, coro)
 
-    return make
+    yield instrument
+    instrument.cache_clear()
+
+
+@pytest.fixture(scope="module")
+def build(yip_instrument):
+    """Share each image response and scene record across its readers."""
+    frame = yip_instrument(False).primary.frame(550.0)
+    scale = float(frame.lod_to_arcsec(550.0))
+    system = closure_system(scale)
+    narrow_system = eqx.tree_at(lambda s: s.disk, system, None)
+
+    @cache
+    def case(radial, pitch, bands, n_pix, planet_limit, full):
+        return Case(
+            yip_instrument(radial),
+            scale,
+            narrow_system if bands == NARROW_BANDS and not full else system,
+            pitch=pitch,
+            n_pix=n_pix,
+            bands=bands,
+            planet_limit=planet_limit,
+            full=full,
+        )
+
+    def make(
+        *,
+        radial=False,
+        pitch=0.1,
+        bands=BANDS,
+        n_pix=96,
+        planet_limit=BEYOND,
+        full=False,
+    ):
+        return case(radial, pitch, bands, n_pix, None if full else planet_limit, full)
+
+    yield make
+    case.cache_clear()
 
 
 def _band_centres(bands):
@@ -292,6 +360,14 @@ def chromatic_planet_factor(case, tau_curve):
     return enclosed / tau_curve
 
 
+@eqx.filter_jit
+def _disk_radiance(system, node, east, north):
+    """Sample the independent disk oracle at array-valued offsets and wavelength."""
+    return jax.vmap(lambda e, n: system.photon_radiance_at(node[None], 0.0, e, n)[0])(
+        east, north
+    )
+
+
 def disk_blur_factors(case, separation_lod, angle_deg, *, step=0.05, sigma_scale=1.0):
     """Node ratios image / analytic of the exozodi from the disk alone.
 
@@ -313,12 +389,7 @@ def disk_blur_factors(case, separation_lod, angle_deg, *, step=0.05, sigma_scale
     half = int(np.ceil(reach * case.scale / h))
     g = h * np.arange(-half, half + 1)
     e_grid, n_grid = np.meshgrid(east + g, north + g)
-
-    @jax.jit
-    def radiance(node, e, n):
-        return jax.vmap(
-            lambda e, n: case.system.photon_radiance_at(node[None], 0.0, e, n)[0]
-        )(e, n)
+    east_array, north_array = map(jnp.ravel, (e_grid, n_grid))
 
     blurred, unblurred = np.zeros(nodes.shape), np.zeros(nodes.shape)
     for w, centre in enumerate(centres):
@@ -327,7 +398,7 @@ def disk_blur_factors(case, separation_lod, angle_deg, *, step=0.05, sigma_scale
         for q, node in enumerate(nodes[w]):
             sigma = sigma_scale * YIP_SIGMA * case.scale * node / 550.0
             disk = np.asarray(
-                radiance(node, jnp.asarray(e_grid.ravel()), jnp.asarray(n_grid.ravel()))
+                _disk_radiance(case.system, jnp.asarray(node), east_array, north_array)
             ).reshape(e_grid.shape)
             unblurred[w, q] = disk[inside].mean() / disk[half, half]
             blurred[w, q] = (
@@ -368,33 +439,41 @@ def leakage_interpolation_gap(case, separation_lod):
     return np.array(gap)
 
 
+@vv.case("etc-count-rates", "code-verification", srq="planet count rate Cp")
+def test_gaussian_aperture_throughput(yip_instrument):
+    """Fails if the analytic curves apply the extended-source blur to a planet.
+
+    The point-source reference is the analytic Gaussian enclosed energy:
+    0.118011 measured against 0.118041 ideal, within 5e-4 relative.
+    """
+    curves = yip_instrument(False).coronagraph.curves(RULE)
+    tau = float(np.asarray(curves.throughput)[0])
+    ideal = YIP_INTEGRAL * (1 - np.exp(-0.5 * (RULE.radius_lod / YIP_SIGMA) ** 2))
+    assert abs(tau / ideal - 1) < 5e-4
+
+
+def _band_table(case):
+    """Band gaps of the five photometric sources and the aperture pixel count."""
+    return {
+        (angle, separation): case.gaps(separation, angle)[1]
+        for angle in POSITION_ANGLES
+        for separation in SEPARATIONS
+    }
+
+
 @pytest.fixture(scope="module")
 def table(build):
-    """Gaps of every source on the uniform YIP and on the radial-leakage YIP."""
-    rows = {}
-    for radial in (False, True):
-        case = build(radial=radial)
-        for angle in POSITION_ANGLES:
-            for s in (*SEPARATIONS, BEYOND):
-                node, band, *_ = case.gaps(s, angle)
-                rows[radial, angle, s] = dict(node=node, band=band)
-    print("closure table (band gaps, analytic / image - 1)")
-    for (radial, angle, s), row in rows.items():
-        print(
-            "radial" if radial else "uniform",
-            angle,
-            s,
-            {k: np.round(v, 5).tolist() for k, v in row["band"].items()},
-        )
-    return rows
+    """Share the measured uniform gaps with the nightly radial comparison."""
+    return _band_table(build())
 
 
-def _worst(table, source, *, radial, level="band", separations=SEPARATIONS):
-    return max(
-        float(np.abs(table[radial, a, s][level][source]).max())
-        for a in POSITION_ANGLES
-        for s in separations
-    )
+def _worst(table, source):
+    return max(float(np.abs(row[source]).max()) for row in table.values())
+
+
+def _check_uniform_terms(table):
+    for source in ("local_zodi", "thermal", "n_pix"):
+        assert _worst(table, source) < 1e-9
 
 
 @vv.case("etc-count-rates", "code-verification", srq="analytic against image rates")
@@ -411,9 +490,7 @@ def test_registered_bounds(table):
       sum leaves 3.6e-4 at most: the second-order chromatic term (-2.9e-3)
       and the pixelization (+3.0e-3) nearly cancel. Bound 6e-4, which holds
       only at this pixel pitch (see the pixelization test).
-    - star_leakage: 4.1e-3, the second-order chromatic term. Bound 6.2e-3. On
-      the radial-leakage YIP the curve interpolation adds and the worst is
-      3.4e-2 at 0.8 lambda/D: bound 5.1e-2.
+    - star_leakage: 4.1e-3, the second-order chromatic term. Bound 6.2e-3.
     - local_zodi, thermal and n_pix: the zodi, the sky transmission and the
       warm emission (290 K, emissivity 0.5) are uniform and both readers use
       the same aperture, so only rounding remains: 1e-9.
@@ -424,99 +501,70 @@ def test_registered_bounds(table):
     and are not registered; ``test_curve_interpolation`` and
     ``test_detector_edge`` name why.
     """
-    assert _worst(table, "planet", radial=False) < 6e-4
-    assert _worst(table, "star_leakage", radial=False) < 6.2e-3
-    assert _worst(table, "star_leakage", radial=True) < 5.1e-2
-    for radial in (False, True):
-        assert _worst(table, "local_zodi", radial=radial) < 1e-9
-        assert _worst(table, "thermal", radial=radial) < 1e-9
-        assert _worst(table, "n_pix", radial=radial) < 1e-9
-    for s in SEPARATIONS:
-        for angle in POSITION_ANGLES:
-            gap = np.abs(table[False, angle, s]["band"]["exozodi"])
-            assert np.all(gap < EXOZODI_GAP[s]), (s, angle)
-    # The tabulated sources are the same across the two YIPs.
-    for angle in POSITION_ANGLES:
-        for s in SEPARATIONS:
-            for source in ("planet", "exozodi", "local_zodi", "thermal"):
-                np.testing.assert_allclose(
-                    table[True, angle, s]["band"][source],
-                    table[False, angle, s]["band"][source],
-                    atol=1e-12,
-                )
+    _assert_registered_bounds(table)
+
+
+def _assert_registered_bounds(table):
+    assert _worst(table, "planet") < 6e-4
+    assert _worst(table, "star_leakage") < 6.2e-3
+    _check_uniform_terms(table)
+    for (_, s), row in table.items():
+        assert np.all(np.abs(row["exozodi"]) < EXOZODI_GAP[s]), s
+
+
+@pytest.mark.slow(
+    reason="full radial, uniform and field-size responses, ~250 s projected in CI"
+)
+@vv.case("etc-count-rates", "code-verification", srq="analytic against image rates")
+def test_radial_registered_bounds(build):
+    """Fails if varying the leakage profile changes other band rates.
+
+    The same two 50 nm bands, six separations and two position angles are
+    read on the radial profile. The original 3.4e-2 leakage gap at 0.8
+    lambda/D gives the 5.1e-2 bound (measured times 1.5). The aperture and
+    uniform terms close to 1e-9. The tabulated nonstellar sources agree
+    with the uniform YIP to a 1e-12 absolute allowance.
+    """
+    wide = build(full=True)
+    table = _band_table(wide)
+    _assert_registered_bounds(table)
+    radial = _band_table(build(radial=True, full=True))
+    assert _worst(radial, "star_leakage") < 5.1e-2
+    _check_uniform_terms(radial)
+    for position, row in radial.items():
+        for source in ("planet", "exozodi", "local_zodi", "thermal"):
+            np.testing.assert_allclose(row[source], table[position][source], atol=1e-12)
+    _assert_curve_interpolation(
+        build(radial=True, bands=NARROW_BANDS, full=True),
+        build(bands=NARROW_BANDS, full=True),
+    )
+    _assert_detector_edge(wide, build(n_pix=128, full=True))
 
 
 @pytest.fixture(scope="module")
-def causes(build):
-    """Evidence for each cause, from cases that vary one thing."""
-    out = {}
-    wide, narrow = build(), build(bands=NARROW_BANDS)
-    out["active"] = np.asarray(wide.quadrature.active)
-    out["node_leakage"] = wide.gaps(2.3, 250.0)[0]["star_leakage"]
-    out["node_leakage_law"] = chromatic_leakage_gap(wide)
-    out["band_leakage"] = {
-        "wide": wide.gaps(2.3, 250.0)[1]["star_leakage"],
-        "narrow": narrow.gaps(2.3, 250.0)[1]["star_leakage"],
-    }
-    # Pixelization: planet gap of a 2 nm band, for three pixel pitches.
-    pitches = {0.2: 48, 0.1: 96, 0.05: 96}
-    out["pixel"] = {}
-    for pitch, n_pix in pitches.items():
-        case = build(pitch=pitch, bands=NARROW_BANDS, n_pix=n_pix)
-        out["pixel"][pitch] = dict(gap=case.gaps(1.0, 250.0)[1]["planet"])
-    # Chromatic planet gap in the 50 nm bands, with the pixels made fine.
-    case = build(pitch=0.1)
-    tau = float(np.asarray(case.curves.throughput)[0])
-    factor = chromatic_planet_factor(case, tau)
-    node, band, *_ = case.gaps(1.0, 250.0)
-    out["planet_chromatic"] = dict(
-        node=node["planet"],
-        predicted_node=1 / factor - 1,
-        band=band["planet"],
-        band_after=case.gaps(1.0, 250.0, scale_nodes={"planet": factor})[1]["planet"],
-    )
-    # Disk structure.
-    out["disk"] = {}
-    for s in (0.8, 1.0, 1.5, 2.0, 2.5, 3.0):
-        node, band, *_ = wide.gaps(s, 250.0)
-        plain, raw = disk_blur_factors(wide, s, 250.0)
-        boxed, _ = disk_blur_factors(wide, s, 250.0, sigma_scale=DISK_CELL_WIDENING)
+def narrow_leakage(build):
+    """The uniform control shared by the chromatic and radial leakage checks."""
+    return build(bands=NARROW_BANDS, planet_limit=None)
 
-        def left(factor, s=s):
-            return wide.gaps(s, 250.0, scale_nodes={"exozodi": factor})[1]["exozodi"]
 
-        out["disk"][s] = dict(
-            gap=band["exozodi"],
-            residual=left(boxed),
-            plain=left(plain),
-            unblurred=left(raw),
-        )
+@pytest.fixture(scope="module")
+def chromatic_planet(build):
+    """Wide-band planet gaps before and after the enclosed-energy correction."""
+    return _chromatic_planet_gaps(build())
+
+
+def _chromatic_planet_gaps(wide):
     tau = float(np.asarray(wide.curves.throughput)[0])
-    ideal = YIP_INTEGRAL * (1 - np.exp(-0.5 * (RULE.radius_lod / YIP_SIGMA) ** 2))
-    out["point_source"] = dict(curves=tau, ideal=ideal)
-    # Curve interpolation: radial YIP in 2 nm bands, uniform YIP as the control.
-    out["interp"] = {}
-    radial, uniform = build(radial=True, bands=NARROW_BANDS), build(bands=NARROW_BANDS)
-    for s in (0.8, 1.0, 1.5, 2.0, 2.5, 3.0, BEYOND):
-        out["interp"][s] = dict(
-            gap=radial.gaps(s, 250.0)[1]["star_leakage"],
-            predicted=leakage_interpolation_gap(radial, s),
-            control=uniform.gaps(s, 250.0)[1]["star_leakage"],
-        )
-    # Detector edge: the exozodi at 3.4 lambda/D on a 9.6 and a 12.8 lambda/D field.
-    out["edge"] = {
-        n_pix: [
-            build(n_pix=n_pix).gaps(BEYOND, angle)[1]["exozodi"]
-            for angle in POSITION_ANGLES
-        ]
-        for n_pix in (96, 128)
-    }
-    print("causes", out)
-    return out
+    factor = chromatic_planet_factor(wide, tau)
+    node, _ = wide.gaps(1.0, 250.0, sources=("planet",))
+    _, corrected = wide.gaps(
+        1.0, 250.0, sources=("planet",), scale_nodes={"planet": factor}
+    )
+    return node["planet"], 1 / factor - 1, corrected["planet"]
 
 
 @vv.case("etc-count-rates", "code-verification", srq="analytic against image rates")
-def test_band_centre_aperture(causes):
+def test_band_centre_aperture(build, narrow_leakage, chromatic_planet):
     """Fails if the chromatic gap is not the band-centre aperture.
 
     The stellar leakage of a uniform curve differs at a node by exactly
@@ -532,20 +580,55 @@ def test_band_centre_aperture(causes):
     bands hold different node counts at the default field, and a padded slot
     carries zero weight and no defined rate.
     """
-    c = causes
-    real = c["active"]
+    _assert_band_centre_aperture(build(), narrow_leakage, chromatic_planet)
+
+
+def _assert_band_centre_aperture(wide, narrow_leakage, chromatic_planet):
+    real = np.asarray(wide.quadrature.active)
+    node, band = wide.gaps(2.3, 250.0, sources=("star_leakage",))
+    _, narrow = narrow_leakage.gaps(2.3, 250.0, sources=("star_leakage",))
     np.testing.assert_allclose(
-        c["node_leakage"][real], c["node_leakage_law"][real], atol=LEAKAGE_RIPPLE_NODE
+        node["star_leakage"][real],
+        chromatic_leakage_gap(wide)[real],
+        atol=LEAKAGE_RIPPLE_NODE,
     )
-    planet = c["planet_chromatic"]
-    assert np.abs(planet["node"] - planet["predicted_node"])[real].max() < 3.2e-3
-    assert np.abs(planet["predicted_node"])[real].max() > 5e-2
-    assert np.abs(c["band_leakage"]["wide"]).min() > 3.5e-3
-    assert np.abs(c["band_leakage"]["narrow"]).max() < LEAKAGE_RIPPLE_BAND
+    planet, predicted, _ = chromatic_planet
+    assert np.abs(planet - predicted)[real].max() < 3.2e-3
+    assert np.abs(predicted)[real].max() > 5e-2
+    assert np.abs(band["star_leakage"]).min() > 3.5e-3
+    assert np.abs(narrow["star_leakage"]).max() < LEAKAGE_RIPPLE_BAND
 
 
+def _point_source_gap(case):
+    """Band gap at the 1 lambda/D ring, before adding the background lattice."""
+    response, quadrature = case.response, case.quadrature
+    assert np.all(response.throughput_supported[..., -1])
+    frame = case.curves.frame
+    separations = case.scale / frame.lod_to_arcsec(_band_centres(case.bands))
+    analytic = np.asarray(case.curves.evaluate("throughput", separations))
+    # The source flux, collecting gain and survival are flat across these
+    # bands and cancel. QE and quadrature still weight the node fractions.
+    weight = quadrature.weights() * case.detector.quantum_efficiency(
+        quadrature.nodes_nm
+    )
+    image = np.average(response.throughput[0, ..., -1], weights=weight, axis=-1)
+    return analytic / image - 1
+
+
+@pytest.mark.parametrize(
+    "reader",
+    [
+        "response",
+        pytest.param(
+            "record",
+            marks=pytest.mark.slow(
+                reason="four full aperture records, ~185 s projected in CI"
+            ),
+        ),
+    ],
+)
 @vv.case("etc-count-rates", "code-verification", srq="analytic against image rates")
-def test_pixelization(causes):
+def test_pixelization(build, reader):
     """Fails if the planet gap of a narrow band does not follow the pixel pitch.
 
     A 2 nm band leaves no chromatic gap, so the planet gap is the image's
@@ -553,16 +636,31 @@ def test_pixelization(causes):
     1.1e-2, 2.8e-3 and 4.5e-4 at 0.2, 0.1 and 0.05 lambda/D pixels (bands
     averaged), a fall of at least 3.5 per halving of the pitch.
     """
-    gap = {p: float(np.abs(v["gap"]).mean()) for p, v in causes["pixel"].items()}
+    full = reader == "record"
+    wide = build(full=full)
+    chromatic_planet = _chromatic_planet_gaps(wide)
+    if full:
+        _assert_band_centre_aperture(
+            wide, build(bands=NARROW_BANDS, full=True), chromatic_planet
+        )
+    gaps = {}
+    for pitch, n_pix in ((0.2, 48), (0.1, 96), (0.05, 96)):
+        case = build(
+            pitch=pitch, bands=NARROW_BANDS, n_pix=n_pix, planet_limit=1.0, full=full
+        )
+        if full:
+            gaps[pitch] = case.gaps(1.0, 250.0, sources=("planet",))[1]["planet"]
+        else:
+            gaps[pitch] = _point_source_gap(case)
+    gap = {p: float(np.abs(v).mean()) for p, v in gaps.items()}
     assert gap[0.2] / gap[0.1] > 3.5 and gap[0.1] / gap[0.05] > 3.5
     assert 8e-3 < gap[0.2] < 1.4e-2
-    chromatic = causes["planet_chromatic"]
     # With the chromatic law applied the 50 nm gap is the pixelization again.
-    assert np.abs(chromatic["band_after"] - causes["pixel"][0.1]["gap"]).max() < 6e-4
+    assert np.abs(chromatic_planet[2] - gaps[0.1]).max() < 6e-4
 
 
 @vv.case("etc-count-rates", "code-verification", srq="zodi and exozodi rates")
-def test_disk_structure(causes):
+def test_disk_structure(build):
     """Fails if the exozodi gap is not the blurred disk read across the aperture.
 
     Basis: the prediction blurs the node's disk radiance with a Gaussian
@@ -585,24 +683,30 @@ def test_disk_structure(causes):
     throughput equals the ideal Gaussian enclosed fraction (0.118011 against
     0.118041).
     """
-    for s, row in causes["disk"].items():
-        gap, left = np.abs(row["gap"]), np.abs(row["residual"])
+    wide = build()
+
+    def gap_at(separation, factor=None):
+        correction = None if factor is None else {"exozodi": factor}
+        return wide.gaps(
+            separation, 250.0, sources=("exozodi",), scale_nodes=correction
+        )[1]["exozodi"]
+
+    for s in SEPARATIONS:
+        boxed, _ = disk_blur_factors(wide, s, 250.0, sigma_scale=DISK_CELL_WIDENING)
+        gap, left = np.abs(gap_at(s)), np.abs(gap_at(s, boxed))
         assert np.all(gap < EXOZODI_GAP[s]), s
         assert np.all(left < EXOZODI_RESIDUAL[s]), s
         if s <= 2.5:
             assert np.all(left < 0.1 * gap), s
         if s <= 1.0:
-            assert np.all(np.abs(row["unblurred"]) > 0.8 * gap), s
-    for s in (0.8, 1.0):
-        row = causes["disk"][s]
-        # The cell box is what the test sees: the bare PSF kernel does worse.
-        assert np.abs(row["plain"]).max() > 1.5 * np.abs(row["residual"]).max(), s
-    point = causes["point_source"]
-    assert abs(point["curves"] / point["ideal"] - 1) < 5e-4
+            plain, raw = disk_blur_factors(wide, s, 250.0)
+            assert np.all(np.abs(gap_at(s, raw)) > 0.8 * gap), s
+            # The cell box is what the test sees: the bare PSF kernel does worse.
+            assert np.abs(gap_at(s, plain)).max() > 1.5 * left.max(), s
 
 
 @vv.case("etc-count-rates", "code-verification", srq="analytic against image rates")
-def test_curve_interpolation(causes):
+def test_curve_interpolation(build, narrow_leakage):
     """Fails if the leakage gap of a varying curve is not the curve's interpolation.
 
     On the radial-leakage YIP a 2 nm band has no chromatic gap. The gap is the
@@ -617,16 +721,24 @@ def test_curve_interpolation(causes):
     YIP the same read has a gap of at most 1.1e-3, the edge ripple of the
     zero-padded band-limited reconstruction (``LEAKAGE_RIPPLE_BAND``).
     """
-    rows = causes["interp"]
-    for s, row in rows.items():
-        assert np.abs(row["gap"] - row["predicted"]).max() < 4e-3, s
-        assert np.abs(row["control"]).max() < LEAKAGE_RIPPLE_BAND, s
-    assert max(np.abs(r["gap"]).max() for r in rows.values()) > 3e-2
-    assert np.abs(rows[1.5]["gap"]).min() > 1e-2
+    radial = build(radial=True, bands=NARROW_BANDS, planet_limit=None)
+    _assert_curve_interpolation(radial, narrow_leakage)
+
+
+def _assert_curve_interpolation(radial, narrow_leakage):
+    gaps = {}
+    for s in (*SEPARATIONS, BEYOND):
+        gap = radial.gaps(s, 250.0, sources=("star_leakage",))[1]["star_leakage"]
+        control = narrow_leakage.gaps(s, 250.0, sources=("star_leakage",))[1]
+        assert np.abs(gap - leakage_interpolation_gap(radial, s)).max() < 4e-3, s
+        assert np.abs(control["star_leakage"]).max() < LEAKAGE_RIPPLE_BAND, s
+        gaps[s] = np.abs(gap)
+    assert max(gap.max() for gap in gaps.values()) > 3e-2
+    assert gaps[1.5].min() > 1e-2
 
 
 @vv.case("etc-count-rates", "code-verification", srq="analytic against image rates")
-def test_detector_edge(causes):
+def test_detector_edge(build):
     """Fails if the 3.4 lambda/D exozodi gap depends on the detector extent.
 
     Disk light from sky beyond the detector edge scatters onto it, so the
@@ -637,5 +749,20 @@ def test_detector_edge(causes):
     radiance evaluated on the detector grid the angle differences were 3.6e-2
     and 4.8e-2 on the small field and 4.2e-3 on the large one.
     """
-    small, large = causes["edge"][96], causes["edge"][128]
+    _assert_detector_edge(build(), build(n_pix=128, bands=BANDS[:1], planet_limit=None))
+
+
+def _assert_detector_edge(small_case, large_case):
+    def gaps(case):
+        return np.stack(
+            [
+                case.gaps(BEYOND, angle, sources=("exozodi",))[1]["exozodi"]
+                for angle in POSITION_ANGLES
+            ]
+        )
+
+    n_bands = len(large_case.bands)
+    assert small_case.bands[:n_bands] == large_case.bands
+    small = gaps(small_case)[:, :n_bands]
+    large = gaps(large_case)
     np.testing.assert_allclose(small, large, rtol=0, atol=1e-9)

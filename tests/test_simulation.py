@@ -223,7 +223,9 @@ def _position_grads(knots):
     return exposure.quadrature.nodes_nm.shape[1], out
 
 
-@pytest.mark.medium(reason="reverse-mode compiles at two node counts, with and without")
+@pytest.mark.slow(
+    reason="two readers and node counts, with and without checkpointing, 26 s in CI"
+)
 def test_node_checkpoint_keeps_reverse_gradients_and_flat_memory(monkeypatch):
     """Fails if the node render is unchecked or the checkpoint changes a gradient.
 
@@ -566,6 +568,9 @@ def test_expected_integrates_declared_response_kink():
     )
 
 
+@pytest.mark.slow(
+    reason="scaled source images and reverse gradients, about 15 s projected in CI"
+)
 def test_source_scales_are_linear_in_the_image_and_live_for_gradients():
     """Fails if a source's flux_scale misses its image or leaks into another.
 
@@ -682,6 +687,7 @@ def test_disk_render_does_not_depend_on_detector_extent():
     np.testing.assert_allclose(small, crop, rtol=0, atol=1e-10 * crop.max())
 
 
+@pytest.mark.slow(reason="scene cube and two fields, ~16 s projected in CI")
 def test_disk_reaches_the_operator_on_its_scene_grid():
     """Fails if disk cells beyond the stored PSF grid never reach the operator.
 

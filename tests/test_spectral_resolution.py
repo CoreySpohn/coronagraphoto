@@ -351,7 +351,9 @@ def test_image_path_local_zodi_is_the_exact_table_integral():
     assert abs(truth / flat_truth - 1) > 0.05, "the table should differ from flat"
 
 
-@pytest.mark.medium(reason="two scene builds and two record builds")
+@pytest.mark.slow(
+    reason="two zodi aperture records and exact integral, ~16 s projected in CI"
+)
 def test_aperture_record_zodi_read_is_the_exact_table_integral():
     """Fails if the record reads a rough zodi table at the nodes instead of reducing it.
 
