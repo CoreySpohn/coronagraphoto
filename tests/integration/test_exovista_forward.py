@@ -40,8 +40,11 @@ def test_exovista_native_disk_and_position_angle(tmp_path):
         radiance, expected, rtol=roundoff(1, n_ops=32, dtype=radiance.dtype), atol=0
     )
     path = make_path(n=20, step=0.3, cube=True)
-    quadrature = Quadrature.build((Band(549.5, 550.5),), scene, path, order=1)
-    rates = photon_rates(scene, path, exposure_for(scene, quadrature, roll_deg=30))
+    quadrature = Quadrature.build(
+        (Band(549.5, 550.5),), scene, path.select("imager"), order=1
+    )
+    exposure, sampling = exposure_for(scene, quadrature, roll_deg=30)
+    rates = photon_rates(scene, path, exposure, sampling=sampling)
     # Absolute incoming local-zodi normalization, on an interior pixel.
     lz = scene.local_zodi.photon_radiance(550.0, scene.sky_frame, 0.0)
     expected_z = (
@@ -49,7 +52,7 @@ def test_exovista_native_disk_and_position_angle(tmp_path):
         * 0.4
         * 0.3
         * lz
-        * float(path.detector.pixel_scale_arcsec) ** 2
+        * float(path.instruments[0].detector.pixel_scale_arcsec) ** 2
         * arcsec2rad**2
     )
     np.testing.assert_allclose(

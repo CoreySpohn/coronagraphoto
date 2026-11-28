@@ -2,7 +2,6 @@
 
 from dataclasses import replace
 
-import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -12,6 +11,7 @@ from conftest import (
     exposure_for,
     make_path,
     make_system,
+    with_instrument,
     with_zodi,
 )
 from hwoutils.constants import arcsec2rad
@@ -78,12 +78,13 @@ def test_aperture_closure_two_samplings():
     measured, references = [], []
     for n, step in ((32, 0.25), (64, 0.125)):
         path = make_path(n=32, step=0.25, detector_n=n, detector_step=step)
-        path = eqx.tree_at(lambda p: p.coronagraph, path, coro)
+        path = with_instrument(path, coronagraph=coro)
         quadrature = Quadrature.build(
-            (Band(549.5, 550.5),), system, path, zodi, order=1
+            (Band(549.5, 550.5),), system, path.select("imager"), zodi, order=1
         )
         scene = with_zodi(system, zodi)
-        rates = photon_rates(scene, path, exposure_for(scene, quadrature))
+        exposure, sampling = exposure_for(scene, quadrature)
+        rates = photon_rates(scene, path, exposure, sampling=sampling)
         aperture_grid = PixelGrid.regular((n, n), step, "lod", frame=coro.grid.frame)
         psf = Image(
             rates.planet[0, 0],
@@ -176,12 +177,11 @@ def test_disk_equals_pixel_center_source():
             )
 
     path = make_path(n=20, step=0.3)
-    path = eqx.tree_at(
-        lambda p: p.coronagraph, path, BandLimitedGaussian(n=20, step=0.3)
-    )
+    path = with_instrument(path, coronagraph=BandLimitedGaussian(n=20, step=0.3))
+    instrument = path.instruments[0]
     grid = PixelGrid.regular(
         (20, 20),
-        float(path.detector.pixel_scale_arcsec),
+        float(instrument.detector.pixel_scale_arcsec),
         "arcsec",
         orientation=SkyOrientation(0),
     )
@@ -197,18 +197,19 @@ def test_disk_equals_pixel_center_source():
         disk=disk,
     )
     scene = system
-    exposure = exposure_for(
-        scene, Quadrature.build((Band(549.5, 550.5),), system, path, order=1)
+    exposure, sampling = exposure_for(
+        scene,
+        Quadrature.build((Band(549.5, 550.5),), system, path.select("imager"), order=1),
     )
-    rates = photon_rates(scene, path, exposure)
+    rates = photon_rates(scene, path, exposure, sampling=sampling)
     a, b = np.asarray(rates.planet), np.asarray(rates.exozodi)
-    native = path.coronagraph.grid
+    native = instrument.coronagraph.grid
     lod = float(native.frame.lod_to_arcsec(550.0))
     pixels = replace(grid.to_lod(550.0, native.frame), orientation=native.orientation)
     offsets = np.array([(i, j) for j in (-1, 0, 1) for i in (-1, 0, 1)])
     tent = np.array([1 / 8, 3 / 4, 1 / 8])
     weights = np.array([tent[j + 1] * tent[i + 1] for i, j in offsets])
-    psfs = path.coronagraph.source_psfs(
+    psfs = instrument.coronagraph.source_psfs(
         550.0,
         float(x) / lod + native.step * offsets[:, 0],
         float(y) / lod + native.step * offsets[:, 1],
@@ -224,7 +225,7 @@ def test_disk_equals_pixel_center_source():
         atol=roundoff(a.max(), n_ops=1000, dtype=a.dtype),
         rtol=0,
     )
-    shifted = path.coronagraph.source_psfs(
+    shifted = instrument.coronagraph.source_psfs(
         550.0,
         jnp.array([float(x) / float(native.frame.lod_to_arcsec(550.0)) + 0.15]),
         jnp.array([float(y) / float(native.frame.lod_to_arcsec(550.0))]),
@@ -234,4 +235,4 @@ def test_disk_equals_pixel_center_source():
     assert np.max(abs(shifted - correct)) / correct.max() > 0.05
     missing = make_path(n=20, step=0.3)
     with pytest.raises(TypeError, match="AbstractSceneCoronagraph"):
-        photon_rates(scene, missing, exposure)
+        photon_rates(scene, missing, exposure, sampling=sampling)

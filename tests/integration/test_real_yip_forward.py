@@ -4,7 +4,7 @@ import equinox as eqx
 import jax
 import numpy as np
 import pytest
-from conftest import exposure_for, make_path, write_scene, write_yip
+from conftest import exposure_for, make_path, with_instrument, write_scene, write_yip
 from hwoutils.numerics import roundoff
 from optixstuff import FramePlan
 from optixstuff.spectral import Band, Quadrature
@@ -39,21 +39,23 @@ def test_fits_scene_yip_observation(tmp_path):
         atol=roundoff(0.035, n_ops=64, dtype=offsets.dtype),
     )
     coro = open_yip(write_yip(tmp_path / "yip")).prepare()
-    path = eqx.tree_at(lambda p: p.coronagraph, make_path(n=24, step=0.5), coro)
-    q = Quadrature.build((Band(545.0, 555.0),), scene, path, order=1)
+    path = with_instrument(make_path(n=24, step=0.5), coronagraph=coro)
+    q = Quadrature.build((Band(545.0, 555.0),), scene, path.select("imager"), order=1)
     plan = FramePlan(10.0, 1.0)
-    exposure = exposure_for(scene, q, plan=plan)
-    rates = expected(scene, path, exposure)
+    exposure, sampling = exposure_for(scene, q, plan=plan)
+    rates = expected(scene, path, exposure, sampling=sampling)
     assert float(rates.planet.sum()) > 0
     assert float(rates.local_zodi.sum()) > 0
     far = from_exovista(write_scene(tmp_path / "far.fits"), load_disk=False)
-    beyond = expected(far, path, exposure)
+    beyond = expected(far, path, exposure, sampling=sampling)
     np.testing.assert_array_equal(beyond.planet, 0.0)
     assert float(beyond.local_zodi.sum()) > 0
     key = jax.random.PRNGKey(0)
-    image = observe(key, scene, path, exposure)
-    assert image.data.shape == (1, 24, 24)
-    np.testing.assert_array_equal(image.data, path.detector.draw(key, rates, plan))
+    data = observe(key, scene, path, exposure, sampling=sampling)
+    assert data.image.data.shape == (1, 24, 24)
+    np.testing.assert_array_equal(
+        data.image.data, path.instruments[0].detector.draw(key, rates, plan)
+    )
 
 
 def scene_for(a_au):
@@ -66,10 +68,12 @@ def scene_for(a_au):
 def _yip_setup(tmp_path):
     """A synthetic YIP (source nodes to 3 lambda/D) on a detector inside its stamp."""
     coro = open_yip(write_yip(tmp_path / "yip")).prepare()
-    path = eqx.tree_at(lambda p: p.coronagraph, make_path(n=24, step=0.5), coro)
+    path = with_instrument(make_path(n=24, step=0.5), coronagraph=coro)
     scene = scene_for(0.5)
-    quadrature = Quadrature.build((Band(549.5, 550.5),), scene, path, order=1)
-    return coro, path, exposure_for(scene, quadrature)
+    quadrature = Quadrature.build(
+        (Band(549.5, 550.5),), scene, path.select("imager"), order=1
+    )
+    return (coro, path, *exposure_for(scene, quadrature))
 
 
 @pytest.mark.medium(reason="synthetic YIP load and two programs for 1 and 2 planets")
@@ -91,7 +95,7 @@ def test_planet_beyond_the_hull_leaves_the_inner_planet_untouched(tmp_path):
 
     from coronagraphoto import photon_rates
 
-    coro, path, exposure = _yip_setup(tmp_path)
+    coro, path, exposure, sampling = _yip_setup(tmp_path)
     scale = float(coro.at_wavelength(550.0).source_grid.frame.lod_to_arcsec(550.0))
     hull = 4.25  # the farthest synthetic node, at (3, 3) lambda/D (a corner)
     inner, outer = 2.6 * scale, 3 * hull * scale
@@ -111,8 +115,12 @@ def test_planet_beyond_the_hull_leaves_the_inner_planet_untouched(tmp_path):
             ),
         )
 
-    one = np.asarray(photon_rates(planets([inner]), path, exposure).planet)
-    two = np.asarray(photon_rates(planets([inner, outer]), path, exposure).planet)
+    one = np.asarray(
+        photon_rates(planets([inner]), path, exposure, sampling=sampling).planet
+    )
+    two = np.asarray(
+        photon_rates(planets([inner, outer]), path, exposure, sampling=sampling).planet
+    )
     assert np.isfinite(two).all() and one.max() > 0
     np.testing.assert_allclose(
         two, one, rtol=0, atol=roundoff(one.max(), n_ops=64, dtype=one.dtype)
@@ -144,7 +152,7 @@ def test_planet_position_gradient_is_exact_inside_and_zero_beyond_the_hull(tmp_p
 
     from coronagraphoto import photon_rates
 
-    _, path, exposure = _yip_setup(tmp_path)
+    _, path, exposure, sampling = _yip_setup(tmp_path)
 
     def planet_sum(a_au):
         scene = eqx.tree_at(
@@ -152,7 +160,7 @@ def test_planet_position_gradient_is_exact_inside_and_zero_beyond_the_hull(tmp_p
             scene_for(0.5),
             jnp.asarray(a_au)[None],
         )
-        rates = photon_rates(scene, path, exposure)
+        rates = photon_rates(scene, path, exposure, sampling=sampling)
         return rates.planet.sum() * 1e12
 
     inside, beyond = jnp.asarray(0.5), jnp.asarray(1.2)

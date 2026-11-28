@@ -10,6 +10,7 @@ from conftest import (
     exposure_for,
     make_path,
     make_system,
+    with_instrument,
     with_zodi,
     write_yip,
 )
@@ -51,7 +52,7 @@ def test_yip_image_absolute_photon_fraction(tmp_path, distinct_products):
             lambda c: c.stellar_grid, coro, replace(stellar_grid, frame=stellar_frame)
         )
     path = make_path(n=24, step=0.5, detector_n=28, detector_step=0.5)
-    path = eqx.tree_at(lambda p: p.coronagraph, path, coro)
+    path = with_instrument(path, coronagraph=coro)
     # Exactly a measured source offset: 1 lod north at the reference wavelength.
     stellar = coro.stellar_map(550.0, 0.1, grid=None)
     star = FlatStar(
@@ -71,9 +72,12 @@ def test_yip_image_absolute_photon_fraction(tmp_path, distinct_products):
         star=star, separation_arcsec=float(coro.grid.frame.lod_to_arcsec(550.0))
     )
     zodi = PrecomputedZodi(jnp.array([500.0, 600.0]), jnp.full(2, 1e12))
-    quadrature = Quadrature.build((Band(549.5, 550.5),), system, path, zodi, order=1)
+    quadrature = Quadrature.build(
+        (Band(549.5, 550.5),), system, path.select("imager"), zodi, order=1
+    )
     scene = with_zodi(system, zodi)
-    rates = photon_rates(scene, path, exposure_for(scene, quadrature, roll_deg=90))
+    exposure, sampling = exposure_for(scene, quadrature, roll_deg=90)
+    rates = photon_rates(scene, path, exposure, sampling=sampling)
     np.testing.assert_allclose(
         rates.planet.sum(), 40 * 0.4 * phi_star * 1e-10 * 0.3, rtol=2e-6
     )
@@ -82,7 +86,7 @@ def test_yip_image_absolute_photon_fraction(tmp_path, distinct_products):
     # diameter and spatial gradients expose both diameter and frame conversion.
     grid = PixelGrid.regular(
         (28, 28),
-        float(path.detector.pixel_scale_arcsec),
+        float(path.instruments[0].detector.pixel_scale_arcsec),
         "arcsec",
         orientation=SkyOrientation(90),
     )

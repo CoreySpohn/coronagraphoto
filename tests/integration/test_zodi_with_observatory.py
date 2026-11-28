@@ -42,17 +42,19 @@ def test_derived_sightline_reaches_pixels():
         lat, _ = sightline(system, day)
         np.testing.assert_allclose(float(lat), beta, atol=1e-4)
         quadrature = Quadrature.build(
-            (Band(549.5, 550.5),), system, path, zodi, order=1
+            (Band(549.5, 550.5),), system, path.select("imager"), zodi, order=1
         )
-        exposure = exposure_for(system, quadrature, time_d=day)
-        rate = photon_rates(system, path, exposure).local_zodi[0, 0, 4, 4]
+        exposure, sampling = exposure_for(system, quadrature, time_d=day)
+        rate = photon_rates(system, path, exposure, sampling=sampling).local_zodi[
+            0, 0, 4, 4
+        ]
         radiance = leinert_radiance(system, 550.0, day)
         expected = (
             40
             * 0.4
             * 0.3
             * radiance
-            * float(path.detector.pixel_scale_arcsec) ** 2
+            * float(path.instruments[0].detector.pixel_scale_arcsec) ** 2
             * arcsec2rad**2
         )
         np.testing.assert_allclose(

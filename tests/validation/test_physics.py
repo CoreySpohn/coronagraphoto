@@ -5,9 +5,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import exposure_for, make_path, make_system
+from conftest import exposure_for, make_path, make_system, with_instrument
 from optixstuff import FramePlan
-from optixstuff.grids import Measure, SkyOrientation
+from optixstuff.grids import Measure
 from optixstuff.spectral import Band, Quadrature
 
 from coronagraphoto import expected, observe
@@ -28,25 +28,28 @@ def test_draw_mean_and_reproducibility():
             d.clock_induced_charge_e_per_pixel_frame,
             d.read_noise_e_rms,
         ),
-        path.detector,
+        path.instruments[0].detector,
         (jnp.array(2.0), jnp.array(0.2), jnp.array(1.0)),
     )
-    path = eqx.tree_at(lambda p: p.detector, path, detector)
+    path = with_instrument(path, detector=detector)
     system = make_system()
-    q = Quadrature.build((Band(549.5, 550.5),), system, path, order=1)
+    q = Quadrature.build((Band(549.5, 550.5),), system, path.select("imager"), order=1)
     plan = FramePlan(10.0, 6.0)
     scene = system
-    exposure = exposure_for(scene, q, plan=plan)
-    electrons = expected(scene, path, exposure)
+    exposure, sampling = exposure_for(scene, q, plan=plan)
+    electrons = expected(scene, path, exposure, sampling=sampling)
     mean, var = detector.mean_and_variance(electrons, plan)
-    draw = eqx.filter_jit(lambda key: observe(key, scene, path, exposure))
+    draw = eqx.filter_jit(
+        lambda key: observe(key, scene, path, exposure, sampling=sampling)
+    )
     key = jax.random.PRNGKey(0)
-    first, second = draw(key), draw(key)
+    data, again = draw(key), draw(key)
+    first, second = data.image, again.image
     assert first.quantity == "electrons" and first.measure == Measure.integral()
-    assert first.grid.orientation == SkyOrientation(0)
+    assert float(data.exposure.pointing.roll_deg) == 0.0
     np.testing.assert_array_equal(first.data, second.data)
     np.testing.assert_array_equal(first.data, detector.draw(key, electrons, plan))
-    samples = jax.lax.map(lambda k: draw(k).data, jax.random.split(key, 2000))
+    samples = jax.lax.map(lambda k: draw(k).image.data, jax.random.split(key, 2000))
     np.testing.assert_array_less(
         np.abs(np.asarray(samples).mean(axis=0) - mean), 5 * np.sqrt(var / 2000)
     )
