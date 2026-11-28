@@ -8,15 +8,16 @@ streaming path. Reverse-mode differentiation can retain scan residuals.
 
 ## One program for any nodes and any roll
 
-The wavelength nodes and weights, the roll and the epoch are traced array
-leaves of the `Exposure`. The detector shape, grid axes, frame and
+The wavelength nodes and weights of the `SpectralSampling`, and the start time
+and the roll of the `Exposure`, are traced array leaves; the exposure's epoch, instrument
+name and bands are static. The detector shape, grid axes, frame and
 coronagraph band selection are static. Every node is rendered by one
 `lax.scan` (or `lax.map` for `photon_rates`) whose body builds the resampling
 operators at the observing band centre for a band-averaged product and at
 the node wavelength for a single-wavelength response. The program does not grow
 with the node count and compiles once. A different node value, weight or roll
 reuses it; a different node count, band count, detector shape or
-instrument structure is a new array shape or static configuration and compiles
+observatory structure is a new array shape or static configuration and compiles
 once more. There is no reader cache to size or clear: JAX's own
 compilation cache holds the programs.
 
@@ -29,30 +30,34 @@ Time, sky-background coordinates, array-valued scene fluxes, detector
 yield/noise parameters, PRNG keys, the roll and the quadrature are runtime
 inputs, and `jax.grad` differentiates through all of them. Use arrays for
 numerical scene parameters that you intend to vary; Equinox treats Python
-scalar leaves as static. A grid returned by `observe` records the roll only
-when it is concrete.
+scalar leaves as static. The roll of an observation is
+`data.exposure.pointing.roll_deg`, a traced leaf under JIT.
 
 The readers also compose with a caller's own JIT, vmap and grad. While tracing
-they stage directly into that program. Pass the exposure, scene and instrument as
+they stage directly into that program. Pass the exposure, scene and observatory as
 arguments, or close over them:
 
 ```python notest
+# scene, observatory, bands, plan and key come from the caller.
 from dataclasses import replace
 
 import equinox as eqx
-from coronagraphoto import build_exposure, observe
+from coronagraphoto import build_exposure, build_sampling, observe
 from optixstuff import Pointing
 
-exposure = build_exposure(scene, instrument, bands, time_d=0.0, plan=plan)
+exposure = build_exposure(
+    bands, epoch=scene.epoch, instrument="imager", time_d=0.0, plan=plan
+)
+sampling = build_sampling(observatory, exposure, scene=scene)
 
 
 @eqx.filter_jit
-def predict(scene, instrument, key, time_d, roll_deg):
+def predict(scene, observatory, key, time_d, roll_deg):
     at = replace(exposure, time_d=time_d, pointing=Pointing(roll_deg))
-    return observe(key, scene, instrument, at)
+    return observe(key, scene, observatory, at, sampling=sampling).image
 
 
-image = predict(scene, instrument, key, time_d, 30.0)
+image = predict(scene, observatory, key, time_d, 30.0)
 image.data.block_until_ready()
 ```
 
@@ -61,10 +66,11 @@ frame is implementation-dependent, not an inherent requirement of rendering
 an observation. Prefer `lax.map` when frames would exhaust memory:
 
 ```python notest
+# predict, scene, observatory, keys and times_d come from the example above.
 import jax
 
 images = jax.lax.map(
-    lambda kt: predict(scene, instrument, kt[0], kt[1], 30.0).data,
+    lambda kt: predict(scene, observatory, kt[0], kt[1], 30.0).data,
     (keys, times_d),
 )
 images.block_until_ready()
