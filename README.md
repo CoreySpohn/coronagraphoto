@@ -40,15 +40,19 @@ pip install coronagraphoto
 ## Photon budgets and detector images
 
 Scenes come from `skyscapes`; hardware and detector statistics come from
-`optixstuff`. One `Exposure` record, built once with `build_exposure`, carries
-the epoch, roll, wavelength quadrature and frame plan. The image reader takes
-`(scene, instrument, exposure)`:
+`optixstuff`. Three objects describe one observation. An `Observatory` holds a
+`Telescope` and its named `Instrument` configurations. An `Exposure`, built
+with `build_exposure`, is the commanded event: the bands, the epoch, the
+instrument name, the start time, the roll and the frame plan. It holds no
+scene. A `SpectralSampling`, built with `build_sampling`, holds the wavelength
+quadrature and the `Resolution` that serve the event. The image reader takes
+`(scene, observatory, exposure, *, sampling)`:
 
 | Function | Output | Units |
 |---|---|---|
 | `photon_rates` | photon `Rates`, each field `(W, Q, ny, nx)` | photons/s/nm/pixel |
 | `expected` | electron `Rates`, each field `(W, ny, nx)` | electrons/s/pixel |
-| `observe` | `Image`, data `(W, ny, nx)` | electrons/pixel |
+| `observe` | `ExposureData`, `data.image` of shape `(W, ny, nx)` | electrons/pixel |
 
 The fields are `planet`, `star_leakage`, `local_zodi`, `exozodi`, `thermal`
 and `stellar_companions`; the reader does not model the last one, so it holds
@@ -60,15 +64,16 @@ to combine terms. Optical throughput excludes detector yield. Only
 
 `expected` scans nodes and accumulates band images, holding one node's
 images at a time. `photon_rates` retains all nodes for inspection and small
-problems. `build_exposure` builds the quadrature on the host from the scene's
-tabulated sources and the instrument. Its Gauss-Legendre rule splits at every declared
-break, including detector QE knots, and the exposure also holds the
-`Resolution` that reduces each tabulated spectrum (star, planet, local zodi) to
-the band's nodes, so a line-rich table integrates exactly with few nodes. A band
-a table does not cover is refused. A table's knot grid is a static `Knots`
-value, never a leaf, so the exposure declares no reads; a scene that
-holds a NumPy leaf is refused at entry. Reuse one exposure across
-readers, and change other fields with `dataclasses.replace`.
+problems. `build_sampling` builds the quadrature on the host from the selected
+instrument and the scene's tabulated sources. Its Gauss-Legendre rule splits at
+every declared break, including detector QE knots, and the sampling also holds
+the `Resolution` that reduces each tabulated spectrum (star, planet, local
+zodi) to the band's nodes, so a line-rich table integrates exactly with few
+nodes. A band a table does not cover is refused. A table's knot grid is a
+static `Knots` value, never a leaf; a scene that holds a NumPy leaf is refused
+at entry. Reuse one exposure and one sampling across readers, and change other
+fields of the exposure with `dataclasses.replace`. `exposure.time_d` counts days
+from `exposure.epoch`, which need not be the scene's epoch.
 
 ## Exposure times
 
@@ -98,37 +103,50 @@ a public scene and YIP on first use; the epoch must lie in the scene's recorded
 time range.
 
 ```python notest
+# Downloads a public scene and YIP on first use, so the docs test does not run it.
 import jax
 
 jax.config.update("jax_enable_x64", True)
 
-from optixstuff import ConstantThroughput, FramePlan, IdealDetector, Instrument
+from optixstuff import (
+    ConstantThroughput,
+    FramePlan,
+    IdealDetector,
+    Instrument,
+    Observatory,
+    Telescope,
+)
 from optixstuff.spectral import Band
 from skyscapes import from_exovista
 from skyscapes.datasets import fetch_scene
 from yippy import fetch_yip, open_yip
-from coronagraphoto import build_exposure, expected, observe
+from coronagraphoto import build_exposure, build_sampling, expected, observe
 
 scene = from_exovista(fetch_scene(), load_disk=False)
 coronagraph = open_yip(fetch_yip("eac1_aavc_2d")).prepare()
-instrument = Instrument(
-    primary=coronagraph.primary,  # the telescope the YIP was computed for
-    attenuating_elements=(ConstantThroughput(throughput=0.4),),
-    coronagraph=coronagraph,
-    detector=IdealDetector(pixel_scale_arcsec=0.01, shape=(128, 128)),
+observatory = Observatory(
+    Telescope(coronagraph.pupil),  # the telescope the YIP was computed for
+    (
+        Instrument(
+            "imager",
+            attenuating_elements=(ConstantThroughput(throughput=0.4),),
+            coronagraph=coronagraph,
+            detector=IdealDetector(pixel_scale_arcsec=0.01, shape=(128, 128)),
+        ),
+    ),
 )
-bands = (Band(500.0, 600.0),)
 exposure = build_exposure(
-    scene,
-    instrument,
-    bands,
+    (Band(500.0, 600.0),),
+    epoch=scene.epoch,
+    instrument="imager",
     time_d=0.0,
     roll_deg=30.0,
     plan=FramePlan(frame_time_s=100.0, n_frames=36),
 )
-rates = expected(scene, instrument, exposure)
-image = observe(jax.random.PRNGKey(0), scene, instrument, exposure)
-# imshow(image.data[0], origin="lower")
+sampling = build_sampling(observatory, exposure, scene=scene)
+rates = expected(scene, observatory, exposure, sampling=sampling)
+data = observe(jax.random.PRNGKey(0), scene, observatory, exposure, sampling=sampling)
+# imshow(data.image.data[0], origin="lower")
 ```
 
 For disks, load the disk and give the coronagraph a scene renderer with
@@ -139,16 +157,17 @@ Rows increase along detector +y and columns along detector +x. Pixel `(j,i)`
 is centred at `(x,y)=(i,j)`, including even grids. `roll_deg` is the position
 angle of detector +y, north through east. At zero, east is left and north is
 up; at 90 degrees, north is right. A roll changes this orientation for both
-planets and disks.
+planets and disks. The roll of an observation is `data.exposure.pointing.roll_deg`;
+the image grid does not carry it.
 
 Speckle fields are supplied through `Instrument.speckle`. Their positive excess joins `star_leakage`; their existing
-physics is retained. The reader calls
-`realize(wavelength_nm=..., elapsed_s=speckle.elapsed_s(time_d))`: the field
-converts scene time to seconds on its own clock. Under x32 a field with a
-nonzero `epoch_d` is refused, because a float32 scene time near that epoch has
-already lost the offset; enable x64, move the scene epoch to the observation so
-that `epoch_d` is zero, or anchor the field at zero. The speckle pattern remains fixed
-in detector coordinates as pointing rolls.
+physics is retained. A speckle field is hardware with its own epoch, so the
+reader states the exposure time on `speckle.epoch` and calls
+`realize(wavelength_nm=..., elapsed_s=speckle.elapsed_s(time_d))`. Under x32 a
+float32 time that must be shifted to the field's epoch, or a field with a
+nonzero `epoch_d`, is refused, because the offset is already lost; enable x64,
+build the exposure on the field's epoch, or anchor the field at zero. The speckle pattern remains fixed in detector coordinates as pointing
+rolls.
 
 Select record fields for per-source access. See
 [rate and observation contracts](docs/explanation/rate_vs_readout.md) and
