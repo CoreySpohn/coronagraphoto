@@ -52,6 +52,24 @@ x32 a field with a nonzero `epoch_d` is refused, and the ways out are to enable
 x64, to move the scene epoch to the observation so that `epoch_d` is zero, or to
 anchor the field at zero.
 
+## Observations with exposure data
+
+Use `observe_data` to keep the exposure with the measured image. With the
+same key and inputs, both calls below return the same detector electrons.
+The example uses a scene, instrument and planned exposure built by the caller.
+
+```python notest
+from coronagraphoto import observe, observe_data
+
+image = observe(key, scene, instrument, exposure)
+measurement = observe_data(key, scene, instrument, exposure)
+```
+
+Read the electrons through `measurement.image.data` and the pointing and
+frame plan through `measurement.exposure`. The measurement carries the roll
+on its exposure. Use `measurement.sky_to_pixel` to locate a target-relative
+sky position.
+
 ## Precision
 
 For an AB magnitude 5 star and a planet at 0.05 arcsec on a 48 × 48 detector
@@ -62,8 +80,9 @@ float64 value, so use float64 when you need finer agreement.
 
 ## Image orientation and roll
 
-`exposure.pointing.roll_deg` is shared by the detector grid, planet placement
-and disk rendering. The roll is the position angle of detector +y, north
+The renderer uses `exposure.pointing.roll_deg` for planet placement and disk
+rendering. `observe` also records a concrete roll on its grid. The roll is
+the position angle of detector +y, north
 through east. At roll zero, +column points west and +row north. At roll 90,
 north points right and east up. The grid centre is the optical axis, including
 half-integer centres for even arrays.

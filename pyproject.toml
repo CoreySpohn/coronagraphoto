@@ -18,11 +18,11 @@ classifiers = [
 ]
 dependencies = [
   "equinox>=0.13.2",
-  "hwoutils[jax]>=3.0.0",
+  "hwoutils[jax]>=3.1.0",
   "jax>=0.8.1",
   "jaxtyping>=0.3.3",
   "numpy>=2.1.2",
-  "optixstuff>=7.0.0",
+  "optixstuff>=7.1.0",
   "orbix>=6.0.0",
   "skyscapes>=6.0.0",
 ]

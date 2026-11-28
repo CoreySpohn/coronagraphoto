@@ -29,7 +29,8 @@ import numpy as np
 from hwoutils.leaves import require_tree
 from hwoutils.numerics import COARSEST
 from hwoutils.precision import like, precision_of
-from optixstuff import Exposure, FramePlan, Instrument, Pointing, Rates
+from hwoutils.provenance import build_stamps
+from optixstuff import Exposure, ExposureData, FramePlan, Instrument, Pointing, Rates
 from optixstuff.coronagraph import (
     AbstractImagingCoronagraph,
     AbstractSceneCoronagraph,
@@ -47,6 +48,8 @@ from optixstuff.grids import (
 )
 from optixstuff.spectral import Band, Quadrature, Resolution, merge_tolerance_nm
 from skyscapes import Scene
+
+from coronagraphoto._version import __version__
 
 
 def _detector_grid(instrument, orientation):
@@ -1137,3 +1140,48 @@ def observe(key, scene: Scene, instrument: Instrument, exposure: Exposure) -> Im
         Measure.integral(),
         "electrons",
     )
+
+
+def observe_data(
+    key, scene: Scene, instrument: Instrument, exposure: Exposure
+) -> ExposureData:
+    """Draw one detector observation and retain its exposure.
+
+    As in :func:`observe`, the scene is held at the exposure time and detector
+    noise is drawn once over the frame plan. The roll lives on the exposure.
+    The returned variance and flags are absent and all pixels are marked valid.
+
+    Args:
+        key: JAX PRNG key for the detector noise draw.
+        scene: The scene to render.
+        instrument: The instrument to render with, including its detector.
+        exposure: On-axis pointing, observation time, wavelength quadrature,
+            and the required frame plan.
+
+    Returns:
+        The measured electrons, with axes (band, y, x), and their exposure.
+
+    Raises:
+        NotImplementedError: The exposure has an explicit pointing offset.
+        ValueError: The exposure has no frame plan.
+    """
+    _require_on_axis(exposure)
+    if exposure.plan is None:
+        raise ValueError("observe_data needs an exposure built with a FramePlan")
+    detector = instrument.detector
+    rates = expected(scene, instrument, exposure)
+    electrons = _draw(detector, key, rates, exposure.plan)
+    image = Image(
+        electrons,
+        _detector_grid(instrument, None),
+        ("band",),
+        Measure.integral(),
+        "electrons",
+    )
+    built_at = build_stamps(
+        producer="coronagraphoto.observe_data",
+        producer_version=__version__,
+        detector=type(detector).__name__,
+        quadrature_layout=exposure.quadrature.layout_digest,
+    )
+    return ExposureData(image, exposure, built_at=built_at)

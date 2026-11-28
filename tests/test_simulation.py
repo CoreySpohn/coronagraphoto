@@ -1,9 +1,20 @@
 """Photon reader radiometry and JAX contracts."""
 
+from dataclasses import replace
+
+import jax
 import numpy as np
 import pytest
-from conftest import GaussianCoronagraph, IntegratedGaussianCoronagraph
+from conftest import (
+    GaussianCoronagraph,
+    IntegratedGaussianCoronagraph,
+    make_path,
+    make_system,
+)
 from hwoutils.numerics import roundoff, sum_roundoff
+from optixstuff import Band, FramePlan, Pointing, stack_exposure_data
+
+import coronagraphoto as cp
 
 
 @pytest.mark.medium(reason="1600 declared stellar nodes in the worked spectrum")
@@ -1341,4 +1352,61 @@ def test_integer_nodes_keep_the_fractional_band_centre(gaussian_observation):
     ]
     np.testing.assert_allclose(
         images[0], images[1], atol=1e-12 * images[1].max(), rtol=0
+    )
+
+
+@pytest.fixture(scope="module")
+def planned_observation():
+    """A planned single-node toy observation for repeat detector draws."""
+    scene = make_system(smooth_planet=True)
+    instrument = make_path(n=8, step=0.5)
+    exposure = cp.build_exposure(
+        scene,
+        instrument,
+        (Band(540.0, 560.0),),
+        time_d=0.0,
+        roll_deg=17.0,
+        plan=FramePlan(10.0, 1.0),
+        order=1,
+        field_lod=0.0,
+    )
+    return scene, instrument, exposure
+
+
+def test_observe_data_matches_observe(planned_observation):
+    """The same key and detector draw give bitwise identical electrons."""
+    scene, instrument, exposure = planned_observation
+    key = jax.random.key(0)
+    result = cp.observe_data(key, scene, instrument, exposure)
+    legacy = cp.observe(key, scene, instrument, exposure)
+    actual, expected = np.asarray(result.image.data), np.asarray(legacy.data)
+    assert actual.shape == expected.shape
+    assert actual.dtype == expected.dtype
+    assert actual.tobytes() == expected.tobytes()
+    assert result.exposure is exposure
+    assert result.image.grid.orientation is None
+    assert result.image.leading_axes == ("band",)
+    assert result.image.quantity == "electrons"
+    assert result.image.measure == legacy.measure
+    assert result.variance is None
+    assert result.flags is None
+    np.testing.assert_array_equal(result.valid, np.ones(actual.shape, dtype=bool))
+    with pytest.raises(ValueError, match="FramePlan"):
+        cp.observe_data(key, scene, instrument, replace(exposure, plan=None))
+    with pytest.raises(NotImplementedError, match="offset_mas=None"):
+        pointing = Pointing(exposure.pointing.roll_deg, [0.0, 0.0])
+        cp.observe_data(key, scene, instrument, replace(exposure, pointing=pointing))
+
+
+def test_observe_data_draw_stack_keeps_one_exposure(planned_observation):
+    """Three draws have a draw axis and exactly the original unbatched exposure."""
+    scene, instrument, exposure = planned_observation
+    keys = jax.random.split(jax.random.key(1), 3)
+    draws = [cp.observe_data(key, scene, instrument, exposure) for key in keys]
+    stacked = stack_exposure_data(draws, axis="draw")
+    assert stacked.exposure is exposure
+    assert stacked.image.leading_axes == ("draw", "band")
+    assert stacked.image.data.shape == (3, 1, 8, 8)
+    np.testing.assert_array_equal(
+        stacked.image.data, np.stack([draw.image.data for draw in draws])
     )

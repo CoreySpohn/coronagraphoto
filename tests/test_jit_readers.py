@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import make_path, make_system
-from optixstuff import Exposure, FramePlan, Pointing
+from optixstuff import Exposure, FramePlan, IdealDetector, Pointing
 from optixstuff.spectral import Band, Quadrature
 from skyscapes.scene import FlatStar
 
@@ -16,6 +16,7 @@ from coronagraphoto import (
     build_exposure,
     expected,
     observe,
+    observe_data,
     photon_rates,
 )
 
@@ -262,3 +263,60 @@ def test_traced_nodes_select_the_band_model_inside_the_program():
     assert np.all(
         np.isnan(eqx.filter_jit(lambda e: photon_rates(scene, path, e))(outside).planet)
     )
+
+
+def test_observe_data_traced_roll_and_build_stamp():
+    """Match eager bytes and build facts exactly through one trace for two rolls."""
+    traces = []
+    scene = make_system(planet_groups=(), separation_arcsec=jnp.empty(0))
+    instrument = make_path(n=8, step=0.5, detector_n=3)
+    detector = IdealDetector(
+        pixel_scale_arcsec=instrument.detector.grid.step, shape=(3, 3)
+    )
+    instrument = eqx.tree_at(lambda p: p.detector, instrument, detector)
+    exposure = build_exposure(
+        scene,
+        instrument,
+        (Band(540.0, 560.0),),
+        time_d=0.0,
+        plan=FramePlan(10.0, 1.0),
+        order=1,
+        field_lod=0.0,
+    )
+
+    @eqx.filter_jit
+    def read(key, scene, instrument, exposure, roll):
+        traces.append(None)
+        pointed = eqx.tree_at(lambda e: e.pointing.roll_deg, exposure, roll)
+        return observe_data(key, scene, instrument, pointed)
+
+    stamps = []
+    for seed, roll_deg in enumerate((17.0, 41.0)):
+        key = jax.random.key(seed)
+        roll = jnp.asarray(roll_deg, dtype=exposure.pointing.roll_deg.dtype)
+        result = read(key, scene, instrument, exposure, roll)
+        pointed = eqx.tree_at(lambda e: e.pointing.roll_deg, exposure, roll)
+        eager = observe_data(key, scene, instrument, pointed)
+        legacy = observe(key, scene, instrument, pointed)
+        actual_values = np.asarray(result.image.data)
+        eager_values = np.asarray(eager.image.data)
+        legacy_values = np.asarray(legacy.data)
+        assert actual_values.dtype == eager_values.dtype == legacy_values.dtype
+        assert (
+            actual_values.tobytes() == eager_values.tobytes() == legacy_values.tobytes()
+        )
+        assert result.built_at == eager.built_at
+        assert result.image.grid.orientation is None
+        assert eager.image.grid.orientation is None
+        assert result.exposure.pointing.roll_deg == roll
+        stamps.append(result.built_at)
+
+    assert len(traces) == 1
+    assert stamps[0] == stamps[1]
+    facts = dict(stamps[0])
+    assert facts.pop("producer_version").startswith("str:")
+    assert facts == {
+        "producer": "str:coronagraphoto.observe_data",
+        "detector": "str:IdealDetector",
+        "quadrature_layout": f"str:{exposure.quadrature.layout_digest}",
+    }
