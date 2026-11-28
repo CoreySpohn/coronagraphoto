@@ -1,5 +1,91 @@
 # Changelog
 
+## [7.0.0](https://github.com/CoreySpohn/coronagraphoto/compare/v6.1.0...v7.0.0) (2026-11-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* **simulation:** read the exposure pointing and refuse pointing offsets until rendered
+* **coronagraphoto:** close the render and aperture forwards at their working precision
+* **coronagraphoto:** share multiband wavelength dispatch across forward reads and keep ring support identical on host and compiled reads
+* **simulation:** a band-averaged coronagraph product is placed at one lambda/D scale per observing band, so its band images and aperture responses change; build_exposure takes allow_wide_bands and refuses wide or straddling bands by default.
+* **aperture:** aperture_rates refuses a planet or contrast input that does not broadcast to the record's (W, Q); an extra leading axis was previously read as the mean and variance inputs.
+* **simulation:** build_exposure now splits bands at the wavelength knots a disk declares (an ExoVista contrast cube), so an exposure of such a scene has more nodes and a more accurate band integral; disks that declare no breaks are unchanged.
+* **aperture:** ApertureRecord.planet_per_contrast is replaced by planet_response (effective area times aperture throughput) and star (the node stellar photon flux density at build); aperture_rates takes exactly one of the keyword-only contrast= or planet=; scene_aperture_rates reads Sources.planets, so a thermal planet around a variable star no longer follows the star's variation
+* **simulation:** the render passes realize(wavelength_nm=..., elapsed_s=speckle.elapsed_s(time_d)) to Instrument.speckle, so a speckle field must implement realize with the elapsed_s keyword (seconds since its clock origin) and must not subtract epoch_d itself. Under x32, rendering with a field whose epoch_d is nonzero now raises ValueError instead of returning a result quantized to the float32 spacing of the epoch; enable x64, move the scene epoch to the observation so that epoch_d is zero, or anchor the field at zero.
+* **simulation:** build_exposure no longer passes the scene's knot leaves to Exposure.reads, since table knots are static; a scene holding a NumPy leaf is refused with the leaf's path.
+* **simulation:** the default field_lod is now the instrument's declared field (the detector half-diagonal), so default node counts rise on wide detectors and results move at the 1e-4 level or less. Pass field_lod=0.0 for the previous layout.
+* **simulation:** Exposure now carries a Resolution and the knot leaves it reads, build_exposure takes field_lod, and a hand-built Exposure needs a Resolution for tabulated sources.
+* **aperture:** read zero with Rates.supported False instead of NaN beyond the tables, the detector and the stamp
+* **simulation:** render only what the coronagraph data hold and flag unsupported pixels in Rates.supported
+* **aperture:** render and record the warm telescope's thermal emission
+* **aperture:** read MultiBandCoronagraph.coronagraph_at
+* **aperture:** state post_processing in every calculator call and document it as required
+* **simulation:** read MultiBandCoronagraph.coronagraphs
+* **aperture:** refuse a response built for another instrument and take the flux scale from effective_area_m2
+* **calculator:** state background_variance_factor in post-processing
+* **calculator:** delete snr, exposure_time, ExposureTime and ResidualFractions in favor of optixstuff and drop the yippy runtime dependency
+* **aperture:** name the record tables, pass the sky frame to the zodi model and drop the position checks and unit-sky subclass
+
+### Features
+
+* **aperture:** add scene_aperture_rates over a scene's planets and times ([9f2c485](https://github.com/CoreySpohn/coronagraphoto/commit/9f2c485496f225171a00936cba29d85b16c236b1))
+* **aperture:** name the record tables, pass the sky frame to the zodi model and drop the position checks and unit-sky subclass ([481a6eb](https://github.com/CoreySpohn/coronagraphoto/commit/481a6eb768a3eeab480d350479a2f6f8096b4832))
+* **aperture:** read MultiBandCoronagraph.coronagraph_at ([cf1d8ef](https://github.com/CoreySpohn/coronagraphoto/commit/cf1d8ef8b673cd2fd1d999a96ab9adf6cf4d9f5b))
+* **aperture:** refuse a response built for another instrument and take the flux scale from effective_area_m2 ([d18579c](https://github.com/CoreySpohn/coronagraphoto/commit/d18579c3aa485633fdb9b11efb9b83c0f96811cf))
+* **aperture:** render and record the warm telescope's thermal emission ([6a06c6e](https://github.com/CoreySpohn/coronagraphoto/commit/6a06c6eda2090ae5ec2b9f890d69074b994b23d4))
+* **aperture:** state post_processing in every calculator call and document it as required ([faf6ed7](https://github.com/CoreySpohn/coronagraphoto/commit/faf6ed7fb10628dbf9b170f6a5a3108326fc79b6))
+* **simulation:** build_exposure declares no reads and refuses NumPy leaves in the scene ([9de9b29](https://github.com/CoreySpohn/coronagraphoto/commit/9de9b29ae330cf22f2f3d1f6d45119a0e1d8dd50))
+* **simulation:** build_exposure takes its default field_lod from the instrument and the routes render real nodes only ([82b4744](https://github.com/CoreySpohn/coronagraphoto/commit/82b4744bfeb3d6625a1a1628c623039ccac17474))
+* **simulation:** read scene tables through Scene.sources on a resolved exposure ([f53b7b7](https://github.com/CoreySpohn/coronagraphoto/commit/f53b7b7a9450d187c3ccec33b0f9a57eb7ab12f5))
+* **simulation:** read the exposure pointing and refuse pointing offsets until rendered ([c304fb2](https://github.com/CoreySpohn/coronagraphoto/commit/c304fb2cf7cbf9f6c4e31a544530cc293d6639bd))
+* **simulation:** records carry static_supported beside supported, and expected and photon_rates keep the static light beyond a speckle field on request ([93acc80](https://github.com/CoreySpohn/coronagraphoto/commit/93acc805b0a31f80924d119e2fce872bf93f925e))
+* **simulation:** render band-averaged products at the observing band centre ([fbfd68a](https://github.com/CoreySpohn/coronagraphoto/commit/fbfd68ac23b6538cea014474e2bc3d2720edf7a0))
+* **simulation:** speckle support ends at the field's data mask ([3818f79](https://github.com/CoreySpohn/coronagraphoto/commit/3818f79df4a4114f7372ff99543aea7f31b23075))
+* **simulation:** split bands at a disk's spectral breaks and add planet_source_support ([1b603bb](https://github.com/CoreySpohn/coronagraphoto/commit/1b603bb8565ff5757f27964b28cc3ec1ee1c72bb))
+
+
+### Bug Fixes
+
+* **aperture:** image and sum only the real wavelength nodes of each band ([998df50](https://github.com/CoreySpohn/coronagraphoto/commit/998df50974c7b8a0a27be9af966b39b3970467a2))
+* **aperture:** probe each band at its middle real node ([d7c8756](https://github.com/CoreySpohn/coronagraphoto/commit/d7c8756624c6130a7b7f6e65dc0e611160a368e5))
+* **aperture:** read scene planets by photon flux density ([02d5ecb](https://github.com/CoreySpohn/coronagraphoto/commit/02d5ecbe03895334a97924a46965d5f9efb316f2))
+* **aperture:** read zero with Rates.supported False instead of NaN beyond the tables, the detector and the stamp ([8f72447](https://github.com/CoreySpohn/coronagraphoto/commit/8f724471cdace6611e19509aa9a0465d3816b05b))
+* **aperture:** refuse a planet or contrast shape that is not (W, Q) and keep float64 precision in the read ([791d9b1](https://github.com/CoreySpohn/coronagraphoto/commit/791d9b12bb177d099689fc8369dce152ffcf94dc))
+* **aperture:** run the response guard at compile time so aperture_record works under jit ([150cb58](https://github.com/CoreySpohn/coronagraphoto/commit/150cb5812078dddd8fe4a3158825929dea647e53))
+* **coronagraphoto:** close the render and aperture forwards at their working precision ([3279f80](https://github.com/CoreySpohn/coronagraphoto/commit/3279f80bc5b382008a0ca81ffc6393e63978c91b))
+* **coronagraphoto:** share multiband wavelength dispatch across forward reads and keep ring support identical on host and compiled reads ([6e8f18f](https://github.com/CoreySpohn/coronagraphoto/commit/6e8f18f310f58949bf419e6eca2e6e6b30d24286))
+* **simulation:** build the disk on the coronagraph's scene grid, so sources beyond the stored PSF grid are rendered ([042ec04](https://github.com/CoreySpohn/coronagraphoto/commit/042ec0430f90a1b9b4058128ab83421daea383d6))
+* **simulation:** cast scene-derived values to the render owner precision at entry and refuse mixed owners ([6f4fd6a](https://github.com/CoreySpohn/coronagraphoto/commit/6f4fd6ace9547e64f7e6066cce779234a924f89a))
+* **simulation:** convert scene time through the speckle field's elapsed_s ([f2f1169](https://github.com/CoreySpohn/coronagraphoto/commit/f2f116902816ae5861f73a5b16bdd0df0a6725eb))
+* **simulation:** evaluate disk radiance on the coronagraph source grid ([539000a](https://github.com/CoreySpohn/coronagraphoto/commit/539000a0dc689ec82e85c77163e77048f5c3a5bc))
+* **simulation:** feed the disk to the scene operator as cell integrals ([eea42e4](https://github.com/CoreySpohn/coronagraphoto/commit/eea42e42f3c4365f1e4990b65b72f838a31214b8))
+* **simulation:** read a sole rendered component in the source-support query and take only breaks from the disk ([22508f9](https://github.com/CoreySpohn/coronagraphoto/commit/22508f9b0ad75cb26a1d2fbaf17ab0724ae43df7))
+* **simulation:** read band-averaged planet PSFs at the model's band-scaled wavelength ([9e1c249](https://github.com/CoreySpohn/coronagraphoto/commit/9e1c249627eb1c9d629cd7190958efc4cb28cec6))
+* **simulation:** read static_beyond_speckle on the host, so a NumPy or JAX boolean is accepted under filter_jit ([95d44f0](https://github.com/CoreySpohn/coronagraphoto/commit/95d44f06e504a133cc580d2b9e2609a98beeaabd))
+* **simulation:** refuse NumPy leaves at every entry through the require_tree walk, and restore the exposure perturbation loop ([a8bd880](https://github.com/CoreySpohn/coronagraphoto/commit/a8bd880463281eca4c169d6664b0fd1b24b4d66a))
+* **simulation:** render only what the coronagraph data hold and flag unsupported pixels in Rates.supported ([ebdd8a7](https://github.com/CoreySpohn/coronagraphoto/commit/ebdd8a766edffd01a59a8f74fc1c6b83a7fd78cf))
+* **simulation:** select the source-support component among the rendered ones in the node dtype ([2d8d124](https://github.com/CoreySpohn/coronagraphoto/commit/2d8d124bb9fced046be6ddfd9258d3b7bd3b0ee0))
+* **simulation:** skip the node checkpoint under disable_jit so eager runs keep concrete values ([26ec8bb](https://github.com/CoreySpohn/coronagraphoto/commit/26ec8bb193b732c51017986207854ef2c0865b6c))
+* **simulation:** support of the stellar, speckle and sky products follows the read resample performs, so coarse detector pixels that deposit lose the edge ring (E7 reference 1000 nm: no pixel of the stellar row moves) ([911c632](https://github.com/CoreySpohn/coronagraphoto/commit/911c6326494323600e9fdd9de70d50db38d081b4))
+
+
+### Performance Improvements
+
+* **simulation:** checkpoint the per-node render so reverse mode recomputes one node instead of storing all ([9975e17](https://github.com/CoreySpohn/coronagraphoto/commit/9975e170273c099ed3e4e081ec11f8f1d37311c7))
+* **simulation:** read band-averaged planet PSFs once per band ([a265976](https://github.com/CoreySpohn/coronagraphoto/commit/a265976c1ce96f3b5fc81e8a98098e9785cdbea0))
+
+
+### Code Refactoring
+
+* **calculator:** delete snr, exposure_time, ExposureTime and ResidualFractions in favor of optixstuff and drop the yippy runtime dependency ([ea2d54d](https://github.com/CoreySpohn/coronagraphoto/commit/ea2d54dffc4fc69c032ea86c39a12d469ef11343))
+* **simulation:** read MultiBandCoronagraph.coronagraphs ([4a4b597](https://github.com/CoreySpohn/coronagraphoto/commit/4a4b59747edc5b53cc9d2195ba159d468981d6c6))
+
+
+### Tests
+
+* **calculator:** state background_variance_factor in post-processing ([73b69e3](https://github.com/CoreySpohn/coronagraphoto/commit/73b69e375be332262de346b46a770e3eb49d8bc3))
+
 ## [6.1.0](https://github.com/CoreySpohn/coronagraphoto/compare/v6.0.0...v6.1.0) (2026-11-20)
 
 
