@@ -631,18 +631,19 @@ def closure_response(path, quadrature, rule, separation_arcsec, *, outer_neighbo
     """
     from coronagraphoto import aperture_response
 
-    frame = path.coronagraph.frame
+    instrument = path.select("imager")
+    frame = instrument.coronagraph.frame
     radius = max(
         rule.radius_lod * float(frame.lod_to_arcsec(band.center_nm))
         for band in quadrature.bands
     )
-    pitch = float(path.detector.pixel_scale_arcsec)
-    limit = (min(path.detector.shape) / 2 - 1) * pitch - radius
+    pitch = float(instrument.detector.pixel_scale_arcsec)
+    limit = (min(instrument.detector.shape) / 2 - 1) * pitch - radius
     rings = np.linspace(0, limit, 33)
     outer = np.searchsorted(rings, separation_arcsec, side="right") + outer_neighbours
     assert outer < len(rings)
     return aperture_response(
-        path,
+        instrument,
         quadrature,
         rule=rule,
         n_separations=int(outer) + 1,

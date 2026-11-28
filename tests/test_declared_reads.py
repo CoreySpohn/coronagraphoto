@@ -7,6 +7,8 @@ aperture record also holds the star's node-effective flux and names the scene
 paths it holds fixed.
 """
 
+from dataclasses import replace
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -16,7 +18,6 @@ from conftest import (
     PlateauCoronagraph,
     make_path,
     make_system,
-    with_instrument,
     with_zodi,
 )
 from hwoutils.model_paths import paths_overlap
@@ -316,25 +317,32 @@ def test_aperture_record_declares_exactly_what_it_reads(zodi, host):
     )
     sampling = cp.build_sampling(instrument, exposure, scene=scene)
     response = cp.aperture_response(
-        instrument,
+        instrument.select("imager"),
         sampling.quadrature,
         n_separations=3,
         n_angles=3,
         max_separation_arcsec=0.04,
     )
-    base = cp.aperture_record(scene, instrument, exposure, response)
+
+    def build(scene):
+        return cp.aperture_record(
+            scene, instrument, exposure, response, sampling=sampling
+        )
+
+    base = build(scene)
     sensitive = [
-        path
-        for path, moved in _floating_leaves(scene)
-        if _changed(base, cp.aperture_record(moved, instrument, exposure, response))
+        path for path, moved in _floating_leaves(scene) if _changed(base, build(moved))
     ]
-    assert len(jax.tree.leaves(base)) == len(
-        jax.tree.leaves(with_instrument(base, reads=()))
+    assert len(jax.tree.leaves(base)) == len(jax.tree.leaves(replace(base, reads=())))
+    assert jax.tree.structure(base) != jax.tree.structure(replace(base, reads=()))
+    # The sampling's own reads (the tables it reduced) are its declaration, not the
+    # record's: the record names the scene paths it holds fixed itself.
+    held = ("scene.star", "scene.dynamics.frame", "scene.local_zodi")
+    declared = tuple(
+        r.removeprefix("scene.")
+        for r in base.reads
+        if r.startswith("scene.") and (r in held or r not in sampling.reads)
     )
-    assert jax.tree.structure(base) != jax.tree.structure(
-        with_instrument(base, reads=())
-    )
-    declared = base.reads
     assert sensitive, "the scene should have at least one leaf the record reads"
     for path in sensitive:
         assert any(paths_overlap(path, d) for d in declared), (path, declared)
@@ -352,6 +360,10 @@ def test_aperture_record_declares_exactly_what_it_reads(zodi, host):
         "dynamics.frame",
         *(() if zodi is None else ("local_zodi",)),
     )
+    # Every other declared path is owner-qualified: the scene, the observatory, the
+    # exposure and the sampling are the only owners.
+    owners = {r.split(".")[0].split("[")[0] for r in base.reads}
+    assert owners <= {"scene", "observatory", "exposure", "sampling"}, owners
 
 
 def test_sampling_reads_follow_the_tables_the_build_reduced():

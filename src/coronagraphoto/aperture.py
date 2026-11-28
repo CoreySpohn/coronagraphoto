@@ -30,18 +30,35 @@ every field with ``Rates.supported`` False, never NaN, so a sum or a gradient
 through it stays finite.
 """
 
-from dataclasses import replace
+from dataclasses import fields, replace
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.epoch import Epoch
 from hwoutils.leaves import is_traced
 from hwoutils.numerics import COARSEST, eps
 from hwoutils.precision import like, precision_of
+from hwoutils.provenance import (
+    Stamps,
+    bind_reads,
+    build_stamps,
+    merge_stamps,
+    prefix_stamps,
+    qualify,
+    require_stamps,
+)
 from jax.typing import ArrayLike
 from jaxtyping import Array
-from optixstuff import Exposure, Instrument, Pointing, Rates
+from optixstuff import (
+    Exposure,
+    Observatory,
+    Pointing,
+    Rates,
+    SelectedInstrument,
+    SpectralSampling,
+)
 from optixstuff.apertures import DEFAULT_APERTURE_RULE, Circular
 from optixstuff.coronagraph import AbstractImagingCoronagraph, MultiBandCoronagraph
 from optixstuff.grids import Image, Measure, PixelGrid, SkyOrientation
@@ -49,11 +66,13 @@ from optixstuff.spectral import Quadrature, Resolution
 from orbix.system import SkyFrame
 from skyscapes import AbstractLocalZodi, Scene
 
+from coronagraphoto._version import __version__
 from coronagraphoto.simulation import (
     _band_center_dtype,
-    _check_render_inputs,
     _host_child_index,
+    _host_stage,
     _real_counts,
+    _routed_children,
     _run,
 )
 
@@ -92,6 +111,16 @@ class ApertureResponse(eqx.Module):
             the measurement to refuse a response built for another
             instrument. NaN for a band with no supported ring anywhere (a
             build check, not a rate).
+        reads: Owner-qualified paths of the values the tables were measured
+            from: the selected coronagraph (each child a band routes to, for a
+            multiband product), the detector, the pupil and the quadrature
+            nodes and weights. Changing one leaves the response stale; rebuild
+            it. The throughput train is not read: the tables hold aperture
+            fractions, and the collecting gain enters the record.
+        built_at: Build facts of the hardware and layout the tables were
+            measured for, as typed stamps. Admission compares them with the
+            caller's view, also under ``jax.jit``; a hand-built response has
+            none.
     """
 
     rule: Circular = eqx.field(static=True)
@@ -104,6 +133,8 @@ class ApertureResponse(eqx.Module):
     kernels: Array
     probe: Array
     _separation_limit_words: Array | None = None
+    reads: tuple[str, ...] = eqx.field(static=True, default=(), kw_only=True)
+    built_at: Stamps = eqx.field(static=True, default=(), kw_only=True)
 
 
 class AperturePosition(eqx.Module):
@@ -145,8 +176,10 @@ class ApertureRecord(eqx.Module):
     record serves any observation time.
 
     Attributes:
-        quadrature: The exposure's wavelength nodes and weights.
+        sampling: The wavelength rule and resolution the record was built on;
+            ``quadrature`` and ``resolution`` read through it.
         pointing: Pointing the backgrounds were rendered at.
+        build_time_d: Scene days (from ``epoch``) at which the record was built.
         pixel_scale_arcsec: Detector pixel pitch; the lattice pitch is half.
         separation_step_arcsec: Spacing of the planet table's separation axis.
         planet_response: Collecting gain times aperture throughput, multiplying
@@ -178,17 +211,21 @@ class ApertureRecord(eqx.Module):
         sky_frame: The scene's ``SkyFrame``: its right ascension and
             declination (None for an unplaced scene) and the epoch, which is
             day zero of the read's ``time_d``.
-        resolution: The exposure's ``Resolution``, which reduces a tabulated
-            local zodi (and, in :func:`scene_aperture_rates`, the scene's
-            sources) on ``quadrature``.
-        reads: Paths, relative to the scene, of every scene value the record was
-            built from, each a whole leaf or a node covering the paths under it.
-            Changing one of them leaves the record stale; rebuild it or hold the
-            value.
+        epoch: The scene epoch the record's clock counts from.
+        reads: Owner-qualified paths of every value the record was built from
+            (``scene.``, ``observatory.``, ``sampling.`` and ``exposure.``),
+            each a whole leaf or a node covering the paths under it. Changing
+            one of them leaves the record stale; rebuild it or hold the value.
+            The planet's position and contrast, the read-time ``time_d`` and
+            ``roll_deg`` and the local zodi's time are read live and are not
+            listed.
+        built_at: Build facts: the response's and the sampling's stamps under
+            the prefixes ``response`` and ``sampling``, and the producer.
     """
 
-    quadrature: Quadrature
+    sampling: SpectralSampling
     pointing: Pointing
+    build_time_d: Array
     pixel_scale_arcsec: Array
     separation_step_arcsec: Array
     planet_response: Array
@@ -202,9 +239,20 @@ class ApertureRecord(eqx.Module):
     thermal: Array
     local_zodi: AbstractLocalZodi | None
     sky_frame: SkyFrame
-    resolution: Resolution
+    epoch: Epoch = eqx.field(static=True)
     reads: tuple[str, ...] = eqx.field(static=True)
     _separation_limit_words: Array | None = None
+    built_at: Stamps = eqx.field(static=True, default=(), kw_only=True)
+
+    @property
+    def quadrature(self) -> Quadrature:
+        """The wavelength nodes and weights the record was built on."""
+        return self.sampling.quadrature
+
+    @property
+    def resolution(self) -> Resolution:
+        """The resolution that reduces tabulated sources on ``quadrature``."""
+        return self.sampling.resolution
 
     def prepare_position(
         self, east_arcsec: ArrayLike, north_arcsec: ArrayLike
@@ -310,9 +358,9 @@ def _sample_ring(
     return jax.lax.map(node, wavelengths_nm)
 
 
-def _band_models(instrument, quadrature, rule):
+def _band_models(selected, quadrature, rule):
     """Per band: coronagraph model, lambda/D frame and aperture radius in pixels."""
-    detector, coro = instrument.detector, instrument.coronagraph
+    detector, coro = selected.detector, selected.coronagraph
     scale = float(detector.pixel_scale_arcsec)
     models, frames, radii = [], [], []
     for band in quadrature.bands:
@@ -358,7 +406,7 @@ def _probe_index(supported_row):
 
 def _probe(
     model,
-    instrument,
+    selected,
     rule,
     frame,
     radius,
@@ -378,7 +426,7 @@ def _probe(
     k = _probe_index(supported[mid])
     if k is None:
         return np.nan
-    detector = instrument.detector
+    detector = selected.detector
     separation = limit if k == supported.shape[-1] - 1 else k * float(step)
     weights = _weights(
         rule,
@@ -390,7 +438,7 @@ def _probe(
         band_center_nm.dtype,
     )
     moments, _ = _ring_moments(
-        _node_model(instrument.coronagraph, model, nodes_nm[mid]),
+        _node_model(selected.coronagraph, model, nodes_nm[mid]),
         detector,
         nodes_nm[mid : mid + 1],
         band_center_nm,
@@ -420,20 +468,134 @@ def _concrete(*trees):
     return not any(isinstance(leaf, jax.core.Tracer) for leaf in leaves)
 
 
-def _check_response(instrument, quadrature, response):
-    """Raise a ValueError when ``response`` was built for something else.
+def _units(selected, quadrature):
+    """Per coronagraph model a product reads: its owner path, label prefix and model.
 
-    Compared in order of cost: the wavelength nodes and bands, the aperture
-    radius in pixels (which carries each band's lambda/D frame, the rule and
-    the detector pixel scale), then one measured source per band, which
-    carries the coronagraph's own tables. Traced inputs are not checked. The
-    comparison runs eagerly even inside ``jax.jit``, so a closed-over
-    instrument is checked once at trace time.
+    A single product has one unit. A multiband product has one per child the
+    quadrature can reach (every child when the nodes are traced).
     """
-    if not _concrete(instrument, quadrature, response):
-        return
+    coro = selected.coronagraph
+    path = selected.owner_path("coronagraph")
+    if not isinstance(coro, MultiBandCoronagraph):
+        return [(path, "coronagraph", coro)]
+    return [
+        (f"{path}.coronagraphs[{i}]", f"coronagraph.child{i}", coro.coronagraphs[i])
+        for i in _routed_children(coro, quadrature)
+    ]
+
+
+def _model_stamps(model) -> Stamps:
+    """A coronagraph's own build stamps: a delivery's, or a calibration's."""
+    stamps = getattr(model, "built_at", None)
+    if stamps is None and hasattr(model, "calibration_stamps"):
+        stamps = model.calibration_stamps()
+    return () if stamps is None else tuple(stamps)
+
+
+def _hardware_stamps(selected, quadrature) -> Stamps:
+    """Build facts of a selected view and a quadrature, from static data only."""
+    facts = {
+        "instrument": selected.name,
+        "telescope_pupil_id": getattr(selected.pupil, "pupil_id", None),
+        "layout": quadrature.layout_digest,
+        "precision": str(precision_of(selected)),
+    }
+    units = _units(selected, quadrature)
+    parts = []
+    for _, prefix, model in units:
+        if prefix == "coronagraph":
+            facts["coronagraph_pupil_id"] = getattr(model, "pupil_id", None)
+        else:
+            facts[f"{prefix}.pupil_id"] = getattr(model, "pupil_id", None)
+        parts.append(prefix_stamps(prefix, _model_stamps(model)))
+    return merge_stamps(build_stamps(**facts), *parts)
+
+
+def _frozen_reads(units, readers) -> tuple[str, ...]:
+    """Observatory paths the cached readers of each coronagraph unit take."""
+    out = []
+    for path, _, model in units:
+        frozen = getattr(model, "frozen_reads", None)
+        for reader in readers if frozen is not None else ():
+            out += bind_reads(frozen(reader), {"coronagraph": path})
+    return tuple(out)
+
+
+def _require_fresh(units, readers):
+    """Refuse a cached read of a calibration that no longer matches its path.
+
+    Host only: a unit whose leaves are traced is not checked.
+    """
+    for _, _, model in units:
+        fresh = getattr(model, "require_fresh_calibration", None)
+        if fresh is not None and _concrete(model):
+            for reader in readers:
+                fresh(reader=reader)
+
+
+def _rule_stamp(rule) -> str:
+    """The aperture rule as text: its type and static fields."""
+    items = ", ".join(
+        f"{f.name}={getattr(rule, f.name)!r}"
+        for f in sorted(fields(rule), key=lambda f: f.name)
+    )
+    return f"{type(rule).__qualname__}({items})"
+
+
+def _require_selected(selected):
+    if not isinstance(selected, SelectedInstrument):
+        raise TypeError(
+            f"expected the view returned by Observatory.select(name), got "
+            f"{type(selected).__name__}; pass observatory.select(name)"
+        )
+
+
+def check_response(
+    response: "ApertureResponse", selected: SelectedInstrument, quadrature: Quadrature
+) -> tuple[str, ...]:
+    """Refuse a response built for something else, and report what was not checked.
+
+    The static stage compares the response's build stamps with the facts of the
+    caller's view and quadrature (configuration name, pupil identifiers, layout,
+    precision and the coronagraph's own stamps). It runs under ``jax.jit``. A fact
+    unknown on either side is left to the value stage. The value stage runs
+    whenever the inputs are concrete, also when the stamps match: in order of
+    cost, the wavelength nodes and bands, the aperture radius in pixels (which
+    carries each band's lambda/D frame, the rule and the detector pixel scale),
+    then one measured source per band, which carries the coronagraph's own
+    tables. Under a trace it cannot run, so a node value or probe value that
+    differs is not caught there: call this function on the host before a
+    traced program and the pair is admitted once.
+
+    Args:
+        response: The response to check.
+        selected: The view ``observatory.select(name)`` it will be read with.
+        quadrature: The quadrature the record will be built on.
+
+    Returns:
+        The labels that could not be verified, sorted; ``"values"`` is among
+        them when the value stage did not run.
+
+    Raises:
+        StampMismatchError: A recorded fact differs from the current one.
+        ValueError: The values differ (wrong nodes, bands, radius or probe).
+        TypeError: ``selected`` is not the view of ``Observatory.select``.
+    """
+    _require_selected(selected)
+    current = _hardware_stamps(selected, quadrature)
+    unverified = set(
+        require_stamps(
+            response.built_at,
+            current,
+            what="aperture response",
+            labels=[label for label, _ in current],
+        )
+    )
+    if not _concrete(selected, quadrature, response):
+        return tuple(sorted(unverified | {"values"}))
     with jax.ensure_compile_time_eval():
-        _compare_response(instrument, quadrature, response)
+        _compare_response(selected, quadrature, response)
+    return tuple(sorted(unverified))
 
 
 def _separation_limit(step, words, last):
@@ -447,7 +609,7 @@ def _separation_limit(step, words, last):
     return last * pitch
 
 
-def _compare_response(instrument, quadrature, response):
+def _compare_response(selected, quadrature, response):
     nodes, built = (
         np.asarray(quadrature.nodes_nm),
         np.asarray(response.quadrature.nodes_nm),
@@ -456,7 +618,7 @@ def _compare_response(instrument, quadrature, response):
         raise ValueError("the response was built for other wavelength nodes")
     if quadrature.bands != response.quadrature.bands:
         raise ValueError("the response was built for other bands")
-    models, frames, radii = _band_models(instrument, quadrature, response.rule)
+    models, frames, radii = _band_models(selected, quadrature, response.rule)
     counts = _real_counts(quadrature)
     # Allow eight float32 epsilons at each stored radius in pixels.
     radius_rtol = 8 * eps(COARSEST)
@@ -473,12 +635,12 @@ def _compare_response(instrument, quadrature, response):
     limit = _separation_limit(
         response.separation_step_arcsec, response._separation_limit_words, last
     )
-    dtype = _band_center_dtype(quadrature, instrument)
+    dtype = _band_center_dtype(quadrature, selected)
     for w, (model, frame) in enumerate(zip(models, frames, strict=True)):
         expected = float(response.probe[w])
         measured = _probe(
             model,
-            instrument,
+            selected,
             response.rule,
             frame,
             float(response.radius_pix[w]),
@@ -500,7 +662,7 @@ def _compare_response(instrument, quadrature, response):
 
 
 def aperture_response(
-    instrument: Instrument,
+    selected: SelectedInstrument,
     quadrature: Quadrature,
     *,
     rule: Circular = DEFAULT_APERTURE_RULE,
@@ -523,13 +685,19 @@ def aperture_response(
     its covering child at the node scale. The aperture keeps the radius and
     frame of the band-centre child.
 
-    ``quadrature`` must be the one the exposures will carry, for example
-    ``coronagraphoto.build_exposure(...).quadrature``. Only a
+    ``quadrature`` must be the one the records will be built on, for example
+    ``coronagraphoto.build_sampling(...).quadrature``. Only a
     ``Circular(radius_lod, centre="source")`` rule can be tabulated.
 
+    The response remembers what it was built from: ``reads`` names the
+    hardware values the tables were measured on and ``built_at`` stamps the
+    configuration, pupil identifiers, quadrature layout, precision, rule and the
+    coronagraph's own delivery. Editing that hardware afterwards leaves the
+    response stale; rebuild it. The view is used for the call and not stored.
+
     Args:
-        instrument: The instrument whose detector and coronagraph the tables
-            are built for.
+        selected: The view ``observatory.select(name)`` whose detector and
+            coronagraph the tables are built for.
         quadrature: The wavelength nodes and bands the tables are sampled at.
         rule: The aperture rule to sum with. Must be a ``Circular`` rule with
             ``centre="source"``.
@@ -541,8 +709,12 @@ def aperture_response(
     Returns:
         The tables of throughput, ring statistics and pixel weights for this
         instrument and band set, stored at the quadrature's working precision.
+
+    Raises:
+        TypeError: ``selected`` is not the view returned by ``select``.
     """
-    precision_of(instrument)
+    _require_selected(selected)
+    precision_of(selected)
     precision_of(quadrature)
     if not isinstance(rule, Circular) or rule.centre != "source":
         raise NotImplementedError(
@@ -550,10 +722,10 @@ def aperture_response(
         )
     if n_separations < 2 or n_angles < 1:
         raise ValueError("need at least two separations and one angle")
-    detector = instrument.detector
+    detector = selected.detector
     grid = detector.grid
     scale = float(detector.pixel_scale_arcsec)
-    models, frames, radii = _band_models(instrument, quadrature, rule)
+    models, frames, radii = _band_models(selected, quadrature, rule)
     if max_separation_arcsec is None:
         max_separation_arcsec = (min(grid.shape) / 2 - 1 - max(radii)) * scale
     if max_separation_arcsec <= 0:
@@ -563,7 +735,7 @@ def aperture_response(
     )
 
     nodes = quadrature.nodes_nm
-    dtype = _band_center_dtype(quadrature, instrument)
+    dtype = _band_center_dtype(quadrature, selected)
     slots = _padded_slots(quadrature)
     counts = _real_counts(quadrature)
     throughput = np.empty((2, *nodes.shape, n_separations))
@@ -576,7 +748,7 @@ def aperture_response(
             kernel = _weights(rule, frame, (size, size), radius, b / 2, a / 2, dtype)
             kernels[:, w, a, b] = kernel, kernel**2
         center_nm = np.asarray(quadrature.bands[w].center_nm, dtype=dtype)
-        groups = _node_groups(instrument.coronagraph, model, nodes[w, : counts[w]])
+        groups = _node_groups(selected.coronagraph, model, nodes[w, : counts[w]])
         for k, separation in enumerate(separations):
             angle = 2 * np.pi * (np.arange(n_angles) + (k * _GOLDEN) % 1) / n_angles
             x, y = separation * np.cos(angle), separation * np.sin(angle)
@@ -599,7 +771,7 @@ def aperture_response(
     probe = [
         _probe(
             model,
-            instrument,
+            selected,
             rule,
             frame,
             radius,
@@ -613,6 +785,30 @@ def aperture_response(
             zip(models, frames, radii, strict=True)
         )
     ]
+    units = _units(selected, quadrature)
+    # A live reader of the coronagraph (``source_psfs``) takes nothing frozen,
+    # so a complete path adds no frozen read here.
+    reads = qualify(
+        "observatory",
+        dict.fromkeys(
+            (
+                *(path for path, _, _ in units),
+                selected.owner_path("detector"),
+                selected.owner_path("pupil"),
+                *_frozen_reads(units, ("source_psfs",)),
+            )
+        ),
+    ) + qualify("sampling", ("quadrature.nodes_nm", "quadrature.weights_nm"))
+    built_at = merge_stamps(
+        _hardware_stamps(selected, quadrature),
+        build_stamps(
+            producer="coronagraphoto.aperture_response",
+            producer_version=__version__,
+            rule=_rule_stamp(rule),
+            n_separations=n_separations,
+            n_angles=n_angles,
+        ),
+    )
     return ApertureResponse(
         rule,
         quadrature,
@@ -626,6 +822,8 @@ def aperture_response(
         # Store the host endpoint in integer words so batching and canonical
         # precision casts retain it without creating a wide float leaf.
         jnp.asarray(separations[-1:].view(np.uint32)),
+        reads=reads,
+        built_at=built_at,
     )
 
 
@@ -672,22 +870,25 @@ def _lattice(maps, kernels, radius_pix):
 
 def aperture_record(
     scene: Scene,
-    instrument: Instrument,
+    observatory: Observatory,
     exposure: Exposure,
     response: ApertureResponse,
+    *,
+    sampling: SpectralSampling,
 ) -> ApertureRecord:
     """Tabulate one target's aperture rates for one exposure.
 
     The star leakage (with the instrument's speckle field, if any), a uniform
     sky of unit radiance and the scene's disk are rendered once by the image
-    path at ``exposure.time_d`` and ``exposure.pointing``, without planets,
+    path at the event's time (stated on the scene's epoch) and
+    ``exposure.pointing``, without planets,
     then summed in the response's aperture at every half-pixel position. Only
     the real nodes of each band are rendered and summed; a padded slot repeats
     the band's first real node.
     The record keeps ``scene.local_zodi`` and the scene's sky frame (position
     and epoch), from which :func:`aperture_rates` computes the local-zodi
     radiance at the time of each read; nothing of the local zodi is fixed at
-    ``exposure.time_d``. A sightline-dependent local zodi on a scene with no sky
+    the build time. A sightline-dependent local zodi on a scene with no sky
     position still builds a record; it raises a ``ValueError`` at the read, not
     here. The planet table is the response's throughput times the effective
     collecting area, independent of the star. A planet enters the read as an
@@ -695,7 +896,10 @@ def aperture_record(
     hypothesis relative to the stellar photon flux density stored at build.
 
     ``response`` must have been built for this instrument and for
-    ``exposure.quadrature``. On concrete inputs the call refuses another one
+    ``sampling.quadrature``. A static stage first compares the response's build
+    stamps with the hardware and sampling, also under ``jax.jit``, and raises
+    ``StampMismatchError`` naming the label that differs. On concrete inputs the
+    call then also refuses another one
     with a ``ValueError`` naming what differs: the wavelength nodes or bands,
     the detector pixel scale or a band's lambda/D frame (through the aperture
     radius), or the coronagraph tables (through one source per band,
@@ -709,11 +913,18 @@ def aperture_record(
     instrument has no ``warm_emission``) and a read multiplies it by the
     aperture's pixel count.
 
-    The record's ``reads`` lists the scene paths it was built from: the ``star``
-    (for leakage and ``record.star``) and the ``dynamics.frame`` (distance,
-    position and epoch), plus the ``local_zodi`` when there is one and the
-    ``disk`` with its two midplane angles when there is one. The planets and
-    their orbits are not read.
+    The record's ``reads`` lists what it was built from, owner-qualified. From
+    the scene: the ``star`` (for leakage and ``record.star``) and the
+    ``dynamics.frame`` (distance, position and epoch), plus the ``local_zodi``
+    when there is one and the ``disk`` with its two midplane angles when there
+    is one; the planets and their orbits are not read. From the observatory: the
+    response's reads, the throughput trains that set the collecting gain, and
+    the selected configuration's speckle field, warm emission and flux scale.
+    From the event: ``exposure.time_d`` and ``exposure.pointing.roll_deg``. From
+    the sampling: its own reads. ``built_at`` holds the response's and the
+    sampling's stamps under those prefixes. A coronagraph that defines
+    ``require_fresh_calibration`` is asked, once on the host, about the cached
+    readers the record uses (``uniform_sky_map``).
 
     The scene's ``flux_scale`` leaves enter as follows. The star's and the
     disk's scales are part of the nodes the record reads, so they are fixed at
@@ -724,11 +935,12 @@ def aperture_record(
 
     Args:
         scene: The target scene, with its star, disk and local zodi.
-        instrument: The instrument the exposure is rendered with.
-        exposure: The exposure whose quadrature, ``time_d`` and ``pointing``
-            the star leakage, uniform sky and disk are rendered at.
-        response: The aperture tables built for this instrument and for
-            ``exposure.quadrature``.
+        observatory: The observatory the exposure is rendered with.
+        exposure: The commanded event, whose time (on the scene's epoch) and
+            ``pointing`` the star leakage, uniform sky and disk are rendered at.
+        response: The aperture tables built for ``observatory.select`` of the
+            event's instrument and for ``sampling.quadrature``.
+        sampling: The wavelength rule built for this event.
 
     Returns:
         The tabulated aperture rates in photons/s/nm at the nodes of the
@@ -736,14 +948,28 @@ def aperture_record(
 
     Raises:
         NotImplementedError: The exposure has an explicit pointing offset.
+        StampMismatchError: The response or the sampling was built for other
+            hardware, or a cached read of a coronagraph is stale.
         ValueError: The response does not match the instrument or quadrature.
     """
-    quadrature = exposure.quadrature
+    sel, coro, time_d, speckle_time_d = _host_stage(
+        scene, observatory, exposure, sampling
+    )
+    quadrature = sampling.quadrature
     nodes = quadrature.nodes_nm
-    _check_render_inputs(scene, instrument, exposure)
-    _check_response(instrument, quadrature, response)
+    check_response(response, sel, quadrature)
+    units = _units(sel, quadrature)
+    _require_fresh(units, ("uniform_sky_map",))
     images = _run(
-        scene, instrument, exposure, "photons", planets=False, uniform_sky=True
+        scene,
+        sel,
+        coro,
+        exposure,
+        (time_d, speckle_time_d),
+        sampling,
+        "photons",
+        planets=False,
+        uniform_sky=True,
     )
     maps = jnp.stack(
         [getattr(images, name) for name in ("star_leakage", "local_zodi", "exozodi")],
@@ -781,17 +1007,66 @@ def aperture_record(
     )[0, :, 0]
     unsupported = ~_on_detector(response.radius_pix, *shape) | (bad > 0)
 
-    gain = jax.vmap(instrument.effective_area_m2)(nodes.ravel()).reshape(nodes.shape)
+    gain = jax.vmap(sel.effective_area_m2)(nodes.ravel()).reshape(nodes.shape)
+    build_time = like(time_d, response.kernels)
     star = scene.star.node_flux_density(
         quadrature,
-        exposure.resolution,
-        jnp.atleast_1d(like(exposure.time_d, response.kernels)),
+        sampling.resolution,
+        jnp.atleast_1d(build_time),
         dist_pc=scene.dist_pc,
     )[..., 0]
+    reads = tuple(
+        dict.fromkeys(
+            (
+                *qualify(
+                    "scene",
+                    (
+                        "star",
+                        "dynamics.frame",
+                        *(() if scene.local_zodi is None else ("local_zodi",)),
+                        *(
+                            ()
+                            if scene.disk is None
+                            else (
+                                "disk",
+                                "midplane_inc_deg",
+                                "midplane_position_angle_deg",
+                            )
+                        ),
+                    ),
+                ),
+                *response.reads,
+                *qualify(
+                    "observatory",
+                    (
+                        *(path for path, _, _ in units),
+                        *_frozen_reads(units, ("uniform_sky_map",)),
+                        sel.owner_path("detector"),
+                        sel.owner_path("pupil"),
+                        "telescope.attenuating_elements",
+                        f"{sel.owner_path()}.attenuating_elements",
+                        sel.owner_path("speckle"),
+                        sel.owner_path("warm_emission"),
+                        sel.owner_path("flux_scale"),
+                    ),
+                ),
+                *qualify("exposure", ("time_d", "pointing.roll_deg")),
+                *sampling.reads,
+            )
+        )
+    )
+    built_at = merge_stamps(
+        prefix_stamps("response", response.built_at),
+        prefix_stamps("sampling", sampling.built_at),
+        build_stamps(
+            producer="coronagraphoto.aperture_record", producer_version=__version__
+        ),
+    )
     return ApertureRecord(
-        quadrature,
+        sampling,
         exposure.pointing,
-        like(instrument.detector.pixel_scale_arcsec, response.separation_step_arcsec),
+        build_time,
+        like(sel.detector.pixel_scale_arcsec, response.separation_step_arcsec),
         response.separation_step_arcsec,
         gain[None, :, :, None] * response.throughput,
         like(star, response.kernels),
@@ -804,18 +1079,10 @@ def aperture_record(
         images.thermal[:, :, 0, 0],
         scene.local_zodi,
         scene.sky_frame,
-        exposure.resolution,
+        scene.epoch,
+        reads,
         _separation_limit_words=response._separation_limit_words,
-        reads=(
-            "star",
-            "dynamics.frame",
-            *(() if scene.local_zodi is None else ("local_zodi",)),
-            *(
-                ()
-                if scene.disk is None
-                else ("disk", "midplane_inc_deg", "midplane_position_angle_deg")
-            ),
-        ),
+        built_at=built_at,
     )
 
 
@@ -1091,9 +1358,10 @@ def scene_aperture_rates(
     Nothing is rebuilt. The scene should be the one the record was built from
     (``record.reads`` lists what the record holds fixed).
 
-    ``time_d`` has shape ``(T,)``, days from the scene's epoch; ``roll_deg`` is
-    as in :func:`aperture_rates`. The returned ``Rates`` follows the layout of
-    every ``Rates`` with a quadrature: the band and node axes lead and the
+    ``time_d`` has shape ``(T,)``, days from the scene's epoch, which must equal
+    the record's epoch (a different epoch is refused, not reinterpreted);
+    ``roll_deg`` is as in :func:`aperture_rates`. The returned ``Rates`` follows
+    the layout of every ``Rates`` with a quadrature: the band and node axes lead and the
     batch axes trail, so fields have shape ``(W, Q, K, T)``, ``n_pix`` has
     shape ``(W, K, T)``, and ``variance`` has the squared-weight rates. Pass it
     to :func:`optixstuff.snr` or :func:`optixstuff.exposure_time`, which return
@@ -1130,6 +1398,11 @@ def scene_aperture_rates(
         raise ValueError("time_d must have shape (T,)")
     if scene.batch_shape:
         raise ValueError("scene_aperture_rates reads one system; vmap it over a batch")
+    if scene.epoch != record.epoch:
+        raise ValueError(
+            "the scene's epoch differs from the epoch the record's clock counts "
+            f"from ({scene.epoch!r} vs {record.epoch!r}); rebuild the record"
+        )
     east, north = scene.positions(time_d)
     planet = scene.sources(record.quadrature, record.resolution, time_d).planets
 

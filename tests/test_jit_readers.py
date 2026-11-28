@@ -94,11 +94,11 @@ def test_render_refuses_explicit_pointing_offset(reader, compile_reader):
             return observe(key, scene, path, e, sampling=sampling)
     else:
         response = aperture_response(
-            path, sampling.quadrature, n_separations=3, n_angles=4
+            path.select("imager"), sampling.quadrature, n_separations=3, n_angles=4
         )
 
         def read(e):
-            return aperture_record(scene, path, e, response)
+            return aperture_record(scene, path, e, response, sampling=sampling)
 
     run = jax.jit(read) if compile_reader else read
     with pytest.raises(NotImplementedError, match=r"pointing offsets.*offset_mas=None"):

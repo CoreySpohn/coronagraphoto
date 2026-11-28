@@ -480,7 +480,7 @@ def test_image_and_aperture_pick_the_same_child_at_a_rounded_edge():
         q = Quadrature((Band(540.0, 560.0),), waves, jnp.ones_like(waves))
         exposure, sampling = exposure_for(scene, q)
         response = cp.aperture_response(
-            instrument,
+            instrument.select("imager"),
             q,
             n_separations=2,
             n_angles=1,

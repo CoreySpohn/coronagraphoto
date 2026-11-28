@@ -295,27 +295,37 @@ def _node_rates(
     return components, supported, speckle_covered
 
 
-def _band_ids(coro, scene, quadrature):
-    """Select, on the host, which coronagraph models the program needs.
+def _routed_children(coro, quadrature):
+    """Select, on the host, which coronagraph models a quadrature can reach.
 
     For averaged products, return the covering child index for each observing
     band. For single-wavelength products, return the children the real nodes
-    can select, in dispatch order (all children when the nodes are traced).
+    can select, in dispatch order (all children when the nodes are traced). A
+    single product has one model, index 0.
     """
     models = coro.coronagraphs if isinstance(coro, MultiBandCoronagraph) else (coro,)
     nodes = quadrature.nodes_nm
     if isinstance(coro, MultiBandCoronagraph) and coro.band_averaged:
         # One branch per observing band, even when child bandpasses overlap.
         indices = {id(model): i for i, model in enumerate(models)}
-        ids = tuple(
+        return tuple(
             indices[id(coro.coronagraph_for_band(band))] for band in quadrature.bands
         )
-    elif isinstance(coro, MultiBandCoronagraph) and not isinstance(
+    if isinstance(coro, MultiBandCoronagraph) and not isinstance(
         nodes, jax.core.Tracer
     ):
-        ids = _node_child_ids(models, quadrature)
-    else:
-        ids = tuple(range(len(models)))
+        return _node_child_ids(models, quadrature)
+    return tuple(range(len(models)))
+
+
+def _band_ids(coro, scene, quadrature):
+    """Select the coronagraph models the program needs and check they can image.
+
+    The indices are those of :func:`_routed_children`; a scene with a disk
+    needs a scene-capable model.
+    """
+    models = coro.coronagraphs if isinstance(coro, MultiBandCoronagraph) else (coro,)
+    ids = _routed_children(coro, quadrature)
     for i in ids:
         if not isinstance(models[i], AbstractImagingCoronagraph):
             raise TypeError("image formation requires an AbstractImagingCoronagraph")

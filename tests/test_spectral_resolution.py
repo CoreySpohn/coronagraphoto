@@ -389,13 +389,15 @@ def test_aperture_record_zodi_read_is_the_exact_table_integral():
         )
         sampling = cp.build_sampling(instrument, exposure, scene=scene)
         response = cp.aperture_response(
-            instrument,
+            instrument.select("imager"),
             sampling.quadrature,
             n_separations=3,
             n_angles=3,
             max_separation_arcsec=0.04,
         )
-        record = cp.aperture_record(scene, instrument, exposure, response)
+        record = cp.aperture_record(
+            scene, instrument, exposure, response, sampling=sampling
+        )
         read = cp.aperture_rates(record, 0.0, 0.0, contrast=1e-10, time_d=0.0)
         assert bool(read.supported.all())
         result[name] = np.asarray(read.integrate().local_zodi[0])

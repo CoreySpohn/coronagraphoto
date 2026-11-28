@@ -51,8 +51,8 @@ def test_record_meets_the_planner_budget(tmp_path):
     are printed for the record.
     """
     coro = open_yip(write_yip(tmp_path / "yip")).prepare()
-    base = eqx.tree_at(lambda p: p.coronagraph, make_path(), coro)
-    scale = float(base.primary.frame(550.0).lod_to_arcsec(550.0))
+    base = eqx.tree_at(lambda p: p.instruments[0].coronagraph, make_path(), coro)
+    scale = float(coro.frame.lod_to_arcsec(550.0))
     detector = Detector(
         shape=(96, 96),
         pixel_scale_arcsec=0.1 * scale,
@@ -62,20 +62,28 @@ def test_record_meets_the_planner_budget(tmp_path):
         clock_induced_charge_e_per_pixel_frame=0.005,
         read_noise_e_rms=0.2,
     )
-    instrument = eqx.tree_at(lambda p: p.detector, base, detector)
+    instrument = eqx.tree_at(lambda p: p.instruments[0].detector, base, detector)
     scene = with_zodi(make_system(separation_arcsec=2.3 * scale), LeinertZodi())
     bands = (Band(500.0, 550.0), Band(550.0, 600.0))
-    exposure = cp.build_exposure(scene, instrument, bands, time_d=0.0)
+    exposure = cp.build_exposure(
+        bands, epoch=scene.epoch, instrument="imager", time_d=0.0
+    )
+    sampling = cp.build_sampling(instrument, exposure, scene=scene)
 
     start = time.perf_counter()
     response = cp.aperture_response(
-        instrument, exposure.quadrature, n_separations=33, n_angles=16
+        instrument.select("imager"),
+        sampling.quadrature,
+        n_separations=33,
+        n_angles=16,
     )
     response_s = time.perf_counter() - start
 
     def build():
         start = time.perf_counter()
-        record = cp.aperture_record(scene, instrument, exposure, response)
+        record = cp.aperture_record(
+            scene, instrument, exposure, response, sampling=sampling
+        )
         jax.block_until_ready(record)
         return record, time.perf_counter() - start
 

@@ -18,9 +18,15 @@ from conftest import (
     worked_setup,
 )
 from hwoutils.leaves import canonical
-from hwoutils.precision import PrecisionError
+from hwoutils.precision import PrecisionError, precision_of
 from hwoutils.testing import assert_precision_closed, precision_pair, ulps
-from optixstuff import Detector, FramePlan, IdealDetector, Pointing
+from optixstuff import (
+    Detector,
+    FramePlan,
+    IdealDetector,
+    Pointing,
+    SpectralSampling,
+)
 from optixstuff.coronagraph import (
     AbstractImagingCoronagraph,
     MultiBandCoronagraph,
@@ -137,12 +143,35 @@ def render_problem():
 def _response(instrument, sampling):
     """The aperture response of the render problem."""
     return cp.aperture_response(
-        instrument,
+        instrument.select("imager"),
         sampling.quadrature,
         n_separations=3,
         n_angles=2,
         max_separation_arcsec=0.025,
     )
+
+
+def _aperture_record(scene, observatory, exposure, response, sampling):
+    """Build a record, restamping the response with the observatory's precision.
+
+    Narrowing a response casts its tables and leaves its build stamps, which
+    name the precision it was built at. These closure checks compare widths,
+    not admission, so the stamp follows the cast.
+    """
+    width = f"str:{precision_of(observatory)}"
+    stamps = tuple(
+        (label, width if label == "precision" else value)
+        for label, value in response.built_at
+    )
+    record = cp.aperture_record(
+        scene,
+        observatory,
+        exposure,
+        replace(response, built_at=stamps),
+        sampling=sampling,
+    )
+    # The record's own stamps name the precision, which differs by design.
+    return replace(record, built_at=())
 
 
 def _photon_rates(scene, observatory, exposure, sampling):
@@ -268,12 +297,14 @@ def _render_case(entry, problem):
         read = _photon_rates
         args = (scene, instrument, exposure, sampling)
     elif entry == "aperture_record":
-        read = cp.aperture_record
-        args = (scene, instrument, exposure, _response(instrument, sampling))
+        read = _aperture_record
+        args = (scene, instrument, exposure, _response(instrument, sampling), sampling)
     elif entry == "scene_aperture_rates":
         read = cp.scene_aperture_rates
         response = _response(instrument, sampling)
-        record = cp.aperture_record(scene, instrument, exposure, response)
+        record = cp.aperture_record(
+            scene, instrument, exposure, response, sampling=sampling
+        )
         args = (record, scene, jnp.array([0.0, 0.5]))
     elif entry == "observe":
         read = _observe
@@ -417,7 +448,7 @@ def test_wide_scene_narrow_render(render_problem, entry):
 
     def render(scene):
         if entry == "aperture":
-            record = cp.aperture_record(scene, instrument, exposure, response)
+            record = _aperture_record(scene, instrument, exposure, response, sampling)
             assert record.star.dtype == np.float32
             return cp.scene_aperture_rates(record, scene, np.array([0.0, 0.5]))
         read, args = _render_case(
@@ -632,7 +663,7 @@ def test_aperture_response_precision_closed(render_problem):
 
     def build(instrument, quadrature):
         result = cp.aperture_response(
-            instrument,
+            instrument.select("imager"),
             quadrature,
             n_separations=3,
             n_angles=2,
@@ -649,7 +680,8 @@ def test_aperture_response_precision_closed(render_problem):
             assert getattr(result, name).dtype == quadrature.weights_nm.dtype, name
         assert result.throughput_supported.dtype == np.bool_
         assert result._separation_limit_words.dtype == np.uint32
-        return result
+        # The build stamps name the precision, which differs by design.
+        return replace(result, built_at=())
 
     bound = float(ulps(48, np.float32(1)))
     precision_pair(build, args, bound=bound, scale=float(response.throughput[0].max()))
@@ -797,8 +829,9 @@ def _aperture_problem():
     ring_response = jnp.array([0.5, 1.0]).reshape(1, 1, 1, 2)
     lattice = jnp.linspace(0.5, 1.0, 16).reshape(1, 1, 1, 4, 4)
     return cp.ApertureRecord(
-        quadrature=quadrature,
+        sampling=SpectralSampling(quadrature, Resolution((), (), ())),
         pointing=Pointing(0.0),
+        build_time_d=jnp.asarray(0.0),
         pixel_scale_arcsec=jnp.asarray(0.125),
         separation_step_arcsec=jnp.asarray(0.125),
         planet_response=jnp.concatenate((ring_response, ring_response / 2)),
@@ -812,7 +845,7 @@ def _aperture_problem():
         thermal=jnp.array([[0.25]]),
         local_zodi=None,
         sky_frame=SkyFrame(10.0),
-        resolution=Resolution((), (), ()),
+        epoch=make_system().epoch,
         reads=(),
     )
 

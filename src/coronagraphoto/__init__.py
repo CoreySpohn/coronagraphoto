@@ -7,6 +7,7 @@ from coronagraphoto.aperture import (
     aperture_rates,
     aperture_record,
     aperture_response,
+    check_response,
     scene_aperture_rates,
 )
 from coronagraphoto.simulation import (
@@ -27,6 +28,7 @@ __all__ = [
     "aperture_response",
     "build_exposure",
     "build_sampling",
+    "check_response",
     "expected",
     "observe",
     "photon_rates",

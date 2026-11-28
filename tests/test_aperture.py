@@ -1,6 +1,7 @@
 """Aperture response, record and read against closed forms and image sums."""
 
 import copy
+import dataclasses
 from dataclasses import replace
 from fractions import Fraction
 
@@ -17,21 +18,26 @@ from conftest import (
     leinert_radiance,
     make_path,
     make_system,
+    observatory_for,
+    with_instrument,
     with_zodi,
     write_yip,
 )
 from hwoutils.constants import Rsun2m, arcsec2rad, c, h, k_B, nm2m
 from hwoutils.conversions import photons_per_nm_per_m2_to_jy
+from hwoutils.epoch import Epoch
+from hwoutils.leaves import canonical
 from hwoutils.numerics import eps, roundoff, sum_roundoff
+from hwoutils.precision import PrecisionError
+from hwoutils.provenance import StampMismatchError, bind_reads, stale_reads
 from hwoutils.testing import precision_pair, ulps
 from optixstuff import (
     ConstantThroughput,
     Detector,
     FramePlan,
-    Instrument,
-    SimplePrimary,
+    SimplePupil,
 )
-from optixstuff.apertures import Circular, HalfMaximum
+from optixstuff.apertures import DEFAULT_APERTURE_RULE, Circular, HalfMaximum
 from optixstuff.grids import Frame, Image, Measure, PixelGrid, SkyOrientation
 from optixstuff.spectral import Band, Quadrature
 from skyscapes import AYOZodi, LeinertZodi
@@ -40,6 +46,7 @@ from skyscapes.scene import BlackbodyStar, FlatStar, Planet, Star
 from yippy import open_yip
 
 import coronagraphoto as cp
+from coronagraphoto._version import __version__
 
 _RULE = Circular(0.7)
 _BANDS = (Band(500.0, 600.0),)
@@ -62,9 +69,27 @@ _NO_RESIDUAL = ox.PostProcessing(background_variance_factor=1.0)
 
 
 def _instrument(coronagraph):
-    """Worked instrument with 0.3 lambda/D pixels and the given coronagraph."""
+    """Worked observatory with 0.3 lambda/D pixels and the given coronagraph."""
     path = make_path(detector_n=48, detector_step=0.3)
-    return eqx.tree_at(lambda p: p.coronagraph, path, coronagraph)
+    return eqx.tree_at(lambda p: p.instruments[0].coronagraph, path, coronagraph)
+
+
+def _sel(observatory):
+    """The view of the one configuration of a test observatory."""
+    return observatory.select("imager")
+
+
+def _build(scene, observatory, bands, *, time_d=0.0, roll_deg=0.0, **options):
+    """The commanded event of a scene and its sampling (options as build_sampling)."""
+    exposure = cp.build_exposure(
+        bands,
+        epoch=scene.epoch,
+        instrument="imager",
+        time_d=time_d,
+        roll_deg=roll_deg,
+    )
+    sampling = cp.build_sampling(observatory, exposure, scene=scene, **options)
+    return exposure, sampling
 
 
 def _offsets(separation, position_angle_deg):
@@ -73,10 +98,10 @@ def _offsets(separation, position_angle_deg):
     return separation * jnp.sin(angle), separation * jnp.cos(angle)
 
 
-def _image_weights(instrument, x_arcsec, y_arcsec):
+def _image_weights(observatory, x_arcsec, y_arcsec):
     """The rule's pixel weights for an aperture at a detector position."""
-    grid = instrument.detector.grid
-    frame = instrument.coronagraph.grid.frame
+    grid = _sel(observatory).detector.grid
+    frame = _sel(observatory).coronagraph.grid.frame
     scale = float(frame.lod_to_arcsec(550.0))
     ones = Image(
         jnp.ones(grid.shape),
@@ -92,36 +117,41 @@ def _image_weights(instrument, x_arcsec, y_arcsec):
 
 @pytest.fixture(scope="module")
 def plateau():
-    """Flat-PSF instrument, its response and one target's record."""
-    instrument = _instrument(PlateauCoronagraph(40, 0.25))
+    """Flat-PSF observatory, its response and one target's record."""
+    observatory = _instrument(PlateauCoronagraph(40, 0.25))
     scene = make_system(separation_arcsec=0.03)
     # The record tables are compared with the image at the same four nodes, so
     # the layout is not under test here and the field is zero.
-    exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0, field_lod=0.0)
+    exposure, sampling = _build(scene, observatory, _BANDS, field_lod=0.0)
     response = cp.aperture_response(
-        instrument,
-        exposure.quadrature,
+        _sel(observatory),
+        sampling.quadrature,
         n_separations=5,
         n_angles=4,
         max_separation_arcsec=0.04,
     )
-    record = cp.aperture_record(scene, instrument, exposure, response)
+    record = cp.aperture_record(
+        scene, observatory, exposure, response, sampling=sampling
+    )
     assert record.pointing is exposure.pointing
-    return scene, instrument, exposure, response, record
+    assert record.sampling is sampling
+    return scene, observatory, exposure, sampling, response, record
 
 
 @pytest.fixture(scope="module")
 def sloped():
-    """Sloped-leakage instrument with a record rendered at zero roll."""
-    instrument = _instrument(SlopedLeakage(40, 0.25))
+    """Sloped-leakage observatory with a record rendered at zero roll."""
+    observatory = _instrument(SlopedLeakage(40, 0.25))
     scene = make_system(separation_arcsec=0.05)
     # Table and image are compared at the same four nodes; see ``plateau``.
-    exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0, field_lod=0.0)
+    exposure, sampling = _build(scene, observatory, _BANDS, field_lod=0.0)
     response = cp.aperture_response(
-        instrument, exposure.quadrature, n_separations=9, n_angles=8
+        _sel(observatory), sampling.quadrature, n_separations=9, n_angles=8
     )
-    record = cp.aperture_record(scene, instrument, exposure, response)
-    return scene, instrument, exposure, response, record
+    record = cp.aperture_record(
+        scene, observatory, exposure, response, sampling=sampling
+    )
+    return scene, observatory, exposure, sampling, response, record
 
 
 @vv.case("aperture-photon-budget", "code-verification")
@@ -138,8 +168,8 @@ def test_worked_example_closed_form(plateau):
     operations for angular conversion and division. Pixel count allows the
     propagation through the square, plus the aperture-weight reduction depth.
     """
-    _, _, exposure, response, record = plateau
-    nodes = np.asarray(exposure.quadrature.nodes_nm)
+    _, _, _, _, response, record = plateau
+    nodes = np.asarray(record.quadrature.nodes_nm)
     area = np.pi * (0.7 * 550.0 / nodes) ** 2
     rates = cp.aperture_rates(record, *_offsets(0.03, 40.0), contrast=1e-10, time_d=0.0)
     incident = 1e6 * 40 * 0.4
@@ -187,9 +217,9 @@ def test_background_lattice_matches_image_sums(sloped):
     depth, plus 32 arithmetic steps for rotation, lattice coordinates,
     powers of the weights and the bilinear read.
     """
-    scene, instrument, exposure, _, record = sloped
-    photons = cp.photon_rates(scene, instrument, exposure)
-    pitch = float(instrument.detector.pixel_scale_arcsec)
+    scene, observatory, exposure, sampling, _, record = sloped
+    photons = cp.photon_rates(scene, observatory, exposure, sampling=sampling)
+    pitch = float(_sel(observatory).detector.pixel_scale_arcsec)
     roll = 25.0
     for dx, dy in ((3.0, -2.5), (-4.5, 1.0), (0.5, 6.5)):
         x, y = dx * pitch, dy * pitch
@@ -202,11 +232,25 @@ def test_background_lattice_matches_image_sums(sloped):
             time_d=0.0,
             roll_deg=roll,
         )
-        weights = _image_weights(instrument, x, y)
+        weights = _image_weights(observatory, x, y)
         dtype = photons.star_leakage.dtype
         rtol = float(
             roundoff(1, n_ops=32, dtype=dtype)
             + sum_roundoff(2.0, weights.size, dtype=dtype)
+        )
+        # The aperture has a fractional edge pixel and the intensities differ across
+        # it, so the two moments are different numbers.
+        edge = (weights > 0) & (weights < 1)
+        assert edge.any()
+        intensity = np.asarray(photons.star_leakage)[0, 0]
+        first = float((intensity * weights).sum())
+        second = float((intensity * weights**2).sum())
+        assert abs(second / first - 1) > 1e-3
+        np.testing.assert_allclose(
+            [rates.star_leakage[0, 0], rates.variance.star_leakage[0, 0]],
+            [first, second],
+            rtol=rtol,
+            atol=0,
         )
         for moment, power in ((rates, 1), (rates.variance, 2)):
             np.testing.assert_allclose(
@@ -242,12 +286,12 @@ def test_planet_table_matches_image_sums(sloped):
     image sum independent of the render lane. The scale identities allow
     four operations for the flux, throughput and contrast products.
     """
-    scene, instrument, exposure, response, record = sloped
-    photons = cp.photon_rates(scene, instrument, exposure)
+    scene, observatory, exposure, sampling, response, record = sloped
+    photons = cp.photon_rates(scene, observatory, exposure, sampling=sampling)
     east, north = scene.positions(jnp.array([0.0]))[:2, 0, 0]
     separation = float(jnp.hypot(east, north))
     x, y = SkyOrientation(0.0).sky_to_detector(east, north)
-    weights = _image_weights(instrument, x, y)
+    weights = _image_weights(observatory, x, y)
     rates = cp.aperture_rates(
         record,
         east,
@@ -303,7 +347,7 @@ def test_read_geometry_on_a_hand_made_record(plateau):
     24 steps of roundoff for the angle conversions, rotation, pixel offset
     and bilinear interpolation.
     """
-    record = plateau[4]
+    record = plateau[5]
     shape = record.n_pix.shape[-2:]
     rows, columns = jnp.indices(shape) / 2.0
     tables = (
@@ -371,18 +415,19 @@ def test_local_zodi_follows_the_read_time(sloped):
     The rebuilt record holds the same uniform-sky table, so its read must be
     bit-identical in every term.
     """
-    scene, instrument, _, response, _ = sloped
+    scene, observatory, _, _, response, _ = sloped
     scene = with_zodi(scene, LeinertZodi())
     scene = eqx.tree_at(lambda s: s.dynamics.frame.dec_deg, scene, jnp.asarray(23.0))
-    exposures = [
-        cp.build_exposure(scene, instrument, _BANDS, time_d=t, field_lod=0.0)
+    built_at = [
+        _build(scene, observatory, _BANDS, time_d=t, field_lod=0.0)
         for t in (0.0, 137.0)
     ]
+    exposures = [exposure for exposure, _ in built_at]
     built, rebuilt = (
-        cp.aperture_record(scene, instrument, exposure, response)
-        for exposure in exposures
+        cp.aperture_record(scene, observatory, exposure, response, sampling=sampling)
+        for exposure, sampling in built_at
     )
-    pitch = float(instrument.detector.pixel_scale_arcsec)
+    pitch = float(_sel(observatory).detector.pixel_scale_arcsec)
     x, y = 3.0 * pitch, -2.5 * pitch
     east, north = SkyOrientation(0.0).detector_to_sky(x, y)
 
@@ -396,8 +441,8 @@ def test_local_zodi_follows_the_read_time(sloped):
         )
 
     late, reference = read(built, 137.0), read(rebuilt, 137.0)
-    photons = cp.photon_rates(scene, instrument, exposures[1])
-    weights = _image_weights(instrument, x, y)
+    photons = cp.photon_rates(scene, observatory, exposures[1], sampling=built_at[1][1])
+    weights = _image_weights(observatory, x, y)
     rtol = roundoff(1, n_ops=32, dtype=late.local_zodi.dtype)
     sum_rtol = rtol + sum_roundoff(2.0, weights.size, dtype=late.local_zodi.dtype)
     for moment, expected, power in (
@@ -416,7 +461,7 @@ def test_local_zodi_follows_the_read_time(sloped):
                 getattr(moment, name), getattr(expected, name)
             )
     # The time is seen, and by exactly the radiance ratio of the sightlines.
-    nodes = exposures[0].quadrature.nodes_nm
+    nodes = built.quadrature.nodes_nm
     radiance = [leinert_radiance(scene, nodes, t) for t in (0.0, 137.0)]
     early = read(built, 0.0)
     assert np.all(abs(radiance[1] / radiance[0] - 1) > 0.5)
@@ -441,7 +486,7 @@ def test_read_under_jax_transformations(sloped, precision):
     Central differences use float64, with the existing step and error
     bounds for separation and contrast.
     """
-    record, detector = sloped[4], sloped[1].detector
+    record, detector = sloped[5], _sel(sloped[1]).detector
 
     def read(separation, angle, contrast):
         rates = cp.aperture_rates(
@@ -488,8 +533,8 @@ def test_reads_outside_the_tables_and_unsupported_builds(sloped):
     False, so ``snr`` is NaN and ``valid`` clears downstream, and a rule or
     quadrature the tables cannot represent raises at build time.
     """
-    scene, instrument, exposure, response, record = sloped
-    detector = instrument.detector
+    scene, observatory, _, sampling, response, record = sloped
+    detector = _sel(observatory).detector
     last = float(response.separation_step_arcsec) * 8
     inside = cp.aperture_rates(
         record, *_offsets(0.5 * last, 0.0), contrast=1e-10, time_d=0.0
@@ -527,10 +572,15 @@ def test_reads_outside_the_tables_and_unsupported_builds(sloped):
 
     for rule in (HalfMaximum(), Circular(0.7, centre="peak")):
         with pytest.raises(NotImplementedError, match="Circular"):
-            cp.aperture_response(instrument, exposure.quadrature, rule=rule)
-    other = cp.build_exposure(scene, instrument, (Band(510.0, 590.0),), time_d=0.0)
+            cp.aperture_response(_sel(observatory), sampling.quadrature, rule=rule)
+    other, other_sampling = _build(scene, observatory, (Band(510.0, 590.0),))
+    with pytest.raises(StampMismatchError, match="layout"):
+        cp.aperture_record(scene, observatory, other, response, sampling=other_sampling)
+    unstamped = replace(response, built_at=())
     with pytest.raises(ValueError, match="other wavelength nodes"):
-        cp.aperture_record(scene, instrument, other, response)
+        cp.aperture_record(
+            scene, observatory, other, unstamped, sampling=other_sampling
+        )
 
 
 def test_record_refuses_a_response_built_for_another_instrument(plateau):
@@ -539,30 +589,27 @@ def test_record_refuses_a_response_built_for_another_instrument(plateau):
     Basis: exact. Each swap keeps the wavelength nodes of the response and
     changes one thing: the coronagraph tables (a Gaussian for the flat PSF,
     seen only by the measured source), the detector pixel scale (seen in the
-    aperture radius) and the band edges (seen in the bands). The instrument
+    aperture radius) and the band edges (seen in the bands). The observatory
     the response was built for passes.
     """
-    scene, instrument, exposure, response, _ = plateau
-    cp.aperture_record(scene, instrument, exposure, response)
+    scene, observatory, exposure, sampling, response, _ = plateau
+    cp.aperture_record(scene, observatory, exposure, response, sampling=sampling)
     swapped = _instrument(GaussianCoronagraph(40, 0.25))
     with pytest.raises(ValueError, match="another coronagraph or detector"):
-        cp.aperture_record(scene, swapped, exposure, response)
-    detector = instrument.detector
-    coarse = eqx.tree_at(
-        lambda i: i.detector,
-        instrument,
-        Detector(
-            pixel_scale_arcsec=1.1 * float(detector.pixel_scale_arcsec),
-            shape=detector.shape,
-        ),
+        cp.aperture_record(scene, swapped, exposure, response, sampling=sampling)
+    detector = _sel(observatory).detector
+    wider = copy.copy(detector)
+    object.__setattr__(
+        wider, "pixel_scale_arcsec", 1.1 * float(detector.pixel_scale_arcsec)
     )
+    coarse = eqx.tree_at(lambda o: o.instruments[0].detector, observatory, wider)
     with pytest.raises(ValueError, match="pixel scale"):
-        cp.aperture_record(scene, coarse, exposure, response)
+        cp.aperture_record(scene, coarse, exposure, response, sampling=sampling)
     shifted = copy.copy(response.quadrature)
     object.__setattr__(shifted, "bands", (Band(500.0, 600.0001),))
     other = eqx.tree_at(lambda r: r.quadrature, response, shifted)
     with pytest.raises(ValueError, match="other bands"):
-        cp.aperture_record(scene, instrument, exposure, other)
+        cp.aperture_record(scene, observatory, exposure, other, sampling=sampling)
 
 
 def test_flux_scale_scales_every_record_table_and_passes_the_guard(plateau):
@@ -573,9 +620,11 @@ def test_flux_scale_scales_every_record_table_and_passes_the_guard(plateau):
     with scale 1.5 is 1.5 times the unit-scale table from the same response,
     and the pixel counts are unchanged.
     """
-    scene, instrument, exposure, response, record = plateau
-    scaled = eqx.tree_at(lambda i: i.flux_scale, instrument, jnp.asarray(1.5))
-    other = cp.aperture_record(scene, scaled, exposure, response)
+    scene, observatory, exposure, sampling, response, record = plateau
+    scaled = eqx.tree_at(
+        lambda o: o.instruments[0].flux_scale, observatory, jnp.asarray(1.5)
+    )
+    other = cp.aperture_record(scene, scaled, exposure, response, sampling=sampling)
     for name in ("planet_response", "star_leakage", "uniform_sky", "exozodi"):
         np.testing.assert_allclose(
             getattr(other, name), 1.5 * getattr(record, name), rtol=1e-6
@@ -597,7 +646,7 @@ def test_thermal_planet_scale_is_its_own_on_the_record_route(
     doubles only the planet, each by its factor within rtol=1e-5; the record
     is rebuilt for each scene.
     """
-    _, instrument, exposure, response, _ = plateau
+    _, observatory, _, _, response, _ = plateau
     planet = Planet(jnp.ones(1), BlackbodyPhysicalModel(teff_K=jnp.array([300.0])))
     scene = make_system(
         star=BlackbodyStar(5772.0, Rsun2m),
@@ -610,7 +659,10 @@ def test_thermal_planet_scale_is_its_own_on_the_record_route(
     }[leaf]
 
     def read(scene):
-        record = cp.aperture_record(scene, instrument, exposure, response)
+        exposure, sampling = _build(scene, observatory, _BANDS, field_lod=0.0)
+        record = cp.aperture_record(
+            scene, observatory, exposure, response, sampling=sampling
+        )
         return cp.scene_aperture_rates(record, scene, jnp.array([0.0]))
 
     base = read(scene)
@@ -630,7 +682,7 @@ def test_scene_route_is_a_vmap_of_the_read_and_feeds_the_calculator(plateau):
     reading zero in every field, and the calculator returning one value per
     band, planet and time from the returned ``Rates``.
     """
-    _, instrument, exposure, response, _ = plateau
+    _, observatory, exposure, sampling, response, _ = plateau
     scene = make_system(
         separation_arcsec=jnp.array([0.012, 0.03]),
         planet_groups=(
@@ -645,7 +697,9 @@ def test_scene_route_is_a_vmap_of_the_read_and_feeds_the_calculator(plateau):
         ),
     )
     scene = eqx.tree_at(lambda s: s.valid, scene, jnp.array([True, False]))
-    record = cp.aperture_record(scene, instrument, exposure, response)
+    record = cp.aperture_record(
+        scene, observatory, exposure, response, sampling=sampling
+    )
     times = jnp.array([0.0, 30.0, 90.0])
     rates = cp.scene_aperture_rates(record, scene, times)
     nodes = record.quadrature.nodes_nm
@@ -677,7 +731,7 @@ def test_scene_route_is_a_vmap_of_the_read_and_feeds_the_calculator(plateau):
         assert np.all(np.asarray(field[..., 1, :]) == 0.0)
     solved = ox.exposure_time(
         rates,
-        instrument.detector,
+        _sel(observatory).detector,
         7.0,
         frame_time_s=100.0,
         post_processing=_NO_RESIDUAL,
@@ -689,17 +743,17 @@ def test_scene_route_is_a_vmap_of_the_read_and_feeds_the_calculator(plateau):
         cp.scene_aperture_rates(record, scene, 0.0)
 
 
-def _warm(instrument, temperature_K=290.0, emissivity=0.5):
-    """The instrument with a lumped warm-telescope emission."""
+def _warm(observatory, temperature_K=290.0, emissivity=0.5):
+    """The observatory with a lumped warm-telescope emission."""
     return eqx.tree_at(
-        lambda p: p.warm_emission,
-        instrument,
+        lambda p: p.instruments[0].warm_emission,
+        observatory,
         ox.WarmEmission(temperature_K, emissivity),
         is_leaf=lambda x: x is None,
     )
 
 
-def _pixel_thermal_rate(instrument, nodes_nm, temperature_K, emissivity):
+def _pixel_thermal_rate(observatory, nodes_nm, temperature_K, emissivity):
     """Warm emission per detector pixel in photons/s/nm, from primitives.
 
     Planck photon radiance 2 c / lambda**4 / expm1(h c / (lambda k T)) per
@@ -709,9 +763,9 @@ def _pixel_thermal_rate(instrument, nodes_nm, temperature_K, emissivity):
     wavelength_m = np.asarray(nodes_nm, dtype=np.float64) * nm2m
     x = h * c / (wavelength_m * k_B * temperature_K)
     radiance = 2 * c / wavelength_m**4 / np.expm1(x) * nm2m
-    pixel_sr = (float(instrument.detector.pixel_scale_arcsec) * arcsec2rad) ** 2
+    pixel_sr = (float(_sel(observatory).detector.pixel_scale_arcsec) * arcsec2rad) ** 2
     return emissivity * radiance * float(
-        instrument.primary.collecting_area_m2
+        observatory.telescope.pupil.collecting_area_m2
     ) * pixel_sr, x
 
 
@@ -722,11 +776,11 @@ def test_thermal_record_and_scene_read(plateau):
     for both aperture moments. The relative floor allows two rounding steps
     in the exponential's argument, amplified by its magnitude, and 24 for
     the prefactor, radiance and aperture multiplication. The scalar and scene
-    reads agree exactly, an invalid planet reads zero; an instrument
+    reads agree exactly, an invalid planet reads zero; an observatory
     without warm emission reads exact zeros.
     """
-    _, cold, exposure, response, _ = plateau
-    instrument = _warm(cold)
+    _, cold, exposure, sampling, response, _ = plateau
+    observatory = _warm(cold)
     scene = make_system(
         separation_arcsec=jnp.array([0.012, 0.03]),
         planet_groups=(
@@ -741,9 +795,11 @@ def test_thermal_record_and_scene_read(plateau):
         ),
     )
     scene = eqx.tree_at(lambda s: s.valid, scene, jnp.array([True, False]))
-    record = cp.aperture_record(scene, instrument, exposure, response)
+    record = cp.aperture_record(
+        scene, observatory, exposure, response, sampling=sampling
+    )
     pixel, exponent = _pixel_thermal_rate(
-        instrument, record.quadrature.nodes_nm, 290.0, 0.5
+        observatory, record.quadrature.nodes_nm, 290.0, 0.5
     )
     rtol = roundoff(1, n_ops=2 * exponent.max() + 24, dtype=record.thermal.dtype)
     assert record.thermal.shape == (1, 4)
@@ -775,7 +831,7 @@ def test_thermal_record_and_scene_read(plateau):
     off = cp.aperture_rates(record, 1.0, 1.0, contrast=1e-10, time_d=0.0)
     assert not np.any(off.supported)
     np.testing.assert_array_equal(off.thermal, 0.0)
-    cold_record = cp.aperture_record(scene, cold, exposure, response)
+    cold_record = cp.aperture_record(scene, cold, exposure, response, sampling=sampling)
     np.testing.assert_array_equal(cold_record.thermal, 0.0)
     cold_rates = cp.scene_aperture_rates(cold_record, scene, times)
     np.testing.assert_array_equal(cold_rates.thermal, 0.0)
@@ -796,23 +852,28 @@ def test_variance_matches_weighted_pixel_draws(sloped):
     planet rate: measured 3.5e-3 on the mean and 9.5e-3 on the variance,
     held to 1e-2 and 2e-2.
     """
-    scene, instrument, exposure, response, _ = sloped
+    scene, observatory, exposure, sampling, response, _ = sloped
+    base = _sel(observatory).detector
     detector = Detector(
-        shape=instrument.detector.shape,
-        pixel_scale_arcsec=instrument.detector.pixel_scale_arcsec,
+        shape=base.shape,
+        pixel_scale_arcsec=base.pixel_scale_arcsec,
         qe_curve=(jnp.array([500.0, 600.0]), jnp.array([0.9, 0.7])),
         survival_fraction=0.9,
         dark_current_e_per_pixel_s=2e-3,
         clock_induced_charge_e_per_pixel_frame=0.01,
         read_noise_e_rms=0.3,
     )
-    instrument = eqx.tree_at(lambda p: p.detector, instrument, detector)
+    observatory = eqx.tree_at(
+        lambda p: p.instruments[0].detector, observatory, detector
+    )
     bright = eqx.tree_at(lambda s: s.star.flux_phot_per_nm_m2, scene, jnp.asarray(1e9))
     # The response holds no detector noise, so the fixture's one serves.
-    record = cp.aperture_record(bright, instrument, exposure, response)
+    record = cp.aperture_record(
+        bright, observatory, exposure, response, sampling=sampling
+    )
     east, north = bright.positions(jnp.array([0.0]))[:2, 0, 0]
     x, y = SkyOrientation(0.0).sky_to_detector(east, north)
-    weights = np.asarray(_image_weights(instrument, x, y))
+    weights = np.asarray(_image_weights(observatory, x, y))
     rates = cp.aperture_rates(
         record,
         east,
@@ -823,7 +884,7 @@ def test_variance_matches_weighted_pixel_draws(sloped):
     plan = FramePlan(50.0, 4)
     mean, variance = detector.mean_and_variance(detector.electrons(rates), plan)
 
-    images = cp.expected(bright, instrument, exposure)
+    images = cp.expected(bright, observatory, exposure, sampling=sampling)
     planet = np.asarray(images.planet[0]) * 1e-7 / 1e-10
     source = planet + np.asarray(images.star_leakage[0])
     poisson = (source + 2e-3) * 200.0 + 0.01 * 4
@@ -849,7 +910,7 @@ def test_aperture_read_needs_a_position_only_for_a_pointing_dependent_zodi(plate
     The record holds the zodi model and the frame, and the model alone decides
     whether it needs a position, so the refusal comes from the read.
     """
-    _, instrument, _, response, _ = plateau
+    _, observatory, _, sampling, response, _ = plateau
     scene = make_system(separation_arcsec=0.03)
     scene = eqx.tree_at(
         lambda s: (s.dynamics.frame.ra_deg, s.dynamics.frame.dec_deg),
@@ -857,15 +918,19 @@ def test_aperture_read_needs_a_position_only_for_a_pointing_dependent_zodi(plate
         (None, None),
         is_leaf=lambda x: x is None,
     )
-    exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0, field_lod=0.0)
+    exposure, sampling = _build(scene, observatory, _BANDS, field_lod=0.0)
     record = cp.aperture_record(
-        with_zodi(scene, AYOZodi()), instrument, exposure, response
+        with_zodi(scene, AYOZodi()), observatory, exposure, response, sampling=sampling
     )
     assert record.sky_frame.ra_deg is None
     rates = cp.aperture_rates(record, *_offsets(0.02, 0.0), contrast=1e-10, time_d=5.0)
     assert float(jnp.sum(rates.local_zodi)) > 0
     pointed = cp.aperture_record(
-        with_zodi(scene, LeinertZodi()), instrument, exposure, response
+        with_zodi(scene, LeinertZodi()),
+        observatory,
+        exposure,
+        response,
+        sampling=sampling,
     )
     with pytest.raises(ValueError, match="no sky position"):
         cp.aperture_rates(pointed, *_offsets(0.02, 0.0), contrast=1e-10, time_d=5.0)
@@ -881,7 +946,7 @@ def test_records_of_two_targets_stack_and_read_under_vmap(sloped):
     background reads and local-zodi coordinates and interpolation. The local zodi
     follows the pointing, so the two reads must also differ.
     """
-    scene, instrument, exposure, response, _ = sloped
+    scene, observatory, exposure, sampling, response, _ = sloped
     scene = with_zodi(scene, LeinertZodi())
     other = eqx.tree_at(
         lambda s: (s.dynamics.frame.ra_deg, s.dynamics.frame.dec_deg),
@@ -889,7 +954,7 @@ def test_records_of_two_targets_stack_and_read_under_vmap(sloped):
         (jnp.asarray(250.0), jnp.asarray(35.0)),
     )
     records = [
-        cp.aperture_record(target, instrument, exposure, response)
+        cp.aperture_record(target, observatory, exposure, response, sampling=sampling)
         for target in (scene, other)
     ]
     stacked = jax.tree_util.tree_map(lambda *leaves: jnp.stack(leaves), *records)
@@ -926,7 +991,7 @@ def test_record_builds_under_jit_and_jit_vmap_with_the_instrument_closed_over(sl
     scaling the sloped map to photon rates. With no disk, exozodi is exactly
     zero.
     """
-    scene, instrument, exposure, response, _ = sloped
+    scene, observatory, exposure, sampling, response, _ = sloped
     scene = with_zodi(scene, LeinertZodi())
 
     def build(ra_deg, dec_deg):
@@ -935,7 +1000,9 @@ def test_record_builds_under_jit_and_jit_vmap_with_the_instrument_closed_over(sl
             scene,
             (ra_deg, dec_deg),
         )
-        return cp.aperture_record(pointed, instrument, exposure, response)
+        return cp.aperture_record(
+            pointed, observatory, exposure, response, sampling=sampling
+        )
 
     ra, dec = jnp.asarray([250.0, 260.0]), jnp.asarray([35.0, 40.0])
     eager = [build(ra[i], dec[i]) for i in range(2)]
@@ -957,6 +1024,38 @@ def test_record_builds_under_jit_and_jit_vmap_with_the_instrument_closed_over(sl
             np.testing.assert_allclose(
                 getattr(batched, name)[i], getattr(eager[i], name), rtol=rtol, atol=0
             )
+    # Static facts equal the eager ones, no tracer reached the record, and the view is
+    # not a field.
+    for record in (jitted, batched):
+        assert record.built_at == eager[0].built_at
+        assert record.reads == eager[0].reads
+        assert record.epoch == eager[0].epoch
+        assert not any(
+            isinstance(leaf, jax.core.Tracer) for leaf in jax.tree.leaves(record)
+        )
+    assert not any(
+        isinstance(getattr(eager[0], f.name), ox.SelectedInstrument)
+        for f in dataclasses.fields(eager[0])
+    )
+
+    # One compilation serves two commanded times and two rolls, because the stamps
+    # are facts of the hardware and the layout and not of any value.
+    traces = []
+
+    def build_at(time_d, roll_deg):
+        traces.append(1)
+        moved = replace(exposure, time_d=time_d, pointing=ox.Pointing(roll_deg))
+        return cp.aperture_record(
+            scene, observatory, moved, response, sampling=sampling
+        )
+
+    compiled = jax.jit(build_at)
+    first = compiled(jnp.asarray(0.0), jnp.asarray(0.0))
+    second = compiled(jnp.asarray(3.0), jnp.asarray(25.0))
+    assert len(traces) == 1
+    assert first.build_time_d == 0.0 and second.build_time_d == 3.0
+    assert second.pointing.roll_deg == 25.0
+    assert second.built_at == first.built_at
 
 
 def test_response_throughput_matches_stored_curve(tmp_path):
@@ -972,20 +1071,18 @@ def test_response_throughput_matches_stored_curve(tmp_path):
     rule = Circular(0.7)
     coro = open_yip(write_yip(tmp_path / "yip")).prepare(rules=(rule,))
     scale = float(coro.frame.lod_to_arcsec(550.0))
-    instrument = Instrument(
-        primary=SimplePrimary(
+    observatory = observatory_for(
+        SimplePupil(
             circumscribed_diameter_m=coro.frame.diameter_m, collecting_area_m2=10.0
         ),
-        attenuating_elements=(ConstantThroughput(throughput=1.0),),
-        coronagraph=coro,
-        detector=Detector(pixel_scale_arcsec=0.1 * scale, shape=(96, 96), qe=1.0),
+        (ConstantThroughput(throughput=1.0),),
+        coro,
+        Detector(pixel_scale_arcsec=0.1 * scale, shape=(96, 96), qe=1.0),
     )
-    quadrature = cp.build_exposure(
-        make_system(), instrument, (Band(549.0, 551.0),), time_d=0.0
-    ).quadrature
+    _, sampling = _build(make_system(), observatory, (Band(549.0, 551.0),))
     response = cp.aperture_response(
-        instrument,
-        quadrature,
+        _sel(observatory),
+        sampling.quadrature,
         rule=rule,
         n_separations=6,
         n_angles=8,
@@ -1012,24 +1109,26 @@ def test_reads_beyond_the_stamp_are_zero_and_unsupported():
     """
     from conftest import GaussianCoronagraph
 
-    instrument = _instrument(GaussianCoronagraph(24, 0.25))
-    instrument = eqx.tree_at(
-        lambda p: p.detector,
-        instrument,
+    observatory = _instrument(GaussianCoronagraph(24, 0.25))
+    frame = _sel(observatory).coronagraph.grid.frame
+    observatory = eqx.tree_at(
+        lambda p: p.instruments[0].detector,
+        observatory,
         Detector(
-            pixel_scale_arcsec=0.25
-            * float(instrument.coronagraph.grid.frame.lod_to_arcsec(550.0)),
+            pixel_scale_arcsec=0.25 * float(frame.lod_to_arcsec(550.0)),
             shape=(48, 48),
             qe=1.0,
         ),
     )
-    scale = float(instrument.coronagraph.grid.frame.lod_to_arcsec(550.0))
+    scale = float(frame.lod_to_arcsec(550.0))
     scene = make_system(separation_arcsec=1.0 * scale)
-    exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0)
+    exposure, sampling = _build(scene, observatory, _BANDS)
     response = cp.aperture_response(
-        instrument, exposure.quadrature, n_separations=21, n_angles=8
+        _sel(observatory), sampling.quadrature, n_separations=21, n_angles=8
     )
-    record = cp.aperture_record(scene, instrument, exposure, response)
+    record = cp.aperture_record(
+        scene, observatory, exposure, response, sampling=sampling
+    )
 
     def read(separation_lod):
         return cp.aperture_rates(
@@ -1045,11 +1144,7 @@ def test_reads_beyond_the_stamp_are_zero_and_unsupported():
         np.testing.assert_array_equal(getattr(far.variance, name), 0.0)
     # The aperture is inside the support while centre + 0.7 <= 2.875, at every
     # node (the footprint at the blue node of the band is the binding one).
-    blue = float(
-        instrument.coronagraph.grid.frame.lod_to_arcsec(
-            exposure.quadrature.nodes_nm.min()
-        )
-    )
+    blue = float(frame.lod_to_arcsec(sampling.quadrature.nodes_nm.min()))
     limit = (2.875 * blue / scale) - 0.7
     centres = np.linspace(0.5, 3.8, 12)
     flags = np.array([bool(read(c).supported.all()) for c in centres])
@@ -1076,21 +1171,21 @@ def test_planet_beyond_the_hull_reads_zero_and_unsupported(tmp_path):
         rules=(_RULE,), leakage_rule="aperture_mean"
     )
     scale = float(coro.frame.lod_to_arcsec(550.0))
-    instrument = Instrument(
-        primary=SimplePrimary(
+    observatory = observatory_for(
+        SimplePupil(
             circumscribed_diameter_m=coro.frame.diameter_m, collecting_area_m2=10.0
         ),
-        attenuating_elements=(ConstantThroughput(throughput=1.0),),
-        coronagraph=coro,
-        detector=Detector(pixel_scale_arcsec=0.2 * scale, shape=(64, 64), qe=1.0),
+        (ConstantThroughput(throughput=1.0),),
+        coro,
+        Detector(pixel_scale_arcsec=0.2 * scale, shape=(64, 64), qe=1.0),
     )
     scene = make_system(separation_arcsec=2.6 * scale)
-    exposure = cp.build_exposure(
-        scene, instrument, (Band(549.0, 551.0),), time_d=0.0, field_lod=0.0, order=1
+    exposure, sampling = _build(
+        scene, observatory, (Band(549.0, 551.0),), field_lod=0.0, order=1
     )
     response = cp.aperture_response(
-        instrument,
-        exposure.quadrature,
+        _sel(observatory),
+        sampling.quadrature,
         n_separations=12,
         n_angles=8,
         max_separation_arcsec=5.5 * scale,
@@ -1098,7 +1193,9 @@ def test_planet_beyond_the_hull_reads_zero_and_unsupported(tmp_path):
     rings = np.asarray(response.throughput_supported)[0, 0]
     step_lod = float(response.separation_step_arcsec) / scale
     np.testing.assert_array_equal(rings, np.arange(12) * step_lod <= 3.0)
-    record = cp.aperture_record(scene, instrument, exposure, response)
+    record = cp.aperture_record(
+        scene, observatory, exposure, response, sampling=sampling
+    )
     inner = cp.aperture_rates(record, 2.6 * scale, 0.0, contrast=1e-10, time_d=0.0)
     outer = cp.aperture_rates(record, 5.0 * scale, 0.0, contrast=1e-10, time_d=0.0)
     assert bool(inner.supported.all()) and np.all(np.asarray(inner.planet) > 0)
@@ -1113,7 +1210,7 @@ def test_curves_and_record_routes_agree_on_the_flag_across_the_stamp_edge():
     """Fails if the curves route and the record route disagree on what is supported.
 
     Seam anchor, ``jaxedith.rates`` against ``cp.aperture_rates`` on the same
-    instrument: a detector twice the table (table half-width 3 lambda/D) and a
+    observatory: a detector twice the table (table half-width 3 lambda/D) and a
     2 nm band, so the band-centre read of the curves and the blue node of the
     record share one footprint. On the +x axis the five separations 0.5, 1.5,
     2.0, 2.6 and 3.5 lambda/D give the same ``supported`` on both routes, and
@@ -1130,21 +1227,24 @@ def test_curves_and_record_routes_agree_on_the_flag_across_the_stamp_edge():
     """
     from jaxedith import rates as curve_rates
 
-    instrument = _instrument(GaussianCoronagraph(24, 0.25))
-    scale = float(instrument.coronagraph.grid.frame.lod_to_arcsec(550.0))
-    instrument = eqx.tree_at(
-        lambda p: p.detector,
-        instrument,
+    observatory = _instrument(GaussianCoronagraph(24, 0.25))
+    scale = float(_sel(observatory).coronagraph.grid.frame.lod_to_arcsec(550.0))
+    observatory = eqx.tree_at(
+        lambda p: p.instruments[0].detector,
+        observatory,
         Detector(pixel_scale_arcsec=0.25 * scale, shape=(48, 48), qe=1.0),
     )
     scene = make_system(separation_arcsec=1.0 * scale)
-    exposure = cp.build_exposure(scene, instrument, (Band(549.0, 551.0),), time_d=0.0)
+    exposure, sampling = _build(scene, observatory, (Band(549.0, 551.0),))
     response = cp.aperture_response(
-        instrument, exposure.quadrature, n_separations=21, n_angles=8
+        _sel(observatory), sampling.quadrature, n_separations=21, n_angles=8
     )
-    record = cp.aperture_record(scene, instrument, exposure, response)
-    curves = instrument.coronagraph.curves()
-    sources = scene.sources(exposure.quadrature, exposure.resolution, jnp.array([0.0]))
+    record = cp.aperture_record(
+        scene, observatory, exposure, response, sampling=sampling
+    )
+    selected = _sel(observatory)
+    curves = selected.coronagraph.curves()
+    sources = scene.sources(sampling.quadrature, sampling.resolution, jnp.array([0.0]))
 
     def flags(east_lod, north_lod):
         east, north = east_lod * scale, north_lod * scale
@@ -1152,8 +1252,8 @@ def test_curves_and_record_routes_agree_on_the_flag_across_the_stamp_edge():
         analytic = curve_rates(
             curves,
             scene,
-            instrument,
-            exposure.quadrature,
+            selected,
+            sampling.quadrature,
             east,
             north,
             contrast=1e-10,
@@ -1182,6 +1282,7 @@ class _CentralField(ox.AbstractSpeckleField):
         static=True,
         default=PixelGrid.focal(16, 0.25, Frame(550.0, 6.0, "circumscribed")),
     )
+    epoch: Epoch = eqx.field(static=True, default=Epoch(2451545.0))
     epoch_d: float = eqx.field(static=True, converter=float, default=0.0)
 
     def spectral_breaks_nm(self):
@@ -1210,27 +1311,30 @@ def test_aperture_beyond_the_field_reads_zero_inside_the_static_table():
     """
     scene = make_system(separation_arcsec=0.03)
     base = _instrument(GaussianCoronagraph(40, 0.25))
-    exposure = cp.build_exposure(scene, base, _BANDS, time_d=0.0, field_lod=0.0)
+    exposure, sampling = _build(scene, base, _BANDS, field_lod=0.0)
     response = cp.aperture_response(
-        base,
-        exposure.quadrature,
+        _sel(base),
+        sampling.quadrature,
         n_separations=5,
         n_angles=4,
         max_separation_arcsec=0.08,
     )
     with_field = eqx.tree_at(
-        lambda p: p.speckle, base, _CentralField(), is_leaf=lambda v: v is None
+        lambda p: p.instruments[0].speckle,
+        base,
+        _CentralField(),
+        is_leaf=lambda v: v is None,
     )
     offsets = _offsets(0.06, 90.0)
     static = cp.aperture_rates(
-        cp.aperture_record(scene, base, exposure, response),
+        cp.aperture_record(scene, base, exposure, response, sampling=sampling),
         *offsets,
         contrast=1e-10,
         time_d=0.0,
     )
     assert np.all(static.supported) and np.all(np.asarray(static.star_leakage) > 0)
     rates = cp.aperture_rates(
-        cp.aperture_record(scene, with_field, exposure, response),
+        cp.aperture_record(scene, with_field, exposure, response, sampling=sampling),
         *offsets,
         contrast=1e-10,
         time_d=0.0,
@@ -1258,13 +1362,13 @@ def test_aperture_tables_image_the_real_nodes_only(monkeypatch):
     """
     from coronagraphoto import aperture
 
-    instrument = _instrument(PlateauCoronagraph(40, 0.25))
+    observatory = _instrument(PlateauCoronagraph(40, 0.25))
     scene = with_zodi(make_system(separation_arcsec=0.03), AYOZodi())
     bands = (Band(480.0, 520.0), Band(560.0, 600.0), Band(420.0, 498.0))
     options = dict(n_separations=3, n_angles=2, max_separation_arcsec=0.04)
-    exposure = cp.build_exposure(scene, instrument, bands, time_d=0.0, field_lod=0.0)
-    counts = [sum(n for *_, n in band) for band in exposure.quadrature.pieces]
-    width = exposure.quadrature.nodes_nm.shape[1]
+    exposure, sampling = _build(scene, observatory, bands, field_lod=0.0)
+    counts = [sum(n for *_, n in band) for band in sampling.quadrature.pieces]
+    width = sampling.quadrature.nodes_nm.shape[1]
     assert len(set(counts)) > 1 and max(counts) == width
 
     imaged, summed = [], []
@@ -1280,23 +1384,29 @@ def test_aperture_tables_image_the_real_nodes_only(monkeypatch):
 
     monkeypatch.setattr(aperture, "_ring_moments", counted_moments)
     monkeypatch.setattr(aperture, "_lattice", counted_lattice)
-    response = cp.aperture_response(instrument, exposure.quadrature, **options)
+    response = cp.aperture_response(_sel(observatory), sampling.quadrature, **options)
     assert sum(map(len, imaged)) == options["n_separations"] * sum(counts) + len(bands)
-    nodes = np.asarray(exposure.quadrature.nodes_nm)
+    nodes = np.asarray(sampling.quadrature.nodes_nm)
     probes = imaged[-len(bands) :]
     for i, n in enumerate(counts):
         np.testing.assert_array_equal(probes[i], nodes[i, n // 2 : n // 2 + 1])
     summed.clear()
-    record = cp.aperture_record(scene, instrument, exposure, response)
+    record = cp.aperture_record(
+        scene, observatory, exposure, response, sampling=sampling
+    )
     # One sum per band of the three maps, then the pixel count and support.
     assert summed[: len(bands)] == [3 * n for n in counts]
     monkeypatch.undo()
 
     for i, band in enumerate(bands):
-        alone = cp.build_exposure(scene, instrument, (band,), time_d=0.0, field_lod=0.0)
-        assert alone.quadrature.nodes_nm.shape[1] == counts[i]
-        single = cp.aperture_response(instrument, alone.quadrature, **options)
-        single_record = cp.aperture_record(scene, instrument, alone, single)
+        alone, alone_sampling = _build(scene, observatory, (band,), field_lod=0.0)
+        assert alone_sampling.quadrature.nodes_nm.shape[1] == counts[i]
+        single = cp.aperture_response(
+            _sel(observatory), alone_sampling.quadrature, **options
+        )
+        single_record = cp.aperture_record(
+            scene, observatory, alone, single, sampling=alone_sampling
+        )
         n = counts[i]
         pairs = (
             (response.throughput[:, i, :n], single.throughput[:, 0]),
@@ -1328,18 +1438,18 @@ class ConstantFluxModel(BlackbodyPhysicalModel):
 
 @pytest.fixture(scope="module")
 def unit_response(plateau):
-    """Reuse the synthetic instrument with unit collecting gain and table throughput."""
-    _, original, _, response, _ = plateau
-    instrument = Instrument(
-        SimplePrimary(circumscribed_diameter_m=6.0, collecting_area_m2=1.0),
+    """Reuse the synthetic observatory with unit gain and table throughput."""
+    _, original, _, _, response, _ = plateau
+    observatory = observatory_for(
+        SimplePupil(circumscribed_diameter_m=6.0, collecting_area_m2=1.0),
         (ConstantThroughput(1.0),),
-        original.coronagraph,
-        original.detector,
+        _sel(original).coronagraph,
+        _sel(original).detector,
     )
     response = eqx.tree_at(
         lambda r: r.throughput, response, jnp.ones_like(response.throughput)
     )
-    return instrument, response
+    return observatory, response
 
 
 @vv.case("aperture-photon-budget", "code-verification")
@@ -1349,7 +1459,7 @@ def test_zero_star_thermal_planet_flux(unit_response):
     Floating-point basis: rtol=1e-12, atol=0 for the x64 hand product.
     Dividing by the exactly zero star before multiplying must fail this test.
     """
-    instrument, response = unit_response
+    observatory, response = unit_response
     scene = make_system(
         star=FlatStar(flux_phot_per_nm_m2=1.0, flux_scale=0.0),
         separation_arcsec=0.03,
@@ -1357,10 +1467,12 @@ def test_zero_star_thermal_planet_flux(unit_response):
             Planet(jnp.ones(1), BlackbodyPhysicalModel(jnp.array([300.0]))),
         ),
     )
-    exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0, field_lod=0.0)
-    record = cp.aperture_record(scene, instrument, exposure, response)
+    exposure, sampling = _build(scene, observatory, _BANDS, field_lod=0.0)
+    record = cp.aperture_record(
+        scene, observatory, exposure, response, sampling=sampling
+    )
     times = jnp.array([0.0])
-    expected = scene.sources(exposure.quadrature, exposure.resolution, times).planets
+    expected = scene.sources(sampling.quadrature, sampling.resolution, times).planets
     rates = cp.scene_aperture_rates(record, scene, times)
     assert np.isfinite(rates.planet).all()
     assert rates.supported.all()
@@ -1379,7 +1491,7 @@ def test_variable_star_constant_planet_flux(unit_response):
     at unit relative scale for unit conversion and spectral reduction, with
     the 1e-12 relative floor for x64. A build-time stellar factor gives [3, 1.5].
     """
-    instrument, response = unit_response
+    observatory, response = unit_response
     wave = jnp.array([400.0, 700.0])
     flux = jnp.array([[1.0, 2.0], [1.0, 2.0]])
     star = Star(
@@ -1393,10 +1505,12 @@ def test_variable_star_constant_planet_flux(unit_response):
         separation_arcsec=0.03,
         planet_groups=(Planet(jnp.ones(1), ConstantFluxModel(jnp.array([300.0]))),),
     )
-    exposure = cp.build_exposure(scene, instrument, _BANDS, time_d=0.0, field_lod=0.0)
-    record = cp.aperture_record(scene, instrument, exposure, response)
+    exposure, sampling = _build(scene, observatory, _BANDS, field_lod=0.0)
+    record = cp.aperture_record(
+        scene, observatory, exposure, response, sampling=sampling
+    )
     times = jnp.array([0.0, 1.0])
-    sources = scene.sources(exposure.quadrature, exposure.resolution, times)
+    sources = scene.sources(sampling.quadrature, sampling.resolution, times)
     rtol = max(1e-12, float(ulps(8, jnp.ones((), dtype=sources.star.dtype))))
     np.testing.assert_allclose(
         sources.star,
@@ -1420,7 +1534,7 @@ def test_planet_flux_and_contrast_node_axes(unit_response):
     make interpolation constant, so reassociation introduces no rounding.
     Flipping the stellar node axis changes the nonconstant spectral values.
     """
-    instrument, _ = unit_response
+    observatory, _ = unit_response
     wave = jnp.array([400.0, 500.0, 600.0, 700.0])
     star = Star(
         wavelengths_nm=wave,
@@ -1431,16 +1545,15 @@ def test_planet_flux_and_contrast_node_axes(unit_response):
         interpolation_method="linear",
     )
     scene = make_system(star=star, separation_arcsec=0.03)
-    exposure = cp.build_exposure(
+    exposure, sampling = _build(
         scene,
-        instrument,
+        observatory,
         (Band(500.0, 550.0), Band(550.0, 600.0)),
-        time_d=0.0,
         field_lod=0.0,
     )
     response = cp.aperture_response(
-        instrument,
-        exposure.quadrature,
+        _sel(observatory),
+        sampling.quadrature,
         n_separations=2,
         n_angles=1,
         max_separation_arcsec=0.04,
@@ -1448,8 +1561,10 @@ def test_planet_flux_and_contrast_node_axes(unit_response):
     response = eqx.tree_at(
         lambda r: r.throughput, response, jnp.ones_like(response.throughput)
     )
-    record = cp.aperture_record(scene, instrument, exposure, response)
-    sources = scene.sources(exposure.quadrature, exposure.resolution, jnp.array([0.0]))
+    record = cp.aperture_record(
+        scene, observatory, exposure, response, sampling=sampling
+    )
+    sources = scene.sources(sampling.quadrature, sampling.resolution, jnp.array([0.0]))
     assert sources.star.shape[:2] == (2, 4)
     east, north = scene.positions(jnp.array([0.0]))
     kwargs = dict(time_d=0.0)
@@ -1487,7 +1602,7 @@ def test_aperture_requires_one_planet_input(plateau, kwargs):
 @pytest.fixture(scope="module")
 def two_band_record(unit_response):
     """Return a (W=2, Q=4) record and the read position, at unit throughput."""
-    instrument, _ = unit_response
+    observatory, _ = unit_response
     wave = jnp.array([400.0, 500.0, 600.0, 700.0])
     star = Star(
         wavelengths_nm=wave,
@@ -1498,16 +1613,15 @@ def two_band_record(unit_response):
         interpolation_method="linear",
     )
     scene = make_system(star=star, separation_arcsec=0.03)
-    exposure = cp.build_exposure(
+    exposure, sampling = _build(
         scene,
-        instrument,
+        observatory,
         (Band(500.0, 550.0), Band(550.0, 600.0)),
-        time_d=0.0,
         field_lod=0.0,
     )
     response = cp.aperture_response(
-        instrument,
-        exposure.quadrature,
+        _sel(observatory),
+        sampling.quadrature,
         n_separations=2,
         n_angles=1,
         max_separation_arcsec=0.04,
@@ -1515,7 +1629,9 @@ def two_band_record(unit_response):
     response = eqx.tree_at(
         lambda r: r.throughput, response, jnp.ones_like(response.throughput)
     )
-    record = cp.aperture_record(scene, instrument, exposure, response)
+    record = cp.aperture_record(
+        scene, observatory, exposure, response, sampling=sampling
+    )
     east, north = scene.positions(jnp.array([0.0]))
     return record, east[0, 0], north[0, 0]
 
@@ -1671,12 +1787,18 @@ def test_aperture_geometry_uses_the_child_at_the_band_center():
         GaussianCoronagraph(n=24, bandpass=Band(lo, hi), frame=frame)
         for lo, hi, frame in ((500, 550, blue), (550, 600, red), (600, 650, red))
     )
-    instrument = replace(
-        make_path(n=24),
-        primary=SimplePrimary(
-            circumscribed_diameter_m=6.0,
-            inscribed_diameter_m=4.0,
-            collecting_area_m2=20.0,
+    path = make_path(n=24)
+    observatory = with_instrument(
+        replace(
+            path,
+            telescope=replace(
+                path.telescope,
+                pupil=SimplePupil(
+                    circumscribed_diameter_m=6.0,
+                    inscribed_diameter_m=4.0,
+                    collecting_area_m2=20.0,
+                ),
+            ),
         ),
         coronagraph=ox.MultiBandCoronagraph(children),
     )
@@ -1687,7 +1809,7 @@ def test_aperture_geometry_uses_the_child_at_the_band_center():
     ):
         q = Quadrature(bands, jnp.array(waves), jnp.ones((len(bands), 1)))
         response = cp.aperture_response(
-            instrument,
+            _sel(observatory),
             q,
             rule=_RULE,
             n_separations=2,
@@ -1695,7 +1817,7 @@ def test_aperture_geometry_uses_the_child_at_the_band_center():
             max_separation_arcsec=0.03,
         )
         radius = _RULE.radius_lod * float(blue.lod_to_arcsec(545.0))
-        radius /= float(instrument.detector.pixel_scale_arcsec)
+        radius /= float(_sel(observatory).detector.pixel_scale_arcsec)
         np.testing.assert_array_equal(
             response.radius_pix[0], np.asarray(radius, dtype=response.radius_pix.dtype)
         )
@@ -1721,13 +1843,19 @@ def test_aperture_reads_each_nodes_product_and_scale(gaussian_observation, produ
         blue = IntegratedGaussianCoronagraph(Band(480, 543), False, throughput=0.1)
         red = IntegratedGaussianCoronagraph(Band(543, 720), False, throughput=0.7)
         coro = ox.MultiBandCoronagraph((blue, red))
-    _, instrument, exposure = gaussian_observation(product == "band_average", coro=coro)
-    q = exposure.quadrature
-    detector = instrument.detector
-    frame = instrument.coronagraph.frame
+    _, observatory, _, sampling = gaussian_observation(
+        product == "band_average", coro=coro
+    )
+    q = sampling.quadrature
+    detector = _sel(observatory).detector
+    frame = _sel(observatory).coronagraph.frame
     separation = 0.015
     response = cp.aperture_response(
-        instrument, q, n_separations=2, n_angles=1, max_separation_arcsec=separation
+        _sel(observatory),
+        q,
+        n_separations=2,
+        n_angles=1,
+        max_separation_arcsec=separation,
     )
     waves = np.asarray(q.nodes_nm[0])
     center = q.bands[0].center_nm
@@ -1765,3 +1893,424 @@ def test_aperture_reads_each_nodes_product_and_scale(gaussian_observation, produ
         )
     probe = moments(waves[len(waves) // 2], separation, 0)[0]
     np.testing.assert_allclose(response.probe[0], probe, rtol=0, atol=rtol * abs(probe))
+
+
+# Admission, stamps, reads and the record clock.
+
+_RESPONSE_OPTIONS = dict(n_separations=5, n_angles=4, max_separation_arcsec=0.04)
+_ROOTS = dict.fromkeys(("scene", "observatory", "exposure", "sampling"))
+
+
+def _with_second_configuration(observatory):
+    """The observatory with a copy of its configuration named ``other``."""
+    (imager,) = observatory.instruments
+    return replace(observatory, instruments=(imager, replace(imager, name="other")))
+
+
+@pytest.mark.parametrize("staged", [False, True], ids=["eager", "jit"])
+@pytest.mark.parametrize(
+    ("fact", "label"),
+    [
+        ("configuration", "instrument"),
+        ("layout", "layout"),
+        pytest.param(
+            "precision",
+            "precision",
+            marks=pytest.mark.float64_only(reason="narrows the hardware to float32"),
+        ),
+    ],
+)
+def test_a_response_for_other_hardware_is_refused_by_its_stamps(
+    plateau, fact, label, staged
+):
+    """Fails if a response built for other hardware or nodes is admitted.
+
+    Basis: exact. The response is built for another configuration of the same
+    telescope, for another quadrature layout, or at another precision, and each
+    refusal names its fact. In the staged call the response is a ``jax.jit``
+    argument, so only its static stamps can decide, and the refusal still fires.
+    """
+    scene, observatory, exposure, sampling, response, _ = plateau
+    target = observatory
+    if fact == "configuration":
+        target = _with_second_configuration(observatory)
+        response = cp.aperture_response(
+            target.select("other"), sampling.quadrature, **_RESPONSE_OPTIONS
+        )
+    elif fact == "layout":
+        _, finer = _build(scene, observatory, _BANDS, field_lod=0.0, order=3)
+        response = cp.aperture_response(
+            _sel(observatory), finer.quadrature, **_RESPONSE_OPTIONS
+        )
+    else:
+        target = canonical(observatory, precision="float32")
+
+    def build(response):
+        return cp.aperture_record(scene, target, exposure, response, sampling=sampling)
+
+    with pytest.raises(StampMismatchError, match=label):
+        (jax.jit(build) if staged else build)(response)
+
+
+@pytest.mark.parametrize("change", ["node", "probe"])
+def test_value_mismatches_are_refused_on_the_host_and_unverified_when_staged(
+    plateau, change
+):
+    """Fails if a moved node or a changed probe table is admitted on the host.
+
+    Basis: exact. The stamps of both responses equal the good one's, so only
+    the table comparison can tell. Concrete inputs refuse. With the response a
+    ``jax.jit`` argument the comparison cannot run: the call is admitted and
+    ``check_response`` reports ``values`` among the unverified facts. Called
+    on the host first, ``check_response`` refuses.
+    """
+    scene, observatory, exposure, sampling, response, _ = plateau
+    if change == "node":
+        bad = eqx.tree_at(
+            lambda r: r.quadrature.nodes_nm,
+            response,
+            response.quadrature.nodes_nm + 0.5,
+        )
+        match = "other wavelength nodes"
+    else:
+        bad = eqx.tree_at(lambda r: r.probe, response, response.probe * 1.01)
+        match = "recorded"
+    assert bad.built_at == response.built_at
+    selected, quadrature = _sel(observatory), sampling.quadrature
+    with pytest.raises(ValueError, match=match):
+        cp.aperture_record(scene, observatory, exposure, bad, sampling=sampling)
+    with pytest.raises(ValueError, match=match):
+        cp.check_response(bad, selected, quadrature)
+    seen = []
+
+    def staged(response):
+        seen.append(cp.check_response(response, selected, quadrature))
+        return cp.aperture_record(
+            scene, observatory, exposure, response, sampling=sampling
+        )
+
+    jax.jit(staged)(bad)
+    assert "values" in seen[0]
+    assert "values" not in cp.check_response(response, selected, quadrature)
+
+
+def test_unverified_products_are_admitted_and_a_changed_value_is_caught(plateau):
+    """Fails if a hand-built response or record is refused, or a bad value passes.
+
+    Basis: exact. Without stamps nothing can be compared by stamp, so the
+    response is admitted on the table comparison alone, and a hand-built record
+    (no stamps, no reads) reads like the built one.
+    """
+    scene, observatory, exposure, sampling, response, record = plateau
+    hand = replace(response, built_at=(), reads=())
+    assert cp.check_response(hand, _sel(observatory), sampling.quadrature)
+    built = cp.aperture_record(scene, observatory, exposure, hand, sampling=sampling)
+    assert built.planet_response.shape == record.planet_response.shape
+    bare = replace(record, built_at=(), reads=())
+    east, north = _offsets(0.03, 40.0)
+    np.testing.assert_array_equal(
+        cp.aperture_rates(bare, east, north, contrast=1e-10, time_d=0.0).star_leakage,
+        cp.aperture_rates(record, east, north, contrast=1e-10, time_d=0.0).star_leakage,
+    )
+    bad = eqx.tree_at(lambda r: r.probe, hand, hand.probe * 1.01)
+    with pytest.raises(ValueError, match="recorded"):
+        cp.aperture_record(scene, observatory, exposure, bad, sampling=sampling)
+
+
+def test_reads_are_owner_qualified_and_stale_where_the_model_is_edited(sloped):
+    """Fails if a read is scene-relative, drops the nodes, or a live edit is unseen.
+
+    Basis: exact. Every read starts with its owner. Editing the coronagraph's
+    sigma after the response was built is named by ``stale_reads`` against the
+    response's reads, moves the image path and leaves the record's tables, so
+    the old tables are the old answer bit for bit. Freeing each path the
+    record reads is named. The quadrature nodes are among the reads of both.
+    """
+    scene, observatory, exposure, sampling, response, record = sloped
+    assert "sampling.quadrature.nodes_nm" in response.reads
+    assert "sampling.quadrature.nodes_nm" in record.reads
+    assert all(r.split(".")[0] in _ROOTS for r in record.reads)
+    write = "instruments[imager].coronagraph.sigma_lod"
+    roots = {**_ROOTS, "observatory": ""}
+    stale = stale_reads(bind_reads(response.reads, roots), (write,))
+    assert stale and stale[0][0] == write
+    wider = copy.copy(_sel(observatory).coronagraph)
+    object.__setattr__(wider, "sigma_lod", 0.5)
+    edited = with_instrument(observatory, coronagraph=wider)
+    east, north = _offsets(0.05, 60.0)
+    old = cp.aperture_rates(record, east, north, contrast=1e-10, time_d=0.0)
+    before = cp.expected(scene, observatory, exposure, sampling=sampling)
+    after = cp.expected(scene, edited, exposure, sampling=sampling)
+    assert not np.array_equal(before.total(), after.total())
+    new = cp.aperture_rates(record, east, north, contrast=1e-10, time_d=0.0)
+    for one, two in zip(jax.tree.leaves(old), jax.tree.leaves(new), strict=True):
+        np.testing.assert_array_equal(one, two)
+    for path in record.reads:
+        owner, _, rest = path.partition(".")
+        bound = bind_reads(record.reads, {**_ROOTS, owner: ""})
+        assert stale_reads(bound, (rest,)), path
+
+
+@pytest.mark.medium(reason="one record on a pointing-dependent zodi")
+def test_read_time_inputs_move_the_rates_of_one_record(sloped):
+    """Fails if a read-time contrast, position or date is baked into the record.
+
+    Basis: exact. On one record, a different contrast moves the planet, a
+    different position moves the leakage, and a different date moves the local
+    zodi that follows the pointing.
+    """
+    scene, observatory, exposure, sampling, response, _ = sloped
+    zodi = with_zodi(scene, LeinertZodi())
+    record = cp.aperture_record(
+        zodi, observatory, exposure, response, sampling=sampling
+    )
+    east, north = _offsets(0.04, 60.0)
+
+    def read(**kwargs):
+        options = dict(east_arcsec=east, north_arcsec=north, contrast=1e-10, time_d=0.0)
+        return cp.aperture_rates(record, **{**options, **kwargs})
+
+    base = read()
+    assert not np.array_equal(read(contrast=2e-10).planet, base.planet)
+    assert not np.array_equal(read(east_arcsec=-east).star_leakage, base.star_leakage)
+    assert not np.array_equal(read(time_d=90.0).local_zodi, base.local_zodi)
+
+
+def test_the_record_clock_counts_from_the_scene_epoch(plateau, precision):
+    """Fails if the build date is not stated on the scene's day zero.
+
+    Basis: algebra. The event at E + 12 d on a scene with epoch E gives 12, and
+    the same instant on a scene with epoch E + 10 d gives 2, with equal
+    backgrounds. A scene of another epoch is refused by the read. A float32 date
+    cannot be shifted to another epoch, and the build says so.
+    """
+    scene, observatory, _, _, response, _ = plateau
+    epoch = scene.epoch
+    later = Epoch(epoch.jd1 + 10.0, epoch.jd2, epoch.scale)
+    records = []
+    other = make_system(separation_arcsec=0.03, epoch=later)
+    if precision == np.dtype("float32"):
+        exposure = cp.build_exposure(
+            _BANDS, epoch=epoch, instrument="imager", time_d=12.0
+        )
+        with pytest.raises(PrecisionError, match="offset"):
+            cp.build_sampling(observatory, exposure, scene=other, field_lod=0.0)
+            cp.aperture_record(
+                other,
+                observatory,
+                exposure,
+                response,
+                sampling=cp.build_sampling(
+                    observatory, exposure, scene=scene, field_lod=0.0
+                ),
+            )
+        return
+    for target in (scene, other):
+        exposure = cp.build_exposure(
+            _BANDS, epoch=epoch, instrument="imager", time_d=12.0
+        )
+        sampling = cp.build_sampling(observatory, exposure, scene=target, field_lod=0.0)
+        records.append(
+            cp.aperture_record(
+                target, observatory, exposure, response, sampling=sampling
+            )
+        )
+    first, second = records
+    np.testing.assert_allclose(
+        [first.build_time_d, second.build_time_d],
+        [12.0, 2.0],
+        rtol=float(ulps(4, np.float64(1))),
+        atol=0,
+    )
+    assert (first.epoch, second.epoch) == (epoch, later)
+    np.testing.assert_array_equal(first.star_leakage, second.star_leakage)
+    with pytest.raises(ValueError, match="epoch"):
+        cp.scene_aperture_rates(second, scene, jnp.array([0.0]))
+
+
+def test_records_refuse_to_stack_across_epochs_and_stamps(sloped):
+    """Fails if records of other epochs or hardware stack, or the field is unnamed.
+
+    Basis: exact tree structure. The stamps hold the layout and not node
+    values, so a response built on moved nodes of one layout has equal stamps.
+    """
+    _, observatory, _, sampling, response, record = sloped
+    stack = lambda *leaves: jnp.stack(leaves)  # noqa: E731
+    jax.tree.map(stack, record, record)
+    shifted = eqx.tree_at(
+        lambda q: q.nodes_nm, sampling.quadrature, sampling.quadrature.nodes_nm + 1.0
+    )
+    moved = cp.aperture_response(
+        _sel(observatory), shifted, n_separations=9, n_angles=8
+    )
+    assert moved.built_at == response.built_at
+    epoch = Epoch(record.epoch.jd1 + 1.0, record.epoch.jd2, record.epoch.scale)
+    # JAX reports the differing static metadata (the value, not the field name).
+    for field, value, shown in (
+        ("epoch", epoch, "jd1=2451546.0"),
+        ("built_at", (("producer", "str:another"),), "str:another"),
+    ):
+        other = dataclasses.replace(record, **{field: value})
+        with pytest.raises(ValueError, match=shown):
+            jax.tree.map(stack, record, other)
+
+
+def test_record_gain_includes_the_telescope_train(plateau):
+    """Fails if the collecting gain omits an element shared by every configuration.
+
+    Basis: exact algebra. A constant 0.5 on the telescope's own train halves
+    every planet table of the record, to four roundings of the gain product.
+    """
+    scene, observatory, exposure, sampling, response, record = plateau
+    shared = replace(
+        observatory,
+        telescope=replace(
+            observatory.telescope, attenuating_elements=(ConstantThroughput(0.5),)
+        ),
+    )
+    halved = cp.aperture_record(scene, shared, exposure, response, sampling=sampling)
+    np.testing.assert_allclose(
+        halved.planet_response,
+        0.5 * record.planet_response,
+        rtol=float(ulps(4, np.float64(1))),
+        atol=0,
+    )
+
+
+def test_default_rule_and_keyword_offsets(plateau):
+    """Fails if the rule default drifts or the offsets stop reading by keyword.
+
+    Basis: exact. Omitting ``rule`` builds the released default rule, and the
+    offsets by keyword equal the positional call.
+    """
+    _, observatory, _, sampling, _, record = plateau
+    explicit = cp.aperture_response(
+        _sel(observatory),
+        sampling.quadrature,
+        rule=DEFAULT_APERTURE_RULE,
+        **_RESPONSE_OPTIONS,
+    )
+    default = cp.aperture_response(
+        _sel(observatory), sampling.quadrature, **_RESPONSE_OPTIONS
+    )
+    np.testing.assert_array_equal(default.kernels, explicit.kernels)
+    assert dict(default.built_at)["rule"] == dict(explicit.built_at)["rule"]
+    east, north = _offsets(0.03, 40.0)
+    by_keyword = cp.aperture_rates(
+        record, east_arcsec=east, north_arcsec=north, contrast=1e-10, time_d=0.0
+    )
+    by_position = cp.aperture_rates(record, east, north, contrast=1e-10, time_d=0.0)
+    for one, two in zip(
+        jax.tree.leaves(by_keyword), jax.tree.leaves(by_position), strict=True
+    ):
+        np.testing.assert_array_equal(one, two)
+
+
+def test_aperture_stamps_carry_the_producer_version(plateau):
+    """Fails if a built aperture product does not say which release built it."""
+    *_, response, record = plateau
+    assert dict(response.built_at)["producer_version"] == f"str:{__version__}"
+    assert dict(record.built_at)["producer_version"] == f"str:{__version__}"
+    assert dict(record.built_at)["response.producer_version"] == f"str:{__version__}"
+
+
+def test_a_multiband_product_reads_every_routed_child_and_no_other():
+    """Fails if a routed child's edit is unseen, or an unrouted child is named.
+
+    Basis: exact. Bands centred at 525 and 575 nm route to the first two of
+    three children, so editing the second is named by ``stale_reads`` with its
+    own path, and the third, which no band reaches, is absent.
+    """
+    frame = Frame(550.0, 6.0, "circumscribed")
+    children = tuple(
+        GaussianCoronagraph(n=24, bandpass=Band(lo, hi), frame=frame)
+        for lo, hi in ((500, 550), (550, 600), (600, 650))
+    )
+    observatory = with_instrument(
+        make_path(n=24), coronagraph=ox.MultiBandCoronagraph(children)
+    )
+    quadrature = Quadrature(
+        (Band(510.0, 540.0), Band(560.0, 590.0)),
+        jnp.array([[525.0], [575.0]]),
+        jnp.ones((2, 1)),
+    )
+    response = cp.aperture_response(
+        _sel(observatory),
+        quadrature,
+        n_separations=2,
+        n_angles=1,
+        max_separation_arcsec=0.03,
+    )
+    roots = {**_ROOTS, "observatory": ""}
+    bound = bind_reads(response.reads, roots)
+    base = "instruments[imager].coronagraph.coronagraphs"
+    assert stale_reads(bound, (f"{base}[1].sigma_lod",))
+    assert stale_reads(bound, (f"{base}[0].sigma_lod",))
+    assert not stale_reads(bound, (f"{base}[2].sigma_lod",))
+    assert not any("coronagraphs[2]" in read for read in response.reads)
+
+
+@pytest.mark.medium(reason="a path coronagraph calibration and one response")
+def test_a_path_coronagraph_response_carries_calibration_and_refuses_when_stale():
+    """Fails if a stale calibration is read through a cached reader.
+
+    Basis: exact. The response carries the calibration stamps of the path model.
+    After the stop is edited without ``recalibrated()`` (by a factor that leaves
+    the live probe equal), a record builder that reads the cached sky map
+    raises, and the response built from the live readers alone still runs.
+    """
+    pytest.importorskip("physicaloptix")
+    import importlib
+
+    interop = importlib.import_module("physicaloptix.interop")
+    core = importlib.import_module("physicaloptix.core")
+    elements = importlib.import_module("physicaloptix.elements")
+    path_module = importlib.import_module("physicaloptix.path")
+    grid = ox.grids.PixelGrid.pupil(16)
+    stop = elements.SampledOptic(jnp.ones(grid.shape), grid, core.PlaneKind.PUPIL)
+    pupil = SimplePupil(
+        circumscribed_diameter_m=6.0, collecting_area_m2=np.pi * 6.0**2 / 4
+    )
+    coronagraph = interop.PathCoronagraph.from_path(
+        path_module.OpticalPath((path_module.Stage("stop", stop),)),
+        core.Field(jnp.ones(grid.shape, dtype=complex), grid, core.PlaneKind.PUPIL),
+        pupil=pupil,
+        reference_wavelength_nm=600.0,
+        max_separation_lod=2.5,
+        pixel_scale_lod=0.25,
+        n_sky_screens=4,
+        seed=17,
+    )
+    scale = float(pupil.frame(600.0).lod_to_arcsec(600.0))
+    detector = Detector(
+        pixel_scale_arcsec=0.25 * scale,
+        shape=(8, 8),
+        qe_curve=([500, 700], [0.9, 0.9]),
+    )
+    observatory = observatory_for(pupil, (), coronagraph, detector)
+    scene = make_system(separation_arcsec=0.5 * scale, smooth_planet=True)
+    exposure, sampling = _build(scene, observatory, (Band(590.0, 610.0),), order=2)
+    response = cp.aperture_response(
+        _sel(observatory),
+        sampling.quadrature,
+        n_separations=2,
+        n_angles=1,
+        max_separation_arcsec=0.5 * scale,
+    )
+    assert any(label.startswith("coronagraph.") for label, _ in response.built_at)
+    cp.aperture_record(scene, observatory, exposure, response, sampling=sampling)
+    edited = eqx.tree_at(
+        lambda o: o.instruments[0].coronagraph.core_path.stages[-1].op.transmission,
+        observatory,
+        replace_fn=lambda t: (1.0 + 1e-6) * t,
+    )
+    with pytest.raises(StampMismatchError, match="recalibrated"):
+        cp.aperture_record(scene, edited, exposure, response, sampling=sampling)
+    live = cp.aperture_response(
+        _sel(edited),
+        sampling.quadrature,
+        n_separations=2,
+        n_angles=1,
+        max_separation_arcsec=0.5 * scale,
+    )
+    assert live.kernels.shape == response.kernels.shape

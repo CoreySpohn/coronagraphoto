@@ -64,8 +64,8 @@ def build_closure(tmp_path_factory):
         .prepare(rules=(rule,), leakage_rule="aperture_mean")
         .with_scene_operator()
     )
-    base = eqx.tree_at(lambda p: p.coronagraph, make_path(), coro)
-    scale = float(base.primary.frame(550.0).lod_to_arcsec(550.0))
+    base = eqx.tree_at(lambda p: p.instruments[0].coronagraph, make_path(), coro)
+    scale = float(coro.frame.lod_to_arcsec(550.0))
     system = closure_system(scale)
     bands = (Band(500.0, 550.0), Band(550.0, 600.0))
     roll, contrast = 15.0, 1e-9
@@ -89,18 +89,23 @@ def build_closure(tmp_path_factory):
             clock_induced_charge_e_per_pixel_frame=0.005,
             read_noise_e_rms=0.2,
         )
-        path = eqx.tree_at(lambda p: p.detector, base, detector)
+        path = eqx.tree_at(lambda p: p.instruments[0].detector, base, detector)
         # One band with two nodes still exercises chromatic detector yield.
         # Nightly keeps both bands, the field-based rule and the ring spacing.
         observing_bands = bands[:1] if compact else bands
-        sampling = dict(field_lod=0.0, order=2) if compact else {}
+        options = dict(field_lod=0.0, order=2) if compact else {}
         exposure = cp.build_exposure(
-            system, path, observing_bands, time_d=0.0, roll_deg=roll, **sampling
+            observing_bands,
+            epoch=system.epoch,
+            instrument="imager",
+            time_d=0.0,
+            roll_deg=roll,
         )
+        sampling = cp.build_sampling(path, exposure, scene=system, **options)
         if compact:
             response = cp.aperture_response(
-                path,
-                exposure.quadrature,
+                path.select("imager"),
+                sampling.quadrature,
                 rule=rule,
                 n_separations=7,
                 n_angles=8,
@@ -108,14 +113,14 @@ def build_closure(tmp_path_factory):
             )
         else:
             response = closure_response(
-                path, exposure.quadrature, rule, separation, outer_neighbours=1
+                path, sampling.quadrature, rule, separation, outer_neighbours=1
             )
-        record = cp.aperture_record(system, path, exposure, response)
+        record = cp.aperture_record(system, path, exposure, response, sampling=sampling)
         rates = cp.aperture_rates(record, east, north, contrast=contrast, time_d=0.0)
         electrons = detector.electrons(rates)
 
         # The independent reader: the rule's own weights on the expected images.
-        images = cp.expected(system, path, exposure)
+        images = cp.expected(system, path, exposure, sampling=sampling)
         weights = []
         for band in observing_bands:
             frame = coro.at_wavelength(band.center_nm).source_grid.frame
@@ -169,6 +174,7 @@ def build_closure(tmp_path_factory):
             system=system,
             path=path,
             exposure=exposure,
+            sampling=sampling,
             response=response,
             rates=rates,
             electrons=electrons,
@@ -265,12 +271,15 @@ def test_background_closure(closure):
     """
     c = closure
     system, path, exposure = c["system"], c["path"], c["exposure"]
+    sampling = c["sampling"]
     doubled = eqx.tree_at(
         lambda s: s.disk.amplitude.level, system, 2 * system.disk.amplitude.level
     )
-    record = cp.aperture_record(doubled, path, exposure, c["response"])
+    record = cp.aperture_record(
+        doubled, path, exposure, c["response"], sampling=sampling
+    )
     rates = cp.aperture_rates(record, *c["offsets"], contrast=c["contrast"], time_d=0.0)
-    images = cp.expected(doubled, path, exposure)
+    images = cp.expected(doubled, path, exposure, sampling=sampling)
     np.testing.assert_allclose(rates.exozodi / c["rates"].exozodi, 2.0, rtol=1e-12)
     dust_images = jnp.sum(images.exozodi * c["weights"]) / c["image"][0, 3].sum()
     np.testing.assert_allclose(dust_images, 2.0, rtol=1e-12)
@@ -337,7 +346,7 @@ def test_snr_and_exposure_time_closure(closure):
     for the time, doubled for the terms the first order drops.
     """
     c = closure
-    detector = c["path"].detector
+    detector = c["path"].instruments[0].detector
     image, pixels, electrons = c["image"], c["pixels"], c["electrons"]
     pp = ox.PostProcessing(1e-4, 0.01, background_variance_factor=1.0)
     frame_time = 100.0

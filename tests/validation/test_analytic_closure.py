@@ -145,9 +145,9 @@ class Case:
             qe_curve=(jnp.array([500.0, 600.0]), jnp.array([0.9, 0.7])),
             survival_fraction=0.9,
         )
-        path = eqx.tree_at(lambda p: p.detector, base, self.detector)
+        path = eqx.tree_at(lambda p: p.instruments[0].detector, base, self.detector)
         self.path = eqx.tree_at(
-            lambda p: p.warm_emission,
+            lambda p: p.instruments[0].warm_emission,
             path,
             WarmEmission(290.0, 0.5),
             is_leaf=lambda x: x is None,
@@ -158,7 +158,10 @@ class Case:
             dict(order=2, field_lod=0.0) if bands == NARROW_BANDS and not full else {}
         )
         self.exposure = cp.build_exposure(
-            system, self.path, bands, time_d=0.0, roll_deg=ROLL, **sampling
+            bands, epoch=system.epoch, instrument="imager", time_d=0.0, roll_deg=ROLL
+        )
+        self.sampling = cp.build_sampling(
+            self.path, self.exposure, scene=system, **sampling
         )
         if full:
             rings, angles, limit = 33, 16, None
@@ -172,29 +175,35 @@ class Case:
         else:
             rings, angles, limit = 8, 4, BEYOND + pitch
         self.response = cp.aperture_response(
-            self.path,
+            self.path.select("imager"),
             self.quadrature,
             rule=RULE,
             n_separations=rings,
             n_angles=angles,
             max_separation_arcsec=None if limit is None else limit * scale,
         )
-        self.curves = base.coronagraph.curves(RULE)
+        self.curves = base.instruments[0].coronagraph.curves(RULE)
 
     @cached_property
     def record(self):
         """Build the background lattice when a full rate read needs it."""
-        return cp.aperture_record(self.system, self.path, self.exposure, self.response)
+        return cp.aperture_record(
+            self.system,
+            self.path,
+            self.exposure,
+            self.response,
+            sampling=self.sampling,
+        )
 
     @cached_property
     def sources(self):
         """Prepare the analytic reader's source rows once."""
-        return self.system.sources(self.quadrature, self.exposure.resolution, 0.0)
+        return self.system.sources(self.quadrature, self.sampling.resolution, 0.0)
 
     @property
     def quadrature(self):
         """The nodes of the bands, shape (W, Q)."""
-        return self.exposure.quadrature
+        return self.sampling.quadrature
 
     def offset(self, separation_lod, angle_deg):
         """East and north offsets in arcsec of a separation at a position angle."""
@@ -258,7 +267,7 @@ def _read_rates(record, curves, system, path, sources, position):
     analytic = analytic_rates(
         curves,
         system,
-        path,
+        path.select("imager"),
         record.quadrature,
         position.east_arcsec,
         position.north_arcsec,
@@ -287,7 +296,7 @@ def yip_instrument(tmp_path_factory):
             half_width=TABLE_REACH,
         )
         coro = open_yip(path).prepare(rules=(RULE,)).with_scene_operator()
-        return eqx.tree_at(lambda p: p.coronagraph, template, coro)
+        return eqx.tree_at(lambda p: p.instruments[0].coronagraph, template, coro)
 
     yield instrument
     instrument.cache_clear()
@@ -296,7 +305,7 @@ def yip_instrument(tmp_path_factory):
 @pytest.fixture(scope="module")
 def build(yip_instrument):
     """Share each image response and scene record across its readers."""
-    frame = yip_instrument(False).primary.frame(550.0)
+    frame = yip_instrument(False).instruments[0].coronagraph.frame
     scale = float(frame.lod_to_arcsec(550.0))
     system = closure_system(scale)
     narrow_system = eqx.tree_at(lambda s: s.disk, system, None)
@@ -446,7 +455,7 @@ def test_gaussian_aperture_throughput(yip_instrument):
     The point-source reference is the analytic Gaussian enclosed energy:
     0.118011 measured against 0.118041 ideal, within 5e-4 relative.
     """
-    curves = yip_instrument(False).coronagraph.curves(RULE)
+    curves = yip_instrument(False).instruments[0].coronagraph.curves(RULE)
     tau = float(np.asarray(curves.throughput)[0])
     ideal = YIP_INTEGRAL * (1 - np.exp(-0.5 * (RULE.radius_lod / YIP_SIGMA) ** 2))
     assert abs(tau / ideal - 1) < 5e-4

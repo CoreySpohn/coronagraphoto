@@ -9,8 +9,8 @@ too slow, so the answer is read from tables that the image path fills once.
 
 | Step | Function | When | Cost here |
 |---|---|---|---|
-| Response | `aperture_response(instrument, quadrature, rule=...)` | once per instrument and band set | seconds to minutes |
-| Record | `aperture_record(scene, instrument, exposure, response)` | once per target, instrument and band set | one background render |
+| Response | `aperture_response(selected, quadrature, rule=...)` | once per instrument and band set | seconds to minutes |
+| Record | `aperture_record(scene, observatory, exposure, response, *, sampling)` | once per target, instrument and band set | one background render |
 | Read | `aperture_rates(record, east_arcsec, north_arcsec, *, contrast=None, planet=None, time_d=...)` | once per planet and observation time | a few gathers |
 | Scene read | `scene_aperture_rates(record, scene, time_d, roll_deg=...)` | once per scene and set of times | a vmap of the read |
 
@@ -27,15 +27,37 @@ aperture at every position of a half-pixel lattice, by one convolution. The
 planet table, `planet_response`, is the response throughput times the effective
 collecting area, per unit planet photon flux density; `record.star` stores the
 node-effective stellar photon flux density at build separately. The collecting area, optical throughput and the
-instrument's `flux_scale` come from one product, `instrument.effective_area_m2`,
-so a record carries the scale of the instrument it was built for. The scene's
+instrument's `flux_scale` come from one product, `selected.effective_area_m2`
+of the selected instrument (the telescope train included), so a record carries
+the scale of the instrument it was built for. The scene's
 own `flux_scale` leaves behave differently: the star's and the disk's are baked
 into the tables, so changing one makes the record stale, while the local
 zodi's is applied at each read and a planet's is carried by the photon flux
 density passed to the read (the scene's `Sources.planets`). The record
-refuses a response built for another instrument: another coronagraph, detector
-pixel scale, band set or set of wavelength nodes raises a `ValueError`, so a
-coronagraph swapped with `equinox.tree_at` needs a new response.
+refuses a response built for other hardware: another coronagraph, detector
+pixel scale, pupil, precision, band layout or set of wavelength nodes raises
+a `hwoutils.provenance.StampMismatchError` that names the fact, so a coronagraph
+swapped with `equinox.tree_at` needs a new response. The refusal also fires
+under `jax.jit`, where only the build stamps can be compared. A response whose
+stamps cannot decide (one built by hand) is admitted, and the table values are
+compared whenever the inputs are concrete. Under a trace the values are not
+compared, so call `check_response(response, selected, quadrature)` on the host
+first.
+
+```python notest
+selected = observatory.select("imager")
+response = cp.aperture_response(selected, sampling.quadrature)
+other = cp.aperture_response(observatory.select("spectrograph"), sampling.quadrature)
+cp.aperture_record(scene, observatory, exposure, other, sampling=sampling)
+# StampMismatchError: aperture response has incompatible build stamps: instrument
+```
+
+The record remembers what it was built from. `record.reads` lists
+owner-qualified paths (`scene.star`, `observatory.instruments[imager].coronagraph`,
+`exposure.time_d`, `sampling.quadrature.nodes_nm`), `record.built_at` holds the
+build facts including the producer version, and `record.build_time_d` counts
+days from `record.epoch`. A scene on another epoch is refused by
+`scene_aperture_rates`.
 
 **Read.** A planet is an east and a north offset from the star and a photon flux
 density, observed at a time. The planet response is read linearly between rings
@@ -148,9 +170,10 @@ import optixstuff as ox
 import coronagraphoto as cp
 
 post_processing = ox.PostProcessing(1 / 30, 1 / 30, background_variance_factor=2.0)
-exposure = cp.build_exposure(scene, instrument, bands, time_d=0.0)
-response = cp.aperture_response(instrument, exposure.quadrature)
-record = cp.aperture_record(scene, instrument, exposure, response)
+exposure = cp.build_exposure(bands, epoch=scene.epoch, instrument="imager", time_d=0.0)
+sampling = cp.build_sampling(observatory, exposure, scene=scene)
+response = cp.aperture_response(observatory.select("imager"), sampling.quadrature)
+record = cp.aperture_record(scene, observatory, exposure, response, sampling=sampling)
 
 
 def time_to_snr(east_arcsec, north_arcsec, contrast, time_d):
@@ -159,7 +182,7 @@ def time_to_snr(east_arcsec, north_arcsec, contrast, time_d):
     )
     return ox.exposure_time(
         rates,
-        instrument.detector,
+        observatory.select("imager").detector,
         7.0,
         frame_time_s=100.0,
         post_processing=post_processing,
@@ -193,7 +216,8 @@ frame_time_s=100.0, post_processing=...)` returns one time per band, planet and 
   coronagraph has no response model. S/N and exposure time are then NaN and
   `valid` is False.
 - The record holds one build time for its backgrounds and contrast reference: the star's flux, the
-  disk and any speckle realization are those of `exposure.time_d`.
+  disk and any speckle realization are those of `exposure.time_d`, held as
+  `record.build_time_d` on the scene's epoch.
 - The star's sky position is the one the scene held when the record was
   built; a scene edited afterwards needs a new record.
 - Thermal is the record's per-pixel warm-telescope rate times `n_pix`, as in the
