@@ -18,12 +18,12 @@ classifiers = [
 ]
 dependencies = [
   "equinox>=0.13.2",
-  "hwoutils[jax]>=3.0.0",  # unreleased: next release
+  "hwoutils[jax]>=3.0.0",
   "jax>=0.8.1",
   "jaxtyping>=0.3.3",
   "numpy>=2.1.2",
   "optixstuff>=7.0.0",
-  "orbix>=6.0.0",  # unreleased: next release
+  "orbix>=6.0.0",
   "skyscapes>=6.0.0",
 ]
 [project.optional-dependencies]
@@ -38,7 +38,7 @@ docs = [
 ]
 test = [
   "astropy>=6.0.0",
-  "jaxedith>=4.0.0",  # unreleased: next release, see .github/sibling-pins.txt
+  "jaxedith>=4.0.0",
   "ineedvalidation>=1.1.0",
   "pytest>=7.3.2",
   "hypothesis>=6.79.1",
@@ -49,7 +49,7 @@ test = [
   "pytest-fail-slow>=0.1.0",
   "lod_unit>=1.8.0",
   "packaging>=23.1",
-  "yippy>=4.0.0",  # unreleased: next release
+  "yippy>=4.0.0",
   "zodi>=2.0.0",
 ]
 
